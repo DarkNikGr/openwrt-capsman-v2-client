@@ -275,7 +275,9 @@ static void apply_vaps(void)
     char *commit[] = { "uci", "-q", "commit", "wireless", NULL };
     run_argv(commit);
     for (int i = 0; i < ndev; i++) {
-        char json[64];
+        /* devs[] entries are 32-byte UCI device names; the larger buffer
+           keeps -Wformat-truncation quiet about the %s bound. */
+        char json[288];
         snprintf(json, sizeof(json), "{\"device\":\"%s\"}", devs[i]);
         char *av[] = { "ubus", "call", "network.wireless", "reconf",
                        json, NULL };

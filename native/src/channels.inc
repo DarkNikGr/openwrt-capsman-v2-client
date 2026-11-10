@@ -68,7 +68,10 @@ static int vapid_for(int phy, const uint8_t mac[6])
     return 0;
 }
 
-static void vapid_release(int phy, const uint8_t mac[6])
+/* Paired with vapid_alloc(); the 0x600c destroy path (open item: VAP
+   lifecycle) is expected to call it, so keep it even though the handler does
+   not exist yet. */
+static void __attribute__((unused)) vapid_release(int phy, const uint8_t mac[6])
 {
     int r = phy % MAX_RADIOS;
     for (int i = 0; i < 16; i++)

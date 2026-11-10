@@ -113,6 +113,9 @@
 
 #define MAX_RADIOS   8
 
+/* Release version, reported by --version and recorded in the release notes. */
+#define CAPAGENT_VERSION "0.4.0"
+
 static uint64_t g_sta_ident;   /* last manager station-level ident */
 static struct extmux *g_extmux; /* W8 multi-VAP ext-auth relay, or NULL */
 static int g_phy_map[MAX_RADIOS] = { 0,1,2,3,4,5,6,7 };

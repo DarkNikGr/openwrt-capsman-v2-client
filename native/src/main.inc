@@ -444,7 +444,8 @@ static void usage(const char *p)
         "  --m1-retry MS                M1 retransmit interval (default 3000)\n"
         "  --lab-ap IFACE               lab only: bring up a minimal AP on IFACE\n"
         "  --lab-ssid SSID              lab SSID (default T14-CAP)\n"
-        "  --lab-chan N                 lab channel (default 1)\n",
+        "  --lab-chan N                 lab channel (default 1)\n"
+        "  --version                    print the version and exit\n",
         p);
 }
 
@@ -478,6 +479,7 @@ int main(int argc, char **argv)
            OPT_PHYS, OPT_DP_BRIDGE, OPT_VAP_MTU, OPT_BCAST, OPT_MGMT_RELAY,
            OPT_MGMT_SOURCE, OPT_EXTAUTH, OPT_VAPAUTO, OPT_NOVAPAUTO,
            OPT_EXTCTRL, OPT_STATE, OPT_FOURWAY, OPT_M1RETRY };
+
     static struct option opts[] = {
         {"manager", required_argument, 0, 'm'},
         {"port", required_argument, 0, 'p'},
@@ -524,10 +526,11 @@ int main(int argc, char **argv)
         {"lab-ssid", required_argument, 0, OPT_LAB_SSID},
         {"lab-chan", required_argument, 0, OPT_LAB_CHAN},
         {"help", no_argument, 0, 'h'},
+        {"version", no_argument, 0, 'V'},
         {0,0,0,0}
     };
     int o;
-    while ((o = getopt_long(argc, argv, "m:p:c:k:i:a:h", opts, NULL)) != -1) {
+    while ((o = getopt_long(argc, argv, "m:p:c:k:i:a:hV", opts, NULL)) != -1) {
         switch (o) {
         case 'm': c.manager = optarg; break;
         case 'p': c.port = optarg; break;
@@ -599,6 +602,9 @@ int main(int argc, char **argv)
         case OPT_LAB_AP: c.lab_iface = optarg; break;
         case OPT_LAB_SSID: c.lab_ssid = optarg; break;
         case OPT_LAB_CHAN: c.lab_chan = atoi(optarg); break;
+        case 'V':
+            printf("capagent %s\n", CAPAGENT_VERSION);
+            return 0;
         default: usage(argv[0]); return 1;
         }
     }

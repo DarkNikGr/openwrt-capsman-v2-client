@@ -27,3 +27,6 @@ __pycache__/
 dist/
 build/
 out/
+
+# per-arch agent binaries built in-tree by native/Makefile
+native/capagent-aarch64
