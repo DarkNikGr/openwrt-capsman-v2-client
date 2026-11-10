@@ -49,9 +49,11 @@ capagent-mipsel: $(SRCS) $(HDRS)
 	@file $@
 	@ls -lh $@
 
-# AES-CCM known-answer tests (RFC 3610 + the c2 datachan header).
+# AES-CCM known-answer tests (RFC 3610 + the c2 datachan header) and the
+# W33 ownership-policy checks, both under qemu-mipsel.
 check: capagent-mipsel
 	$(QEMU) ./capagent-mipsel --crypto-selftest
+	$(QEMU) ./capagent-mipsel --selftest-policy
 
 clean:
 	rm -f capagent-mipsel

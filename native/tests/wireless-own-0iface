@@ -1,0 +1,20 @@
+# W33 fixture: manager-only.  Zero wifi-iface sections, so capagent owns the
+# radios: it creates the AP netdevs and starts hostapd on 0x6016.
+#
+#   capagent --wireless-config native/tests/wireless-own-0iface --check-wireless
+
+config wifi-device 'radio0'
+	option type 'mac80211'
+	option band '2g'
+	option channel '6'
+	option htmode 'HT20'
+	option country 'GR'
+	option disabled '0'
+
+config wifi-device 'radio1'
+	option type 'mac80211'
+	option band '5g'
+	option channel '36'
+	option htmode 'VHT80'
+	option country 'GR'
+	option disabled '0'

@@ -76,6 +76,19 @@ static void vapid_release(int phy, const uint8_t mac[6])
             g_vmap[r][i].used = 0;
 }
 
+/* W33: drop only the allocations whose netdev is really gone.  After a
+ * manager reconnect the same MACs come back and must keep their vapid
+ * (and therefore the phy<N>-ap<M> name and the 0xd00b ifindex); a freed
+ * slot is what the next create needs. */
+static void vapid_gc(void)
+{
+    for (int r = 0; r < MAX_RADIOS; r++)
+        for (int i = 0; i < 16; i++)
+            if (g_vmap[r][i].used &&
+                ifindex_by_mac_ap(g_vmap[r][i].mac, r, NULL, 0) <= 0)
+                g_vmap[r][i].used = 0;
+}
+
 static void createvap_response(mbedtls_ssl_context *ssl, const uint8_t hdr[10],
                                int phy, int vap, const struct cfg *c,
                                const uint8_t *req, uint16_t reqlen)
@@ -98,9 +111,19 @@ static void createvap_response(mbedtls_ssl_context *ssl, const uint8_t hdr[10],
             vlan_wid_set(phy, rd16(vv), vapid);
     }
     snprintf(ifname, sizeof(ifname), "phy%d-ap%d", phy, vapid);
-    int ifindex = have_mac ? ifindex_by_mac(mac, macname, sizeof(macname)) : 0;
+    int ifindex = have_mac
+                  ? ifindex_by_mac_ap(mac, phy, macname,
+                                      sizeof(macname))
+                  : 0;
     if (ifindex <= 0) {
         ifindex = read_sysfs_int(ifname, "ifindex");
+        if (ifindex > 0) {
+            int t = nl_get_iftype(ifindex);
+            if (t != NL80211_IFTYPE_AP && t != NL80211_IFTYPE_AP_VLAN) {
+                /* a monitor VIF called phyN-apM is not a BSS */
+                ifindex = 0;
+            }
+        }
         snprintf(macname, sizeof(macname), "%s", ifname);
     } else if (macname[0]) {
         snprintf(ifname, sizeof(ifname), "%s", macname);
@@ -122,10 +145,22 @@ static void createvap_response(mbedtls_ssl_context *ssl, const uint8_t hdr[10],
         ifindex = read_sysfs_int(ifname, "ifindex");
     }
 
-    /* W14: the manager treats the reply's ifindex as authoritative, so the
-       netdev must exist before 0xd00b is sent. */
-    if (ifindex <= 0 && ifname[0])
+    /* W14: the manager treats the reply's ifindex as authoritative, so an
+       existing netdev must be found before 0xd00b is sent.  W33: only
+       capagent may create one, and only when no legacy UCI owns the radios.
+       In legacy mode a missing netdev is reported as ifindex 0; we never
+       create a second BSS behind netifd's back. */
+    int created = 0;
+    if (ifindex <= 0 && ifname[0] && wl_own()) {
         ifindex = vap_netdev_create(phy, ifname, mac);
+        created = ifindex > 0;
+    }
+    if (ifindex <= 0 && wl_legacy()) {
+        printf("vap: phy=%d vapid=%d mac=%02x:%02x:%02x:%02x:%02x:%02x has no "
+               "netdev; legacy UCI owns the radios, not creating\n",
+               phy, vapid, mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
+        fflush(stdout);
+    }
 
     /* P0: bind the VAP to its netdev, VLAN and channel. */
     {
@@ -138,25 +173,39 @@ static void createvap_response(mbedtls_ssl_context *ssl, const uint8_t hdr[10],
         if (find_el(req, reqlen, 0x7d, &vv, &vl) && vl == 2)
             vp->vlan = rd16(vv);
         vp->freq = 0;
-        {   /* 0x0a channel container is authoritative (T13). */
+        {   /* 0x0a channel container is authoritative (T13).  W33: read the
+               canonical port, not the (always 0) request vapid alias. */
             uint32_t vf = 0;
-            if (vchan_get((phy << 8) | vap, &vf, NULL, NULL) && vf)
+            if (vchan_get((phy << 8) | vapid, &vf, NULL, NULL) && vf)
                 vp->freq = vf;
+        }
+        if (!vp->freq) {
+            /* Never invent 2437/5180 for a netdev that already exists: its
+               own channel is the only value hostapd can adopt. */
+            unsigned f = 0, w = 0;
+            if (ifindex > 0) iface_chan(ifname, &f, &w);
+            vp->freq = f;
         }
         if (!vp->freq) vp->freq = phy_freq_hint(phy);
         if (!vp->freq) vp->freq = (phy & 1) ? 5180u : 2437u;
         curfreq = vp->freq;
         memcpy(vp->bssid, mac, 6);
         vp->ifindex = ifindex;
+        if (vp->ifname[0] && strcmp(vp->ifname, ifname)) {
+            if (vp->extfd >= 0) { close(vp->extfd); vp->extfd = -1; }
+        }
         snprintf(vp->ifname, sizeof(vp->ifname), "%s", ifname);
         vp->mode = 0;                   /* ACCESS (default) */
         vp->napvlan = 0;
-        vp->l2fd = -1;
-        vp->extfd = -1;
+        if (created) vp->we_created = 1;
         vchan_set((phy << 8) | vapid, vp->freq, 1,
                   band_code_for_freq(vp->freq));
-        vchan_set((phy << 8) | vap, vp->freq, 1,
-                  band_code_for_freq(vp->freq));
+        /* The manager sends vapid=0 in every 0x500b, so only alias the
+           request port when it really is this VAP; otherwise VAP0's slot
+           would be overwritten by every later create. */
+        if (vap_port_alias_ok(vap, vapid))
+            vchan_set((phy << 8) | vap, vp->freq, 1,
+                      band_code_for_freq(vp->freq));
         printf("vap: rid=%d wid=%d vlan=%u freq=%u bssid=%02x:%02x:%02x:%02x:"
                "%02x:%02x ifindex=%d ifname=%s\n", phy, vapid, vp->vlan,
                vp->freq, mac[0], mac[1], mac[2], mac[3], mac[4], mac[5],
@@ -171,8 +220,9 @@ static void createvap_response(mbedtls_ssl_context *ssl, const uint8_t hdr[10],
         /* A genuine CAP sends nothing when the data channel is created OK;
            0xD00B is only the failure path. */
         if (ifindex > 0) {
-            pmap_set(phy << 8 | vap, ifindex, mac);
             pmap_set(phy << 8 | vapid, ifindex, mac);
+            if (vap_port_alias_ok(vap, vapid))
+                pmap_set(phy << 8 | vap, ifindex, mac);
         }
         printf("0xd00b phy=%d ifname=%s (no-ack: success reply suppressed)\n",
                phy, ifname);
@@ -180,8 +230,9 @@ static void createvap_response(mbedtls_ssl_context *ssl, const uint8_t hdr[10],
         return;
     }
     if (ifindex > 0) {
-        pmap_set(phy << 8 | vap, ifindex, mac);
         pmap_set(phy << 8 | vapid, ifindex, mac);
+        if (vap_port_alias_ok(vap, vapid))
+            pmap_set(phy << 8 | vap, ifindex, mac);
     }
 
     n += put_el(body+n, 0x08, mac, 6);

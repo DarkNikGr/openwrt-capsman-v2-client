@@ -14,6 +14,11 @@ static int g_nl_cmd_fd = -1;       /* synchronous commands            */
 static int g_nl_evt_fd = -1;       /* mgmt + control-port events      */
 static uint32_t g_nl_seq;
 
+/* Defined in policy.inc (included after this file): deterministic AP-only
+   MAC -> netdev lookup. */
+static int ifindex_by_mac_ap(const uint8_t mac[6], int want_phy,
+                             char *name, size_t n);
+
 struct nl_buf { struct nlmsghdr *nlh; uint8_t buf[NL_MAX_MSG]; };
 
 static void nlb_init(struct nl_buf *m, uint16_t cmd, uint16_t flags)
@@ -258,8 +263,7 @@ static int nl_resolve_group(int fd, const char *name)
 }
 
 /* Current nl80211 iftype of a netdev (AP_VLAN detection for the bridge). */
-static int nl_get_iftype(int ifindex)
-{
+static int nl_get_iftype(int ifindex){
     if (ifindex <= 0 || nl_cmd_open() != 0) return -1;
     struct nl_buf m;
     struct sockaddr_nl sa;
@@ -384,20 +388,50 @@ static int pmap_get(int port, int *ifindex, uint8_t mac[6])
     return 0;
 }
 
-/* Resolve (phy<<8)|vap to an ifindex, falling back to sysfs. */
+static void pmap_del(int port)
+{
+    for (int i = 0; i < 128; i++)
+        if (g_pmap[i].used && g_pmap[i].port == port) {
+            g_pmap[i].used = 0;
+            return;
+        }
+}
+
+/* Resolve (phy<<8)|vap to an ifindex, falling back to sysfs.
+ *
+ * W33: the cached slot is validated before use.  A manager reconnect (or a
+ * hostapd restart that recreates the netdev) leaves the old ifindex in the
+ * table; installing a key on it fails with -ENODEV/-ENETDOWN, and if the
+ * number was recycled it can point at an unrelated netdev.  The cached
+ * ifindex is only trusted while if_indextoname() still resolves it to the
+ * same MAC; otherwise the entry is dropped and re-resolved by name/MAC. */
 static int vap_ifindex(int port, uint8_t mac[6])
 {
     int ifindex = 0;
-    if (pmap_get(port, &ifindex, mac) && ifindex > 0)
-        return ifindex;
+    uint8_t cmac[6] = {0};
+    char nm[IF_NAMESIZE];
+
+    if (pmap_get(port, &ifindex, cmac) && ifindex > 0 &&
+        if_indextoname((unsigned)ifindex, nm)) {
+        uint8_t now[6];
+        if (read_sysfs_mac(nm, now) == 0 && !memcmp(now, cmac, 6)) {
+            if (mac) memcpy(mac, cmac, 6);
+            return ifindex;
+        }
+        printf("pmap: port 0x%04x ifindex=%d (%s) stale, re-resolving\n",
+               port, ifindex, nm);
+        fflush(stdout);
+        pmap_del(port);
+    } else if (ifindex > 0) {
+        pmap_del(port);
+    }
+
     char ifname[32];
     snprintf(ifname, sizeof(ifname), "phy%d-ap%d", port >> 8, port & 0xff);
     ifindex = read_sysfs_int(ifname, "ifindex");
     if (ifindex <= 0) {
-        char alt[32];
-        snprintf(alt, sizeof(alt), "wlan%d", (port >> 8) * 2 + (port & 1));
-        ifindex = read_sysfs_int(alt, "ifindex");
-        if (ifindex > 0) snprintf(ifname, sizeof(ifname), "%s", alt);
+        /* Only a real AP netdev may stand in for the VAP. */
+        ifindex = ifindex_by_mac_ap(cmac, port >> 8, ifname, sizeof(ifname));
     }
     if (ifindex > 0) {
         if (mac) read_sysfs_mac(ifname, mac);

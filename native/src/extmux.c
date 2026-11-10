@@ -272,8 +272,7 @@ int extmux_add_vap(struct extmux *m, uint16_t port, const char *ifname,
 }
 
 int extmux_del_vap(struct extmux *m, uint16_t port)
-{
-    struct extmux_vap *v = extmux_vap_by_port(m, port);
+{    struct extmux_vap *v = extmux_vap_by_port(m, port);
     char path[256];
 
     if (!v)
@@ -292,6 +291,19 @@ int extmux_del_vap(struct extmux *m, uint16_t port)
     v->used = 0;
     if (m->st.vaps)
         m->st.vaps--;
+    return 0;
+}
+
+int extmux_set_ifindex(struct extmux *m, uint16_t port, int ifindex)
+{
+    struct extmux_vap *v;
+
+    if (!m || ifindex <= 0) return -1;
+    v = extmux_vap_by_port(m, port);
+    if (!v) return -1;
+    if (v->ifindex == ifindex) return 0;
+    mlog(m, "extmux: VAP %s ifindex %d -> %d", v->ifname, v->ifindex, ifindex);
+    v->ifindex = ifindex;
     return 0;
 }
 

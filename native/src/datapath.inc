@@ -33,6 +33,10 @@ struct vap {
     int mode;                   /* 0 = ACCESS, 1 = TAG */
     int l2fd;                   /* AF_PACKET RX on the VAP */
     int extfd;                  /* hostapd external-RSN dgram */
+    /* W33 ownership bookkeeping.  Only a netdev we created may ever be
+       deleted, and only a hostapd we started may ever be stopped. */
+    int we_created;
+    int ap_started;
 };
 static struct vap g_vap[MAX_RADIOS][16];
 
@@ -108,6 +112,15 @@ static int vchan_get(int port, uint32_t *freq, uint8_t *width, uint8_t *band)
     return 0;
 }
 
+static void vchan_del(int port)
+{
+    for (int i = 0; i < 128; i++)
+        if (g_vchan[i].used && g_vchan[i].port == (int)port) {
+            g_vchan[i].used = 0;
+            return;
+        }
+}
+
 /* 0x0a { 0x0b u32 freq, 0x0c u8 width, 0x10 u8 band } from 0x500b/0x6016. */
 static void vchan_from_tlv(int port, const uint8_t *v, size_t len)
 {
@@ -127,27 +140,10 @@ static void vchan_from_tlv(int port, const uint8_t *v, size_t len)
 }
 
 /* MAC-first: the manager may address a VAP by a MAC that is not the
-   netdev's own MAC.  The pilot UCI pins bssid=, so name and MAC agree. */
-static int ifindex_by_mac(const uint8_t mac[6], char *name, size_t n)
-{
-    DIR *d = opendir("/sys/class/net");
-    struct dirent *de;
-
-    if (!d) return 0;
-    while ((de = readdir(d)) != NULL) {
-        uint8_t m[6];
-        if (de->d_name[0] == '.') continue;
-        if (read_sysfs_mac(de->d_name, m) != 0) continue;
-        if (memcmp(m, mac, 6) != 0) continue;
-        int idx = read_sysfs_int(de->d_name, "ifindex");
-        if (idx > 0 && name)
-            snprintf(name, n, "%.*s", (int)n - 1, de->d_name);
-        closedir(d);
-        return idx;
-    }
-    closedir(d);
-    return 0;
-}
+   netdev's own MAC.  W33 removed the old "first match in /sys/class/net"
+   version (readdir order made the same MAC resolve to phy1-ap0 or to the
+   cm1 monitor VIF from one session to the next); use ifindex_by_mac_ap()
+   from policy.inc, which filters on iftype and phy. */
 
 /* ---- station map: dst MAC -> egress ifindex (T2 §4) ------------------ */
 struct sta_map { int used; uint8_t mac[6]; int ifindex; };
@@ -321,6 +317,9 @@ static void dp_scan_apvlans(struct vap *v)
 
 static void dp_vap_open(struct vap *v)
 {
+    /* W33: the bridge client rewrites the VAP's MTU and takes part in the
+       data path; a legacy BSS belongs to netifd/wpad, so stay out of it. */
+    if (wl_legacy()) return;
     if (!g_dp_bridge || !v->used || v->ifindex <= 0) return;
     if (v->l2fd < 0) {
         if (dp_add_fd(v->ifindex, v) == 0) v->l2fd = v->ifindex;

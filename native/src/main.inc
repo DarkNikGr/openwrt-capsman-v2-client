@@ -4,7 +4,13 @@
 /* W14: every connection starts from a clean session.  A manager reboot or a
  * CAP reconnect must not keep the previous vapid/ifindex/key map, otherwise
  * the manager's fresh 0x500b/0x6016 sequence lands on stale state.  Kernel
- * objects (netdevs, hostapd, keys) are untouched; they are re-adopted. */
+ * objects (netdevs, hostapd, keys) are untouched; they are re-adopted.
+ *
+ * W33: the *netdev identity* is kernel state, not session state.  Wiping it
+ * on every reconnect made the next 0x500b re-resolve VAP0 by MAC — and the
+ * only lookup available was "first /sys/class/net entry with this MAC",
+ * which is the monitor VIF (same radio MAC) as often as it is the AP.  Keep
+ * the identity while the netdev exists and drop only what is really gone. */
 static void cap_reset_session(void)
 {
     if (g_extmux) {
@@ -12,19 +18,25 @@ static void cap_reset_session(void)
         g_extmux = NULL;
     }
     for (int r = 0; r < MAX_RADIOS; r++)
-        for (int w = 0; w < 16; w++)
-            if (g_vap[r][w].used && g_vap[r][w].extfd >= 0)
-                close(g_vap[r][w].extfd);
-    memset(g_vap, 0, sizeof(g_vap));
-    for (int r = 0; r < MAX_RADIOS; r++)
         for (int w = 0; w < 16; w++) {
-            g_vap[r][w].extfd = -1;
-            g_vap[r][w].l2fd = -1;
+            struct vap *vp = &g_vap[r][w];
+            if (vp->extfd >= 0) close(vp->extfd);
+            vp->extfd = -1;
+            vp->l2fd = -1;
+            if (!vp->used) continue;
+            if (vp->ifname[0] && if_nametoindex(vp->ifname) > 0) {
+                vp->ifindex = (int)if_nametoindex(vp->ifname);
+                /* A hostapd that survived the reconnect stays ours. */
+                if (vap_hostapd_running(vp->ifname)) vp->ap_started = 1;
+                continue;
+            }
+            memset(vp, 0, sizeof(*vp));
+            vp->extfd = -1;
+            vp->l2fd = -1;
         }
-    memset(g_pmap, 0, sizeof(g_pmap));
-    memset(g_vchan, 0, sizeof(g_vchan));
-    memset(g_vmap, 0, sizeof(g_vmap));
     g_sta_ident = 0;
+    g_msrc = -1;                 /* re-arm the management relay source */
+    vapid_gc();                  /* keep MAC->vapid while the netdev lives */
 }
 
 static int run_once(struct cfg *c)
@@ -60,7 +72,10 @@ static int run_once(struct cfg *c)
     mlme_init(c);
 
     /* W14: discover on every attempt.  At boot S95 runs ~130 s before the
-     * WAN lease, so a single discovery can only cache an empty address. */
+     * WAN lease, so a single discovery can only cache an empty address.
+     * W33: re-read the ownership policy first; the whole session's
+     * netdev/hostapd behaviour depends on it. */
+    wl_classify(c);
     cap_reset_session();
     c->manager = choose_manager(c, mgr, sizeof(mgr));
     if (!c->manager || !*c->manager) {
@@ -259,10 +274,17 @@ static int run_once(struct cfg *c)
             fflush(stdout);
             if (phy >= 0 && phy < c->nradios)
                 createvap_response(&ssl, hdr + 2, phy, vap, c, body, len);
-            dc_handle_create(&dc, c, &fd, port, body, len);
+            if (wl_legacy()) {
+                printf("0x500b: legacy UCI owns the BSS, datachan not armed\n");
+                fflush(stdout);
+            } else {
+                dc_handle_create(&dc, c, &fd, port, body, len);
+            }
         } else if (type == TYPE_DESTROY) {
-            printf("RX 0x600c destroy\n");
-            fflush(stdout);
+            /* W33: a destroy must release our bookkeeping (the 16-slot
+               vapid map wedged the second create cycle) but must never
+               touch a netdev/hostapd that netifd owns. */
+            vap_destroy(port, c);
             send_hdr_msg(&ssl, TYPE_DESTROY_RESP, hdr + 2, NULL, 0);
         } else if (type == TYPE_JOIN_RESP) {
             dump_raw("joinresp", type, port, body, len);
@@ -446,6 +468,13 @@ static void usage(const char *p)
         "  --state-file FILE            key-free extmux restart journal\n"
         "  --fourway-timeout MS         CAP-side 4-way deadline (default 10000)\n"
         "  --m1-retry MS                M1 retransmit interval (default 3000)\n"
+        "  --wireless-config FILE       UCI wireless file to classify (default\n"
+        "                               /etc/config/wireless)\n"
+        "  --wireless-owner auto|own|legacy\n"
+        "                               override the ownership policy (tests only)\n"
+        "  --check-wireless             print the ownership decision and exit\n"
+        "  --no-vap-teardown            keep our netdev/hostapd on 0x600c\n"
+        "  --selftest-policy            run the ownership-policy checks and exit\n"
         "  --lab-ap IFACE               lab only: bring up a minimal AP on IFACE\n"
         "  --lab-ssid SSID              lab SSID (default T14-CAP)\n"
         "  --lab-chan N                 lab channel (default 1)\n"
@@ -474,6 +503,9 @@ int main(int argc, char **argv)
     c.fourway_ms = 10000;
     c.m1_retry_ms = 3000;
     c.mlme_port = 0x0000;       /* 2.4 GHz master by default */
+    c.wireless_conf = "/etc/config/wireless";
+    c.wireless_mode = -1;
+    c.vap_teardown = 1;
     parse_ifnames(&c, "phy0-ap0,phy1-ap0");
     parse_macs(&c, "auto");
 
@@ -485,7 +517,9 @@ int main(int argc, char **argv)
            OPT_PHYS, OPT_DP_BRIDGE, OPT_VAP_MTU, OPT_BCAST, OPT_MGMT_RELAY,
            OPT_MGMT_SOURCE, OPT_EXTAUTH, OPT_COUNTRY, OPT_VAPAUTO, OPT_NOVAPAUTO,
            OPT_EXTCTRL, OPT_STATE, OPT_FOURWAY, OPT_M1RETRY,
-           OPT_MLME, OPT_MLME_PORT };
+           OPT_MLME, OPT_MLME_PORT,
+           OPT_WLCONF, OPT_WLOWNER, OPT_NOTEARDOWN, OPT_POLICYTEST,
+           OPT_CHECKWL };
     static struct option opts[] = {
         {"manager", required_argument, 0, 'm'},
         {"port", required_argument, 0, 'p'},
@@ -527,6 +561,11 @@ int main(int argc, char **argv)
         {"state-file", required_argument, 0, OPT_STATE},
         {"fourway-timeout", required_argument, 0, OPT_FOURWAY},
         {"m1-retry", required_argument, 0, OPT_M1RETRY},
+        {"wireless-config", required_argument, 0, OPT_WLCONF},
+        {"wireless-owner", required_argument, 0, OPT_WLOWNER},
+        {"no-vap-teardown", no_argument, 0, OPT_NOTEARDOWN},
+        {"selftest-policy", no_argument, 0, OPT_POLICYTEST},
+        {"check-wireless", no_argument, 0, OPT_CHECKWL},
         {"vap-auto", no_argument, 0, OPT_VAPAUTO},
         {"no-vap-auto", no_argument, 0, OPT_NOVAPAUTO},
         {"lab-ap", required_argument, 0, OPT_LAB_AP},
@@ -538,6 +577,7 @@ int main(int argc, char **argv)
         {0,0,0,0}
     };
     int o;
+    int check_wireless = 0;
     while ((o = getopt_long(argc, argv, "m:p:c:k:i:a:h", opts, NULL)) != -1) {
         switch (o) {
         case 'm': c.manager = optarg; break;
@@ -595,6 +635,16 @@ int main(int argc, char **argv)
         case OPT_MLME_PORT:
             c.mlme_port = (int)strtol(optarg, NULL, 0);
             break;
+        case OPT_WLCONF: c.wireless_conf = optarg; break;
+        case OPT_WLOWNER:
+            if (!strcmp(optarg, "auto")) c.wireless_mode = -1;
+            else if (!strcmp(optarg, "own")) c.wireless_mode = 0;
+            else if (!strcmp(optarg, "legacy")) c.wireless_mode = 1;
+            else { usage(argv[0]); return 1; }
+            break;
+        case OPT_NOTEARDOWN: c.vap_teardown = 0; break;
+        case OPT_POLICYTEST: return wl_selftest();
+        case OPT_CHECKWL: check_wireless = 1; break;
         case OPT_PHYS: {
             char *tmp = strdup(optarg), *save = NULL, *tok;
             int i = 0;
@@ -627,6 +677,7 @@ int main(int argc, char **argv)
     if (!c.eapol_leg) c.eapol_leg = 1;
     if (!c.lab_ssid) c.lab_ssid = "T14-CAP";
     if (!c.lab_chan) c.lab_chan = 1;
+    if (check_wireless) { wl_classify(&c); return 0; }
     if (c.crypto_selftest) return dc_selftest();
     if (c.nradios == 0) resolve_phy_macs(&c);
     if (c.nradios == 0) {

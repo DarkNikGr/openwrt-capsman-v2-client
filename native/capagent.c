@@ -170,6 +170,10 @@ struct cfg {
     int m1_retry_ms;            /* M1 retransmit interval (W8) */
     const char *manager_spec;   /* --manager as given, before discovery */
     int mgmt_source;            /* 0 auto, 1 nl80211, 2 monitor, 3 off */
+    /* W33 ownership policy: one switch for every netdev/hostapd/UCI effect. */
+    const char *wireless_conf;  /* --wireless-config (default /etc/config/wireless) */
+    int wireless_mode;          /* -1 auto, 0 own, 1 legacy */
+    int vap_teardown;           /* 0 = leave our netdev/hostapd on 0x600c */
     /* Lab/hwsim harness: bring up a minimal AP and drive the MLME locally. */
     const char *lab_iface;
     const char *lab_ssid;
@@ -189,6 +193,7 @@ static void put32(uint8_t *p, uint32_t v) { p[0]=v>>24; p[1]=v>>16; p[2]=v>>8; p
 /* ---- modules (included in dependency order) ------------------------- */
 #include "src/util.inc"   /* TLV/hex/sysfs helpers, join/NEWPHY builders */
 #include "src/nl80211.inc"   /* generic netlink: control-port EAPOL, NEW_KEY/SET_KEY, authorize */
+#include "src/policy.inc"   /* W33: legacy-vs-own ownership + AP-only netdev lookup */
 #include "src/apply.inc"   /* 0x77/M2 config parse and UCI apply (argv, no shell) */
 #include "src/datapath.inc"   /* split-MAC VAP registry + AF_PACKET bridge (U11) */
 #include "src/datachan.inc"   /* c2 datachan: AES-CCM/plain, keepalive, per-VAP keys */

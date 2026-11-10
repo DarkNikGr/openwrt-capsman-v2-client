@@ -9,18 +9,32 @@ mbedTLS and nl80211 so it can also be unit-tested on a host.
 | Module | Contents |
 |---|---|
 | `util.inc` | TLV/hex helpers, sysfs readers, join (`0x4029`) and NEWPHY (`0x001d`) builders |
-| `nl80211.inc` | generic netlink: control-port EAPOL, mgmt-frame TX, `NEW_KEY`/`SET_KEY`, station authorize |
-| `apply.inc` | `0x77`/M2 config parse and UCI apply (argv, no shell) |
+| `nl80211.inc` | generic netlink: control-port EAPOL, mgmt-frame TX, `NEW_KEY`/`SET_KEY`, station authorize, validated port→ifindex map |
+| `policy.inc` | **W33**: legacy-vs-own ownership decision, deterministic AP-only MAC→netdev lookup, `--selftest-policy` |
+| `apply.inc` | `0x77`/M2 config parse and UCI apply (argv, no shell); refused in legacy mode |
 | `datapath.inc` | split-MAC VAP registry, station map, AF_PACKET bridge, VLAN policy |
 | `datachan.inc` | c2 datachan: AES-CCM/plain (`a2`), keepalive, per-VAP keys, `0x402b` rekey |
-| `channels.inc` | `0x000a` channel descriptors, `0x00b7` set, vapid allocation |
+| `channels.inc` | `0x000a` channel descriptors, `0x00b7` set, vapid allocation/gc, `0xd00b` reply |
 | `mgmt.inc` | EAPOL/key descriptors, `0x2018`/`0x2019` relay, monitor fallback, extmux glue |
 | `discovery.inc` | manager discovery, bounded TLS connect |
 | `stats.inc` | `0x200e` signal + `0x2015` counters/rates |
-| `vap.inc` | manager-driven BSS creation and hostapd start (`0x500b`/`0x6016`) |
+| `vap.inc` | deterministic VAP resolution, hostapd start/stop, `0x600c` destroy (`0x500b`/`0x6016`) |
 | `lab.inc` | `CAPAGENT_LAB`: hwsim AP, mgmt relay, test injection |
 | `main.inc` | run loop, per-attempt discovery/session reset, options, `main` |
 | `extmux.c` / `extmux.h` | per-BSS external-RSN relay: sessions keyed by (port, MAC), 4-way deadline/retry, ctrl reply checking, journal/resync |
+
+## Ownership invariant (W33)
+
+`policy.inc` classifies `/etc/config/wireless` at the start of every session:
+
+| wifi-iface sections | Mode | capagent may |
+|---|---|---|
+| **>= 1** | `legacy` | observe only: report `0x2018`, answer the control channel. **Never** create/delete/up/down/tune a netdev, start or stop hostapd, install keys, write UCI or call `network.wireless reconf`. |
+| **0** | `own` | create the AP netdevs and hostapd BSSes the manager asks for, and tear them down on `0x600c`. |
+
+The switch is one predicate (`wl_legacy()`); every side-effect site is behind
+it. `capagent --check-wireless [--wireless-config FILE]` prints the decision.
+
 
 ## Build
 
@@ -28,7 +42,7 @@ With an OpenWrt SDK tree (mt7621, mbedTLS in staging_dir):
 
 ```sh
 make SDK=/path/to/openwrt-sdk
-make SDK=/path/to/openwrt-sdk check     # runs --crypto-selftest under qemu-mipsel
+make SDK=/path/to/openwrt-sdk check     # crypto + ownership-policy tests under qemu-mipsel
 ```
 
 With a standalone toolchain + mbedTLS source prefix:

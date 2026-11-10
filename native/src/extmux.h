@@ -110,6 +110,9 @@ void extmux_free(struct extmux *m);
 int  extmux_add_vap(struct extmux *m, uint16_t port, const char *ifname,
                     int ifindex, const uint8_t bssid[6]);
 int  extmux_del_vap(struct extmux *m, uint16_t port);
+/* W33: the netdev was recreated (new ifindex); refresh the BSS and every
+ * session that uses it before the next hostapd/direct transaction. */
+int  extmux_set_ifindex(struct extmux *m, uint16_t port, int ifindex);
 struct extmux_vap *extmux_vap_by_port(struct extmux *m, uint16_t port);
 struct extmux_vap *extmux_vap_by_ifname(struct extmux *m, const char *ifname);
 struct extmux_vap *extmux_vap_at(struct extmux *m, int idx);

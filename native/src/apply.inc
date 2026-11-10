@@ -205,6 +205,17 @@ static void apply_vaps(void)
     if (!g_apply || g_nvap <= 0)
         return;
 
+    /* W33 invariant: a legacy /etc/config/wireless owns the BSSes.  Writing
+       UCI and calling network.wireless reconf would tear down netifd's
+       interfaces and restart wpad — exactly the "all SSIDs disappeared"
+       failure.  Parsing/logging the manager's tree stays enabled. */
+    if (wl_legacy()) {
+        printf("apply: legacy /etc/config/wireless owns the BSSes; refusing "
+               "to write UCI or reconf (%d VAP(s) parsed)\n", g_nvap);
+        fflush(stdout);
+        return;
+    }
+
     FILE *p = popen("uci -q show wireless", "r");
     if (!p) {
         printf("apply: cannot read wireless config\n");

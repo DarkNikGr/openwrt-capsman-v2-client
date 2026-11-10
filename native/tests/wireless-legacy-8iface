@@ -1,0 +1,83 @@
+# W33 fixture: a legacy OpenWrt wireless config with 8 wifi-iface sections.
+# capagent must classify this as "legacy" and must then be read-only:
+# no interface create/delete/up/channel, no hostapd spawn/kill, no UCI write.
+#
+#   capagent --wireless-config native/tests/wireless-legacy-8iface --check-wireless
+
+config wifi-device 'radio0'
+	option type 'mac80211'
+	option band '2g'
+	option channel '6'
+	option htmode 'HT20'
+	option country 'GR'
+	option disabled '0'
+
+config wifi-device 'radio1'
+	option type 'mac80211'
+	option band '5g'
+	option channel '36'
+	option htmode 'VHT80'
+	option country 'GR'
+	option disabled '0'
+
+config wifi-iface 'bss_0_99_0'
+	option device 'radio0'
+	option network 'wifi99'
+	option mode 'ap'
+	option ssid 'cap-hidden'
+	option encryption 'none'
+
+config wifi-iface 'bss_0_30_1'
+	option device 'radio0'
+	option network 'wifi30'
+	option mode 'ap'
+	option ssid 'cap-test'
+	option encryption 'psk2'
+	option key 'cap-test-12345'
+
+config wifi-iface 'bss_0_10_2'
+	option device 'radio0'
+	option network 'wifi10'
+	option mode 'ap'
+	option ssid 'cap-guest'
+	option encryption 'psk2'
+	option key 'GuestWiFi-123'
+
+config wifi-iface 'bss_0_20_3'
+	option device 'radio0'
+	option network 'wifi20'
+	option mode 'ap'
+	option ssid 'cap-iot'
+	option encryption 'psk2'
+	option key 'IoTwifFi-1234'
+
+config wifi-iface 'bss_1_99_4'
+	option device 'radio1'
+	option network 'wifi99'
+	option mode 'ap'
+	option ssid 'cap-hidden'
+	option encryption 'none'
+
+config wifi-iface 'bss_1_30_5'
+	option device 'radio1'
+	option network 'wifi30'
+	option mode 'ap'
+	option ssid 'cap-test'
+	option encryption 'psk2'
+	option key 'cap-test-12345'
+
+config wifi-iface 'bss_1_10_6'
+	option device 'radio1'
+	option network 'wifi10'
+	option mode 'ap'
+	option ssid 'cap-guest'
+	option encryption 'psk2'
+	option key 'GuestWiFi-123'
+
+config wifi-iface 'bss_1_20_7'
+	option device 'radio1'
+	option network 'wifi20'
+	option mode 'ap'
+	option ssid 'cap-iot'
+	option encryption 'psk2'
+	option key 'IoTwifFi-1234'

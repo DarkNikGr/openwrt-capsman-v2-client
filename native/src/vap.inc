@@ -114,18 +114,13 @@ static int hostapd_has_rsn_override(void)
     return cached;
 }
 
-/* True when a legacy UCI file owns BSSes (then we must not touch them). */
+/* True when a legacy UCI file owns BSSes (then we must not touch them).
+ * W33: this is now a thin accessor over the per-session policy decision;
+ * the file is parsed exactly once per session in policy.inc. */
+__attribute__((unused))
 static int wireless_has_bss(void)
 {
-    FILE *f = fopen("/etc/config/wireless", "r");
-    if (!f) return 0;
-    char line[256];
-    int found = 0;
-    while (fgets(line, sizeof(line), f)) {
-        if (strstr(line, "config wifi-iface")) { found = 1; break; }
-    }
-    fclose(f);
-    return found;
+    return wl_legacy();
 }
 
 /* 0x0c width code from the manager: 1=20, 2=40, 3=80, 4=160. */
@@ -337,6 +332,29 @@ static int vap_hostapd_start(int port, const char *ifname, int phy, int vapid,
               (char *)NULL);
         _exit(127);
     }
+    if (pid < 0) {
+        fprintf(stderr, "vap: fork hostapd %s: %s\n", ifname, strerror(errno));
+        return -1;
+    }
+    {
+        /* hostapd -B daemonizes: the direct child exits once setup is done,
+           so reap it (otherwise every failed BSS leaves a zombie) and use
+           its status to tell "started" from "config/driver refused".  Never
+           block the TLS loop on a slow setup (DFS/ACS): poll for 3 s. */
+        int st = 0, reaped = 0;
+        for (int i = 0; i < 30; i++) {
+            pid_t r = waitpid(pid, &st, WNOHANG);
+            if (r == pid) { reaped = 1; break; }
+            if (r < 0) break;
+            usleep(100000);
+        }
+        if (reaped && (!WIFEXITED(st) || WEXITSTATUS(st) != 0)) {
+            printf("vap: hostapd %s failed to start (status=%d), see %s\n",
+                   ifname, WIFEXITED(st) ? WEXITSTATUS(st) : -1, logf);
+            fflush(stdout);
+            return -1;
+        }
+    }
     printf("vap: hostapd %s ssid=%s freq=%u akm=%s%s%s mfp=%d vlan=%u\n",
            ifname, (const char *)ssid, freq,
            ri.akm_psk ? "psk" : "", ri.akm_psk256 ? ",psk256" : "",
@@ -346,22 +364,186 @@ static int vap_hostapd_start(int port, const char *ifname, int phy, int vapid,
     return 0;
 }
 
-/* True when the pid file points at a live hostapd. */
-static int vap_hostapd_running(const char *ifname)
+/* True when the pid file points at a live hostapd **that we started**.
+ * W33: the pid is verified against our own config path.  A stale pid file
+ * whose number was recycled by netifd's wpad must never be mistaken for
+ * "our BSS is already up" (and must never be killed). */
+static int vap_hostapd_pid(const char *ifname)
 {
-    char pidf[96];
+    char pidf[96], want[128], cmd[256];
     long pid = 0;
     FILE *pf;
+    int found = 0;
+
     snprintf(pidf, sizeof(pidf), "/var/run/vap-%s.pid", ifname);
     pf = fopen(pidf, "r");
     if (!pf) return 0;
     if (fscanf(pf, "%ld", &pid) != 1) pid = 0;
     fclose(pf);
-    return pid > 0 && kill((pid_t)pid, 0) == 0;
+    if (pid <= 0 || kill((pid_t)pid, 0) != 0) return 0;
+
+    snprintf(want, sizeof(want), "%s/vap-%s.conf", VAP_CONF_DIR, ifname);
+    snprintf(cmd, sizeof(cmd), "/proc/%ld/cmdline", pid);
+    pf = fopen(cmd, "r");
+    if (!pf) return 0;
+    size_t n = fread(cmd, 1, sizeof(cmd) - 1, pf);
+    fclose(pf);
+    cmd[n] = 0;
+    /* argv is NUL-separated; just look for our config path anywhere in it */
+    for (size_t i = 0; i + strlen(want) <= n; i++) {
+        if (!memcmp(cmd + i, want, strlen(want))) { found = 1; break; }
+    }
+    if (!found) return 0;
+    return (int)pid;
 }
 
-/* Called from the 0x6016 handler.  Only acts when the netdev is missing, i.e.
- * when the manager is the only owner of the wireless configuration. */
+static int vap_hostapd_running(const char *ifname)
+{
+    return vap_hostapd_pid(ifname) > 0;
+}
+
+/* Stop the hostapd we started for this BSS (own mode only). */
+static void vap_hostapd_stop(struct vap *vp)
+{
+    int pid;
+    if (!vp || !vp->ap_started || !vp->ifname[0]) return;
+    if (wl_legacy()) return;                 /* never touch netifd's wpad */
+    pid = vap_hostapd_pid(vp->ifname);
+    if (pid > 0) {
+        kill((pid_t)pid, SIGTERM);
+        printf("vap: stopped our hostapd %s pid=%d\n", vp->ifname, pid);
+    }
+    vp->ap_started = 0;
+    fflush(stdout);
+}
+
+/* Delete a netdev — only ever one this agent created. */
+static int vap_netdev_del(const char *ifname)
+{
+    int ifindex;
+    if (!ifname || !*ifname) return -EINVAL;
+    if (wl_legacy()) return -EPERM;          /* invariant: never in legacy mode */
+    ifindex = if_nametoindex(ifname);
+    if (ifindex <= 0) return 0;
+    if (nl_cmd_open() != 0) return -1;
+    struct nl_buf m;
+    nlb_init(&m, NL80211_CMD_DEL_INTERFACE, NLM_F_ACK);
+    nlb_u32(&m, NL80211_ATTR_IFINDEX, (uint32_t)ifindex);
+    int r = nl_send_ack(g_nl_cmd_fd, &m);
+    printf("vap: DEL_INTERFACE %s ifindex=%d ret=%d (%s)\n", ifname, ifindex,
+           r, r ? strerror(-r) : "ok");
+    fflush(stdout);
+    return r;
+}
+
+/* Resolve the netdev that belongs to (phy,vapid) without guessing.
+ *
+ * Order of authority:
+ *   1. the interface this session already bound to the VAP (validated);
+ *   2. the conventional phy<N>-ap<M> name;
+ *   3. the manager's MAC, but only among AP/AP_VLAN netdevs of that phy;
+ *   4. create phy<N>-ap<M>, and only when capagent owns the radios.
+ * Step 4 is the single place where a netdev is ever created, so the legacy
+ * invariant is one branch, not five. */
+static int vap_resolve(int phy, int vapid, const uint8_t mac[6],
+                       char *name, size_t n, int *created)
+{
+    struct vap *vp = vap_get(phy, vapid);
+    char conv[32];
+    int ifindex = 0;
+
+    if (created) *created = 0;
+    snprintf(conv, sizeof(conv), "phy%d-ap%d", phy, vapid);
+
+    if (vp && vp->used && vp->ifname[0]) {
+        ifindex = (int)if_nametoindex(vp->ifname);
+        if (ifindex > 0) {
+            vp->ifindex = ifindex;
+            if (name) snprintf(name, n, "%s", vp->ifname);
+            return ifindex;
+        }
+        /* The netdev is gone: forget the identity but keep the slot. */
+        vp->ifname[0] = 0;
+        vp->ifindex = 0;
+        vp->we_created = 0;
+        vp->ap_started = 0;
+    }
+
+    /* An AP netdev for this VAP that already exists (legacy netifd BSS or a
+     * BSS that survived a reconnect).  Validated by iftype + phy. */
+    if (mac && (mac[0] | mac[1] | mac[2] | mac[3] | mac[4] | mac[5])) {
+        ifindex = ifindex_by_mac_ap(mac, phy, name, n);
+        if (ifindex > 0) return ifindex;
+    }
+    ifindex = read_sysfs_int(conv, "ifindex");
+    if (ifindex > 0) {
+        int t = nl_get_iftype(ifindex);
+        if (t == NL80211_IFTYPE_AP || t == NL80211_IFTYPE_AP_VLAN) {
+            if (name) snprintf(name, n, "%s", conv);
+            return ifindex;
+        }
+        ifindex = 0;             /* a monitor with the same name: not ours */
+    }
+
+    if (wl_legacy()) return 0;   /* read-only: never create in legacy mode */
+
+    ifindex = vap_netdev_create(phy, conv, mac);
+    if (ifindex <= 0) return 0;
+    if (name) snprintf(name, n, "%s", conv);
+    if (created) *created = 1;
+    return ifindex;
+}
+
+/* Re-resolve the netdev for a port right before it is used (W33).
+ *
+ * The manager's MAC-identified port is not enough on its own: after a
+ * reconnect the cached ifindex can be stale (netdev recreated) or, worse,
+ * recycled by an unrelated netdev.  Every 0x201f key install goes through
+ * here so NEW_KEY/SET_KEY always target the live AP netdev.  Updates the
+ * port map and the extmux BSS as a side effect. */
+static int vap_refresh_ifindex(int port, uint8_t mac[6], int *changed)
+{
+    int phy = (port >> 8) & 0x0f;
+    int wid = port & 0xff;
+    struct vap *vp = vap_get(phy, wid);
+    char name[32] = "";
+    uint8_t m[6] = {0};
+    int old = 0, idx = 0;
+
+    if (changed) *changed = 0;
+    pmap_get(port, &old, NULL);
+
+    if (vp && vp->used && vp->ifname[0]) {
+        idx = (int)if_nametoindex(vp->ifname);
+        if (idx > 0) snprintf(name, sizeof(name), "%s", vp->ifname);
+    }
+    if (idx <= 0) {
+        idx = vap_ifindex(port, m);          /* validated pmap/name/AP-only */
+        if (idx > 0 && !if_indextoname((unsigned)idx, name)) idx = 0;
+    }
+    if (idx <= 0) return 0;
+
+    if (mac) read_sysfs_mac(name, mac);
+    if (vp) {
+        vp->used = 1;
+        vp->rid = phy;
+        vp->wid = wid;
+        vp->ifindex = idx;
+        snprintf(vp->ifname, sizeof(vp->ifname), "%s", name);
+    }
+    pmap_set(port, idx, mac ? mac : m);
+    if (g_extmux) extmux_set_ifindex(g_extmux, (uint16_t)port, idx);
+    if (old > 0 && old != idx) {
+        printf("0x201f: ifindex refreshed port=0x%04x %d -> %d (%s)\n", port,
+               old, idx, name);
+        fflush(stdout);
+        if (changed) *changed = 1;
+    }
+    return idx;
+}
+
+/* Called from the 0x6016 handler.  Resolves the netdev, registers the port,
+ * and (own mode only) starts hostapd. */
 static void vap_provision(int port, const uint8_t *body, uint16_t len,
                           const struct cfg *c)
 {
@@ -371,31 +553,36 @@ static void vap_provision(int port, const uint8_t *body, uint16_t len,
     struct vap *vp = &g_vap[phy % MAX_RADIOS][vapid & 0x0f];
 
     char ifname[32];
-    snprintf(ifname, sizeof(ifname), "phy%d-ap%d", phy, vapid);
     int created = 0;
-    /* createvap_response() may have created a differently named netdev (the
-     * -i mapping) and stored it on the VAP; prefer that binding. */
-    int ifindex = 0;
-    {
-        char chk[IF_NAMESIZE];
-        if (vp->ifindex > 0 && vp->ifname[0] &&
-            if_indextoname((unsigned)vp->ifindex, chk)) {
-            ifindex = vp->ifindex;
-            snprintf(ifname, sizeof(ifname), "%s", vp->ifname);
-        }
-    }
-    if (ifindex <= 0) ifindex = if_nametoindex(ifname);
+    /* W33: one resolution path for 0x500b and 0x6016 (bound name -> phyN-apM
+       -> AP-only MAC -> create only in own mode). */
+    int ifindex = vap_resolve(phy, vapid, vp->bssid, ifname, sizeof(ifname),
+                              &created);
     if (ifindex <= 0) {
-        ifindex = vap_netdev_create(phy, ifname, vp->bssid);
-        if (ifindex <= 0) return;
-        created = 1;
+        printf("vap: port 0x%04x has no AP netdev%s\n", port,
+               wl_legacy() ? " (legacy UCI owns the radios: not created)" : "");
+        fflush(stdout);
+        return;
     }
+    vp->used = 1;
+    vp->rid = phy;
+    vp->wid = vapid;
     vp->ifindex = ifindex;
     snprintf(vp->ifname, sizeof(vp->ifname), "%s", ifname);
+    if (created) vp->we_created = 1;
+    if (!vp->bssid[0] && !vp->bssid[1]) read_sysfs_mac(ifname, vp->bssid);
 
     /* Bind (or re-bind) the per-BSS ext-auth relay socket before hostapd
      * starts accepting clients.  Also seeds the port/channel map. */
     cap_vap_ready(phy, vapid, ifindex, ifname, vp->bssid, c);
+
+    /* W33: legacy mode is read-only; nothing below may touch the BSS. */
+    if (wl_legacy()) {
+        printf("vap: %s is netifd/wpad's (legacy read-only, no hostapd)\n",
+               ifname);
+        fflush(stdout);
+        return;
+    }
 
     /* W36: this VAP runs its MLME in-process; never spawn hostapd for it. */
     if (mlme_owns_port(port)) {
@@ -405,19 +592,15 @@ static void vap_provision(int port, const uint8_t *body, uint16_t len,
         return;
     }
 
-    if (!c->vap_auto) return;
-
-    if (!created && wireless_has_bss()) {
-        /* A legacy UCI file owns this interface: leave it alone. */
-        if (!vap_hostapd_running(ifname)) return;
-    }
-    if (vap_hostapd_running(ifname)) {
-        /* Survived an agent restart / manager reconnect: do not spawn a
-         * second hostapd on the same BSS. */
-        printf("vap: %s already running, not restarted\n", ifname);
+    int *started = &g_vap_started[phy % MAX_RADIOS][vapid & 0x0f];
+    if (!vap_should_start_bss(0, c->vap_auto, ifindex,
+                              vap_hostapd_running(ifname) || *started)) {
+        if (vap_hostapd_running(ifname) || *started)
+            printf("vap: %s already running, not restarted\n", ifname);
         fflush(stdout);
         return;
     }
-    g_vap_started[phy % MAX_RADIOS][vapid & 0x0f] = 1;
-    vap_hostapd_start(port, ifname, phy, vapid, body, len, vp, c);
+    *started = 1;
+    if (vap_hostapd_start(port, ifname, phy, vapid, body, len, vp, c) == 0)
+        vp->ap_started = 1;
 }
