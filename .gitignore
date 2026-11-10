@@ -23,3 +23,6 @@ __pycache__/
 # local raw captures / reports (never uploaded)
 .evidence/
 .archive/
+
+# build output (released as GitHub release assets)
+dist/

@@ -103,17 +103,25 @@ See [`docs/FINDINGS.md`](docs/FINDINGS.md) for the message/TLV reference.
 ## Install on the CAP
 
 The CAP certificate must be trusted by the manager (see
-[`scripts/enroll.md`](scripts/enroll.md)). Then, from the repository:
+[`scripts/enroll.md`](scripts/enroll.md)). Download the latest release bundle:
+
+<https://github.com/DarkNikGr/openwrt-capsman-v2-client/releases/latest>
 
 ```sh
-# copy the bundle to the router
-scp -r dist root@10.0.0.2:/root/cap-bundle
+# on the workstation
+curl -LO https://github.com/DarkNikGr/openwrt-capsman-v2-client/releases/latest/download/capagent-mipsel-v0.1.0-bundle.tar.gz
+scp capagent-mipsel-v0.1.0-bundle.tar.gz root@10.0.0.2:/root/
 
 # on the router
 ssh root@10.0.0.2
+mkdir -p /root/cap-bundle
+tar -C /root/cap-bundle -xzf /root/capagent-mipsel-v0.1.0-bundle.tar.gz
 cd /root/cap-bundle
 MANAGER=10.0.0.1 ./install.sh
 ```
+
+A standalone `capagent-mipsel` binary is attached to the same release if you
+prefer to copy it directly.
 
 `install.sh` installs `/usr/sbin/capagent`, writes
 `/etc/cap/capagent.conf` (if missing), enables `capagent` and restarts it.
@@ -140,6 +148,8 @@ export MBEDTLS=/path/to/mbedtls-3.6.2
 ```
 
 Output: `dist/capagent-mipsel` (ELF32 MIPS32r2, statically linked, stripped).
+`dist/` is a local, gitignored build directory; published binaries live under
+[Releases](https://github.com/DarkNikGr/openwrt-capsman-v2-client/releases).
 
 ## Configure
 
@@ -185,7 +195,6 @@ iw dev
 
 ```
 cap-client/
-├── dist/                     # deployable bundle (binary + install.sh + conf)
 ├── docs/FINDINGS.md          # control protocol / TLV reference
 ├── native/
 │   ├── capagent.c            # the CAP client
@@ -198,6 +207,11 @@ cap-client/
 │   └── enroll.md
 └── README.md
 ```
+
+Prebuilt binaries and the deploy bundle are published under
+[Releases](https://github.com/DarkNikGr/openwrt-capsman-v2-client/releases),
+not committed to the repository. `scripts/build-mipsel.sh` writes its output to
+`dist/` locally (gitignored).
 
 ## Security
 
