@@ -78,6 +78,31 @@ static void rsn_parse(const uint8_t *ie, size_t len, struct rsn_info *ri)
     }
 }
 
+/* Does this hostapd build accept external_rsn_ie=<hex>?  The option only
+   exists in the patched wpad, so probe the binary instead of guessing: an
+   unknown option makes hostapd refuse the whole configuration. */
+static int hostapd_has_rsn_override(void)
+{
+    static int cached = -1;
+    if (cached >= 0) return cached;
+    cached = 0;
+    FILE *f = fopen("/usr/sbin/wpad", "rb");
+    if (!f) f = fopen("/usr/sbin/hostapd", "rb");
+    if (!f) return 0;
+    const char needle[] = "external_rsn_ie";
+    size_t nl = sizeof(needle) - 1, hit = 0;
+    int c;
+    while ((c = fgetc(f)) != EOF) {
+        if ((char)c == needle[hit]) {
+            if (++hit == nl) { cached = 1; break; }
+        } else {
+            hit = ((char)c == needle[0]) ? 1 : 0;
+        }
+    }
+    fclose(f);
+    return cached;
+}
+
 /* True when a legacy UCI file owns BSSes (then we must not touch them). */
 static int wireless_has_bss(void)
 {
@@ -202,6 +227,24 @@ static int vap_hostapd_start(int port, const char *ifname, int phy, int vapid,
     } else {
         /* open / SAE / OWE: the manager drives the handshake or none exists */
         fprintf(f, "wpa=0\n");
+    }
+    /* The station compares the RSN IE in M3 with the one in our beacon and
+       drops the handshake on any difference.  When the build can take the
+       manager's exact IE, hand it over verbatim. */
+    if (ri.valid && hostapd_has_rsn_override() && ie && il) {
+        const uint8_t *r = NULL;
+        size_t p = 0, rl = 0;
+        while (p + 2 <= il) {
+            uint8_t id = ie[p], l = ie[p + 1];
+            if (p + 2 + l > il) break;
+            if (id == 48) { r = ie + p; rl = (size_t)l + 2; break; }
+            p += 2 + l;
+        }
+        if (r && rl) {
+            fprintf(f, "external_rsn_ie=");
+            for (size_t i = 0; i < rl; i++) fprintf(f, "%02x", r[i]);
+            fprintf(f, "\n");
+        }
     }
     fprintf(f, "ignore_broadcast_ssid=0\nap_isolate=0\n");
     fclose(f);
