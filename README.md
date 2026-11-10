@@ -42,31 +42,32 @@ provisioned by the same manager as MikroTik hardware.
 | Master + virtual interfaces bound & active on the manager | ✅ |
 | SSID / RSN / channel push (`0x6016`, ack `0xe016`) | ✅ received |
 | VLAN push (`0x500b` TLV `0x7d`) | ✅ received |
-| Security material push (`0x201f`) | ✅ GTK/IGTK only |
-| **PSK / passphrase delivery** | ❌ **never sent by design** |
+| Security material push (`0x201f`) | 🟡 GTK/IGTK observed |
+| PSK / passphrase delivery | 🟡 **not observed yet** |
 | Apply pushed SSID/VLAN to UCI | 🟡 in progress |
-| Status/traffic poll (`0x6027` → `0xe027`) | ❌ requires the datachan |
+| Status/traffic poll (`0x6027` → `0xe027`) | 🟡 counters not observed yet |
 
-### Why the PSK never arrives
+### Open questions
 
-CAPsMAN v2 is a **split-MAC** manager: it is the RSN **authenticator**. The
-manager validates the passphrase, derives the PMK and runs the 4-way
-handshake itself; EAPOL is bridged between the station and the manager over
-the c2 datachan, and only derived keys (GTK/IGTK) come back in `0x201f`.
-`0x6016` carries the SSID and the public RSN IE, never the PSK.
+In our captures CAPsMAN v2 behaves as a split-MAC manager: it validates the
+passphrase and returns derived keys (`0x201f`), while `0x6016` carries the
+SSID and the public RSN IE. We have **not yet observed** the PSK itself, nor
+the `0x500b a2=1` datachan create that is the most likely carrier for it. The
+c2 datachan is also the most likely source of the per-station traffic/status
+counters.
 
-Consequently a CAP that cannot establish the **c2 datachan** (`0x500b` with
-`a2=1`) cannot authenticate WPA2-PSK clients, no matter what it advertises.
-This client activates and configures the interfaces, but the `a2=1` create is
-not issued for a userspace CAP (the manager's datachan gate needs the local
-RouterOS radio/c2 path).
+Paths currently being investigated:
 
-Practical consequences:
+* trigger the manager to issue the datachan create (`a2=1`);
+* bridge EAPOL to the manager over the datachan, so the manager acts as the
+  RSN authenticator and the CAP never needs the PSK;
+* a one-shot configuration fetch at boot (no daemon);
+* complete split-MAC support in the client.
 
-* with the official manager, the PSK must either live on the CAP (static) or
-  the CAP must implement the split-MAC datachan (EAPOL bridge + key install);
-* the userspace manager (`capmgr`) delivers SSID/key/VLAN directly and does
-  not have this limitation, at the cost of running a small service.
+Until one of these lands, the AP serves the SSID/VLAN/key configuration
+already present in `/etc/config/wireless`; the manager owns channels and
+interface state.
+
 
 
 ## How it works
