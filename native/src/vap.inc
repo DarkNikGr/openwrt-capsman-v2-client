@@ -31,11 +31,6 @@
  * else already set the regdomain. */
 static const char *g_vap_country;
 
-/* One hostapd per (phy, vapid).  A pid file is not enough: hostapd -B detaches
- * before it writes one, so two creates arriving back to back both see "not
- * running" and spawn a second instance that then fights for the netdev. */
-static int g_vap_started[MAX_RADIOS][16];
-
 /* Parse the RSN IE (element 48) out of the manager's IE blob. */
 struct rsn_info {
     int valid;
@@ -249,10 +244,260 @@ static void vap_bridge_if_present(const char *ifname, unsigned vlan,
     (void)ifname;
 }
 
+/* ====================================================================
+ * W25/W28: complete VAP lifecycle (integrated on top of W36/extmux)
+ *
+ * Every resource is owned explicitly:
+ *   netdev phyN-apM   (NL80211_CMD_NEW_INTERFACE, own_netdev)
+ *   hostapd           (pid file /var/run/vap-<ifname>.pid)
+ *   ext-auth socket   (extmux record, or extpath for the legacy relay)
+ *   config            (/tmp/vap-<ifname>.conf)
+ *   vapid slot        (g_vmap, released on 0x600c)
+ * A teardown stops hostapd, drops the relay socket, unlinks the files,
+ * deletes the netdev and only then frees the slot.  The watchdog repeats
+ * the same cleanup for anything left behind by a crash/restart.
+ * ==================================================================== */
+
+static void vap_paths(const char *ifname, char *conf, size_t cl,
+                      char *pidf, size_t pl)
+{
+    snprintf(conf, cl, VAP_CONF_DIR "/vap-%s.conf", ifname);
+    snprintf(pidf, pl, "/var/run/vap-%s.pid", ifname);
+}
+
+static int vap_pid_alive(pid_t pid)
+{
+    if (pid <= 0) return 0;
+    if (kill(pid, 0) == 0) return 1;
+    return errno == EPERM;
+}
+
+static pid_t vap_read_pidfile(const char *ifname)
+{
+    char conf[128], pidf[128];
+    vap_paths(ifname, conf, sizeof(conf), pidf, sizeof(pidf));
+    FILE *f = fopen(pidf, "r");
+    if (!f) return 0;
+    long pid = 0;
+    int got = fscanf(f, "%ld", &pid);
+    fclose(f);
+    return (got == 1 && pid > 0) ? (pid_t)pid : 0;
+}
+
+/* Find a hostapd whose argv carries our exact per-VAP config path.  This
+   covers a missing/stale pid file (e.g. hostapd crashed after writing it). */
+static pid_t vap_find_hostapd(const char *ifname)
+{
+    char want[128];
+    snprintf(want, sizeof(want), VAP_CONF_DIR "/vap-%s.conf", ifname);
+    DIR *d = opendir("/proc");
+    if (!d) return 0;
+    struct dirent *de;
+    pid_t found = 0;
+    while ((de = readdir(d)) != NULL) {
+        char *end = NULL;
+        long pid = strtol(de->d_name, &end, 10);
+        if (!end || *end || pid <= 0) continue;
+        char p[64], buf[4096];
+        snprintf(p, sizeof(p), "/proc/%ld/cmdline", pid);
+        int fd = open(p, O_RDONLY);
+        if (fd < 0) continue;
+        ssize_t n = read(fd, buf, sizeof(buf) - 1);
+        close(fd);
+        if (n <= 0) continue;
+        buf[n] = 0;
+        for (ssize_t i = 0; i < n; ) {
+            const char *arg = buf + i;
+            size_t al = strlen(arg);
+            if (al && !strcmp(arg, want)) { found = (pid_t)pid; break; }
+            i += (ssize_t)al + 1;
+        }
+        if (found) break;
+    }
+    closedir(d);
+    return found;
+}
+
+static void vap_stop_hostapd(struct vap *v)
+{
+    if (!v || !v->ifname[0]) return;
+    char conf[128], pidf[128];
+    vap_paths(v->ifname, conf, sizeof(conf), pidf, sizeof(pidf));
+    pid_t pid = vap_read_pidfile(v->ifname);
+    if (pid <= 0) pid = v->hostapd_pid;
+    if (!vap_pid_alive(pid)) pid = vap_find_hostapd(v->ifname);
+    if (vap_pid_alive(pid)) {
+        printf("vap: stopping hostapd %s pid=%d\n", v->ifname, (int)pid);
+        fflush(stdout);
+        kill(pid, SIGTERM);
+        for (int i = 0; i < 20 && vap_pid_alive(pid); i++)
+            usleep(100000);
+        if (vap_pid_alive(pid)) {
+            printf("vap: hostapd %s did not exit, SIGKILL\n", v->ifname);
+            kill(pid, SIGKILL);
+            for (int i = 0; i < 10 && vap_pid_alive(pid); i++)
+                usleep(100000);
+        }
+        /* If it was our direct child, reap it; a -B daemon is owned by
+           init and this is a harmless ECHILD. */
+        waitpid(pid, NULL, WNOHANG);
+    }
+    unlink(pidf);
+    v->hostapd_pid = 0;
+    v->hostapd_started = 0;
+}
+
+/* Wait briefly for the kernel to remove a netdev.  DEL_INTERFACE is
+   synchronous for the device model, but the sysfs entry can lag a tick. */
+static int vap_wait_netdev_gone(const char *ifname)
+{
+    for (int i = 0; i < 20; i++) {
+        if (if_nametoindex(ifname) == 0) return 1;
+        usleep(50000);
+    }
+    return if_nametoindex(ifname) == 0;
+}
+
+static int vap_netdev_delete_name(const char *ifname)
+{
+    int ifindex = if_nametoindex(ifname);
+    if (ifindex <= 0) return 0;
+    int r = nl_del_interface(ifindex);
+    int gone = vap_wait_netdev_gone(ifname);
+    printf("vap: deleted netdev %s ifindex=%d nl=%d gone=%d\n",
+           ifname, ifindex, r, gone);
+    fflush(stdout);
+    return gone;
+}
+
+static void vap_remove_files(const char *ifname)
+{
+    char conf[128], pidf[128], logf[128];
+    vap_paths(ifname, conf, sizeof(conf), pidf, sizeof(pidf));
+    snprintf(logf, sizeof(logf), "/tmp/vap-%s.log", ifname);
+    unlink(pidf);
+    unlink(conf);
+    (void)logf;                        /* keep the log for post-mortem */
+}
+
+/* Drop the ext-auth relay state for one VAP.  With extmux the per-BSS
+   ext/ctrl sockets and the session table belong to the relay, so the whole
+   record is removed; the legacy relay only has the dgram socket. */
+static void vap_relay_close(int phy, int vapid, struct vap *v)
+{
+    if (g_extmux)
+        extmux_del_vap(g_extmux, (uint16_t)((phy << 8) | vapid));
+    ext_auth_close(v);
+}
+
+/* The one teardown used by 0x600c, cleanup-on-recreate and the watchdog. */
+static void vap_teardown(struct vap *v, int remove_netdev)
+{
+    if (!v) return;
+    char ifname[32];
+    snprintf(ifname, sizeof(ifname), "%s", v->ifname);
+    vap_stop_hostapd(v);
+    if (ifname[0]) vap_remove_files(ifname);
+    if (remove_netdev && v->own_netdev && ifname[0]) {
+        vap_netdev_delete_name(ifname);
+        v->own_netdev = 0;
+        v->ifindex = 0;
+    }
+    v->hostapd_started = 0;
+    v->hostapd_pid = 0;
+}
+
+/* Destroy one VAP: data path, monitor, datachan key, channel map, pmap,
+   relay socket, hostapd/netdev/files, then the vapid slot itself. */
+static void vap_destroy(int phy, int vapid, const char *why)
+{
+    if (phy < 0 || phy >= MAX_RADIOS || vapid < 0 || vapid > 15) return;
+    int r = phy % MAX_RADIOS;
+    struct vap *v = &g_vap[r][vapid];
+    int ifindex = v->ifindex;
+    uint16_t vlan = v->vlan;
+    char ifname[32];
+    snprintf(ifname, sizeof(ifname), "%s", v->ifname);
+    int was_used = v->used;
+
+    if (was_used) {
+        dp_vap_close(v);
+        vap_relay_close(phy, vapid, v);
+        dc_forget_vap(phy, vapid);
+        vchan_clear((phy << 8) | vapid);
+        pmap_del((phy << 8) | vapid);
+        vap_teardown(v, 1);            /* hostapd + netdev we created */
+        memset(v, 0, sizeof(*v));
+        v->l2fd = -1;
+        v->extfd = -1;
+    } else {
+        /* cap_reset_session() drops the registry on a reconnect, so the
+           netdev/hostapd can outlive the entry.  Only touch objects that
+           carry our own per-VAP config file: that proves we made them. */
+        char conf[128], pidf[128], name[32];
+        snprintf(name, sizeof(name), "phy%d-ap%d", phy, vapid);
+        vap_paths(name, conf, sizeof(conf), pidf, sizeof(pidf));
+        if (access(conf, F_OK) == 0) {
+            struct vap tmp;
+            memset(&tmp, 0, sizeof(tmp));
+            snprintf(tmp.ifname, sizeof(tmp.ifname), "%s", name);
+            tmp.ifindex = if_nametoindex(name);
+            tmp.own_netdev = 1;        /* the conf file proves it */
+            tmp.l2fd = -1;
+            tmp.extfd = -1;
+            vap_stop_hostapd(&tmp);
+            vap_remove_files(name);
+            if (vap_ifname_is_ours(name) && !wireless_has_bss())
+                vap_netdev_delete_name(name);
+            printf("0x600c: reaped unregistered VAP %s\n", name);
+            fflush(stdout);
+        }
+    }
+    /* Only after the netdev is gone (vap_teardown waited for it) is the
+       manager's 0x47 slot safe to reuse. */
+    vapid_release_slot(phy, vapid);
+    mgmt_vap_del(phy);                 /* only when this was the last VAP */
+    printf("0x600c: released rid=%d wid=%d ifindex=%d ifname=%s vlan=%u "
+           "(%s)%s\n", phy, vapid, ifindex, ifname, vlan, why,
+           was_used ? "" : " [slot was already free]");
+    fflush(stdout);
+}
+
+/* Parse a destroy message: the header port is authoritative, but a body
+   0x47 is accepted when present.  Returns 0 on a valid id. */
+static int vap_destroy_target(uint16_t port, const uint8_t *body, uint16_t len,
+                              int *out_phy, int *out_vapid)
+{
+    int phy = (port >> 8) & 0xff;
+    int vapid = port & 0xff;
+    const uint8_t *v = NULL; uint16_t l = 0;
+    if (find_el(body, len, 0x47, &v, &l) && l == 4) {
+        uint32_t id = rd32(v);
+        if (id <= 15) vapid = (int)id;
+    }
+    /* A destroy body is empty on 7.25.1, but if a manager variant includes
+       0x08, prefer the BSSID that is actually live.  This also recovers
+       from a header that always carries vap 0. */
+    if (phy >= 0 && phy < MAX_RADIOS &&
+        find_el(body, len, 0x08, &v, &l) && l == 6) {
+        for (int w = 0; w < 16; w++)
+            if (g_vap[phy][w].used &&
+                !memcmp(g_vap[phy][w].bssid, v, 6)) {
+                vapid = w;
+                break;
+            }
+    }
+    if (phy < 0 || phy >= MAX_RADIOS || vapid < 0 || vapid > 15)
+        return -1;
+    *out_phy = phy;
+    *out_vapid = vapid;
+    return 0;
+}
+
 /* Build and start a hostapd instance for one provisioned VAP. */
 static int vap_hostapd_start(int port, const char *ifname, int phy, int vapid,
                              const uint8_t *body, uint16_t len,
-                             const struct vap *vp, const struct cfg *c)
+                             struct vap *vp, const struct cfg *c)
 {
     const uint8_t *ssid = NULL, *ie = NULL, *chv = NULL;
     uint16_t sl = 0, il = 0, cl = 0;
@@ -285,7 +530,7 @@ static int vap_hostapd_start(int port, const char *ifname, int phy, int vapid,
     if (c->ext_ctrl_dir || c->ext_auth_dir)
         fprintf(f, "ctrl_interface=%s\n",
                 c->ext_ctrl_dir ? c->ext_ctrl_dir : c->ext_auth_dir);
-    fprintf(f, "ssid=%s\n", (const char *)ssid);
+    fprintf(f, "ssid=%.*s\n", (int)sl, (const char *)ssid);
     if (vp) {
         fprintf(f, "bssid=%02x:%02x:%02x:%02x:%02x:%02x\n",
                 vp->bssid[0], vp->bssid[1], vp->bssid[2], vp->bssid[3],
@@ -343,10 +588,12 @@ static int vap_hostapd_start(int port, const char *ifname, int phy, int vapid,
            ri.akm_sae ? ",sae" : "", ri.mfpr ? 2 : (ri.mfpc ? 1 : 0),
            vp ? vp->vlan : 0);
     fflush(stdout);
+    if (vp) vp->hostapd_started_at = time(NULL);
     return 0;
 }
 
 /* True when the pid file points at a live hostapd. */
+__attribute__((unused))
 static int vap_hostapd_running(const char *ifname)
 {
     char pidf[96];
@@ -360,15 +607,22 @@ static int vap_hostapd_running(const char *ifname)
     return pid > 0 && kill((pid_t)pid, 0) == 0;
 }
 
-/* Called from the 0x6016 handler.  Only acts when the netdev is missing, i.e.
- * when the manager is the only owner of the wireless configuration. */
+/* Called from the 0x6016 handler.  The VAP is already bound by 0x500b.  A
+ * previous hostapd (profile change, duplicate start, stale daemon) is stopped
+ * before a new one is started, so a recreate always gets a clean slate. */
 static void vap_provision(int port, const uint8_t *body, uint16_t len,
                           const struct cfg *c)
 {
-    int phy = (port >> 8) & 0x0f;
-    int vapid = port & 0x0f;
-    if (phy >= MAX_RADIOS) return;
-    struct vap *vp = &g_vap[phy % MAX_RADIOS][vapid & 0x0f];
+    int phy = (port >> 8) & 0xff;
+    int vapid = port & 0xff;
+    if (phy < 0 || phy >= MAX_RADIOS || vapid < 0 || vapid > 15) return;
+    struct vap *vp = &g_vap[phy % MAX_RADIOS][vapid];
+    if (!vp->used) {
+        fprintf(stderr, "vap: 0x6016 for unbound port 0x%04x, ignored\n",
+                port);
+        fflush(stderr);
+        return;
+    }
 
     char ifname[32];
     snprintf(ifname, sizeof(ifname), "phy%d-ap%d", phy, vapid);
@@ -392,6 +646,11 @@ static void vap_provision(int port, const uint8_t *body, uint16_t len,
     }
     vp->ifindex = ifindex;
     snprintf(vp->ifname, sizeof(vp->ifname), "%s", ifname);
+    if (created)
+        vp->own_netdev = 1;
+    else if (!vp->own_netdev && vap_ifname_is_ours(ifname) &&
+             !wireless_has_bss())
+        vp->own_netdev = 1;     /* adopt a netdev left by an earlier run */
 
     /* Bind (or re-bind) the per-BSS ext-auth relay socket before hostapd
      * starts accepting clients.  Also seeds the port/channel map. */
@@ -407,17 +666,173 @@ static void vap_provision(int port, const uint8_t *body, uint16_t len,
 
     if (!c->vap_auto) return;
 
-    if (!created && wireless_has_bss()) {
-        /* A legacy UCI file owns this interface: leave it alone. */
-        if (!vap_hostapd_running(ifname)) return;
-    }
-    if (vap_hostapd_running(ifname)) {
-        /* Survived an agent restart / manager reconnect: do not spawn a
-         * second hostapd on the same BSS. */
-        printf("vap: %s already running, not restarted\n", ifname);
-        fflush(stdout);
+    /* A legacy UCI file owns this interface: leave it alone. */
+    if (!vp->own_netdev && wireless_has_bss() &&
+        !vap_pid_alive(vap_read_pidfile(ifname)) && !vp->hostapd_started)
         return;
+
+    /* Clean slate: never stack a second hostapd on the same BSS. */
+    if (vp->hostapd_started || vap_read_pidfile(ifname) > 0 ||
+        vap_find_hostapd(ifname) > 0) {
+        pid_t old = vap_read_pidfile(ifname);
+        printf("vap: %s restarting hostapd (old pid=%d)\n", ifname, (int)old);
+        fflush(stdout);
+        vap_stop_hostapd(vp);
+        char conf[128], pidf[128];
+        vap_paths(ifname, conf, sizeof(conf), pidf, sizeof(pidf));
+        unlink(conf);
+        unlink(pidf);
     }
-    g_vap_started[phy % MAX_RADIOS][vapid & 0x0f] = 1;
-    vap_hostapd_start(port, ifname, phy, vapid, body, len, vp, c);
+
+    if (vap_hostapd_start(port, ifname, phy, vapid, body, len, vp, c) != 0)
+        return;
+    vp->hostapd_started = 1;
+    /* hostapd -B writes the pid file after daemonizing; wait briefly so the
+       watchdog and 0x600c see the real daemon pid. */
+    pid_t pid = 0;
+    for (int i = 0; i < 20; i++) {
+        pid = vap_read_pidfile(ifname);
+        if (pid > 0) break;
+        usleep(25000);
+    }
+    vp->hostapd_pid = pid;
+    printf("vap: %s hostapd ready pid=%d\n", ifname, (int)pid);
+    fflush(stdout);
+}
+
+/* Reap anything that lost its registry entry: pid files, conf files,
+   hostapd processes, ext-auth sockets and phyN-apM netdevs.  Runs from the
+   main loop; all operations are idempotent. */
+static int vap_name_live(const char *ifname)
+{
+    for (int r = 0; r < MAX_RADIOS; r++)
+        for (int w = 0; w < 16; w++)
+            if (g_vap[r][w].used && !strcmp(g_vap[r][w].ifname, ifname))
+                return 1;
+    return 0;
+}
+
+static void vap_kill_orphan(pid_t pid, const char *why)
+{
+    if (!vap_pid_alive(pid)) return;
+    printf("watchdog: killing %s pid=%d\n", why, (int)pid);
+    fflush(stdout);
+    kill(pid, SIGTERM);
+    for (int i = 0; i < 20 && vap_pid_alive(pid); i++) usleep(100000);
+    if (vap_pid_alive(pid)) kill(pid, SIGKILL);
+    waitpid(pid, NULL, WNOHANG);
+}
+
+static void vap_watchdog(const struct cfg *c)
+{
+    /* Reap the short-lived fork() children from hostapd -B. */
+    while (waitpid(-1, NULL, WNOHANG) > 0) { }
+    if (!c->vap_auto) return;
+
+    time_t now = time(NULL);
+
+    /* 1. Live VAPs whose hostapd or netdev vanished: mark for re-provision
+          instead of keeping a stale "started" flag forever. */
+    for (int r = 0; r < MAX_RADIOS; r++)
+        for (int w = 0; w < 16; w++) {
+            struct vap *v = &g_vap[r][w];
+            if (!v->used) continue;
+            if (v->hostapd_started &&
+                !vap_pid_alive(vap_read_pidfile(v->ifname)) &&
+                !vap_pid_alive(v->hostapd_pid) &&
+                now - v->hostapd_started_at > 5) {
+                printf("watchdog: %s hostapd gone, marking down\n",
+                       v->ifname);
+                fflush(stdout);
+                v->hostapd_started = 0;
+                v->hostapd_pid = 0;
+            }
+            if (v->ifname[0] && v->ifindex > 0 &&
+                (int)if_nametoindex(v->ifname) != v->ifindex) {
+                printf("watchdog: %s netdev gone (ifindex %d)\n",
+                       v->ifname, v->ifindex);
+                fflush(stdout);
+                v->ifindex = 0;
+                v->own_netdev = 0;
+                v->hostapd_started = 0;
+                v->hostapd_pid = 0;
+            }
+        }
+
+    /* 2. Orphan pid/conf files: if no live VAP claims the name, stop the
+          daemon, unlink the files and delete the matching netdev. */
+    DIR *d = opendir("/var/run");
+    if (d) {
+        struct dirent *de;
+        while ((de = readdir(d)) != NULL) {
+            const char *n = de->d_name;
+            if (strncmp(n, "vap-", 4) || strcmp(n + strlen(n) - 4, ".pid"))
+                continue;
+            char ifname[32];
+            size_t nl = strlen(n) - 4;
+            if (nl < 4 || nl - 4 >= sizeof(ifname)) continue;
+            snprintf(ifname, sizeof(ifname), "%.*s", (int)(nl - 4), n + 4);
+            if (vap_name_live(ifname)) continue;
+            char p[128];
+            snprintf(p, sizeof(p), "/var/run/%s", n);
+            pid_t pid = vap_read_pidfile(ifname);
+            if (pid <= 0) pid = vap_find_hostapd(ifname);
+            if (pid > 0) vap_kill_orphan(pid, "orphan hostapd");
+            unlink(p);
+            vap_remove_files(ifname);
+            if (vap_ifname_is_ours(ifname) && !wireless_has_bss())
+                vap_netdev_delete_name(ifname);
+            if (c->ext_auth_dir) {
+                char s[300];
+                snprintf(s, sizeof(s), "%s/ext-auth-%s", c->ext_auth_dir,
+                         ifname);
+                unlink(s);
+            }
+            printf("watchdog: reaped orphan VAP %s\n", ifname);
+            fflush(stdout);
+        }
+        closedir(d);
+    }
+
+    /* 3. Orphan netdevs in our name space (e.g. after the agent restarted
+          with an empty registry and no pid file was left). */
+    d = opendir("/sys/class/net");
+    if (d) {
+        struct dirent *de;
+        int legacy = wireless_has_bss();
+        while ((de = readdir(d)) != NULL) {
+            if (!vap_ifname_is_ours(de->d_name)) continue;
+            if (vap_name_live(de->d_name)) continue;
+            if (legacy) continue;      /* UCI may own the same name */
+            if (vap_netdev_delete_name(de->d_name)) {
+                printf("watchdog: reaped orphan netdev %s\n", de->d_name);
+                fflush(stdout);
+            }
+        }
+        closedir(d);
+    }
+
+    /* 4. Orphan ext-auth sockets for names with no live VAP.  With extmux
+          the relay owns the paths, but a socket left by an older process
+          still has to go. */
+    if (c->ext_auth_dir) {
+        d = opendir(c->ext_auth_dir);
+        if (d) {
+            struct dirent *de;
+            while ((de = readdir(d)) != NULL) {
+                const char *n = de->d_name;
+                if (strncmp(n, "ext-auth-", 9)) continue;
+                const char *ifname = n + 9;
+                if (vap_name_live(ifname)) continue;
+                if (g_extmux && extmux_vap_by_ifname(g_extmux, ifname))
+                    continue;
+                char s[300];
+                snprintf(s, sizeof(s), "%s/%s", c->ext_auth_dir, n);
+                unlink(s);
+                printf("watchdog: reaped orphan ext-auth socket %s\n", n);
+                fflush(stdout);
+            }
+            closedir(d);
+        }
+    }
 }

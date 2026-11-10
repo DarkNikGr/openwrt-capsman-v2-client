@@ -33,6 +33,15 @@ struct vap {
     int mode;                   /* 0 = ACCESS, 1 = TAG */
     int l2fd;                   /* AF_PACKET RX on the VAP */
     int extfd;                  /* hostapd external-RSN dgram */
+    /* W25 lifecycle ownership.  A VAP is torn down completely: the hostapd
+       we started, the netdev we created, the ext-auth socket we bound, the
+       pid/conf files and the vapid slot.  Anything we did not create must
+       not be deleted (legacy UCI/netifd owns it). */
+    char extpath[128];          /* bound ext-auth socket path */
+    int own_netdev;             /* we created phyN-apM */
+    int hostapd_started;        /* a hostapd was started for this VAP */
+    pid_t hostapd_pid;          /* daemon pid from the pid file (0 = unknown) */
+    time_t hostapd_started_at;  /* for watchdog grace */
 };
 static struct vap g_vap[MAX_RADIOS][16];
 
@@ -106,6 +115,15 @@ static int vchan_get(int port, uint32_t *freq, uint8_t *width, uint8_t *band)
             return 1;
         }
     return 0;
+}
+
+/* A destroyed VAP must not keep stale channel state: a recreate with a new
+   profile would otherwise start hostapd on the old frequency. */
+static void vchan_clear(int port)
+{
+    for (int i = 0; i < 128; i++)
+        if (g_vchan[i].used && g_vchan[i].port == (int)port)
+            memset(&g_vchan[i], 0, sizeof(g_vchan[i]));
 }
 
 /* 0x0a { 0x0b u32 freq, 0x0c u8 width, 0x10 u8 band } from 0x500b/0x6016. */
@@ -271,6 +289,32 @@ static int dp_add_fd(int ifindex, struct vap *v)
            v ? v->rid : -1, v ? v->wid : -1);
     fflush(stdout);
     return 0;
+}
+
+/* W25: close the AF_PACKET readers that belong to one VAP. */
+static void dp_del_fd(int ifindex)
+{
+    for (int i = 0; i < g_ndp; i++)
+        if (g_dp[i].ifindex == ifindex) {
+            close(g_dp[i].fd);
+            g_dp[i] = g_dp[--g_ndp];
+            return;
+        }
+}
+
+static void dp_vap_close(struct vap *v)
+{
+    if (!v) return;
+    for (int i = 0; i < v->napvlan; i++) {
+        dp_del_fd(v->apvlan[i]);
+        sta_forget_ifindex(v->apvlan[i]);
+    }
+    if (v->ifindex > 0) {
+        dp_del_fd(v->ifindex);
+        sta_forget_ifindex(v->ifindex);
+    }
+    v->napvlan = 0;
+    v->l2fd = -1;
 }
 
 static void set_if_mtu(const char *ifname, int mtu)

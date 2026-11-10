@@ -13,8 +13,8 @@ static void cap_reset_session(void)
     }
     for (int r = 0; r < MAX_RADIOS; r++)
         for (int w = 0; w < 16; w++)
-            if (g_vap[r][w].used && g_vap[r][w].extfd >= 0)
-                close(g_vap[r][w].extfd);
+            if (g_vap[r][w].used)
+                ext_auth_close(&g_vap[r][w]);   /* close + unlink legacy socket */
     memset(g_vap, 0, sizeof(g_vap));
     for (int r = 0; r < MAX_RADIOS; r++)
         for (int w = 0; w < 16; w++) {
@@ -224,6 +224,7 @@ static int run_once(struct cfg *c)
             last_refresh = time(NULL);
             if (c->mgmt_relay || c->mgmt_source) mgmt_monitor_watchdog();
             if (g_dp_bridge) dp_refresh();
+            if (c->vap_auto) vap_watchdog(c);
         }
         if (time(NULL) - last_echo > 5) {
             send_msg(&ssl, TYPE_ECHO, 0, NULL, 0);
@@ -253,16 +254,23 @@ static int run_once(struct cfg *c)
             const uint8_t *a2v = NULL; uint16_t a2l = 0;
             const uint8_t *cv = NULL; uint16_t cl = 0;
             int a2 = find_el(body, len, 0xa2, &a2v, &a2l) && a2l ? a2v[0] : -1;
-            if (find_el(body, len, 0x0a, &cv, &cl) && cl)
-                vchan_from_tlv((phy << 8) | vap, cv, cl);
+            (void)cv; (void)cl;
             printf("RX 0x500b phy=%d vap=%d a2=%d len=%d\n", phy, vap, a2, len);
             fflush(stdout);
             if (phy >= 0 && phy < c->nradios)
                 createvap_response(&ssl, hdr + 2, phy, vap, c, body, len);
             dc_handle_create(&dc, c, &fd, port, body, len);
         } else if (type == TYPE_DESTROY) {
-            printf("RX 0x600c destroy\n");
+            /* W25: full teardown, then free the vap id.  The manager rejects
+               a 0x47 whose slot is still occupied ("CREATEVAP bad response")
+               and the interface would stay in CreatingVap forever. */
+            int dphy = -1, dvap = -1;
+            printf("RX 0x600c destroy port=0x%04x len=%u\n", port, len);
             fflush(stdout);
+            if (vap_destroy_target(port, body, len, &dphy, &dvap) == 0)
+                vap_destroy(dphy, dvap, "0x600c");
+            else
+                fprintf(stderr, "0x600c: bad port 0x%04x, ignored\n", port);
             send_hdr_msg(&ssl, TYPE_DESTROY_RESP, hdr + 2, NULL, 0);
         } else if (type == TYPE_JOIN_RESP) {
             dump_raw("joinresp", type, port, body, len);

@@ -384,6 +384,26 @@ static int pmap_get(int port, int *ifindex, uint8_t mac[6])
     return 0;
 }
 
+/* Drop every alias for a destroyed VAP (0x201c/0x201f must not resolve to a
+   netdev that no longer exists). */
+static void pmap_del(int port)
+{
+    for (int i = 0; i < 128; i++)
+        if (g_pmap[i].used && g_pmap[i].port == port)
+            memset(&g_pmap[i], 0, sizeof(g_pmap[i]));
+}
+
+/* Delete an AP netdev we created.  NL80211_CMD_DEL_INTERFACE by ifindex is
+   the same operation `iw dev <name> del` performs. */
+static int nl_del_interface(int ifindex)
+{
+    if (ifindex <= 0 || nl_cmd_open() != 0) return -EINVAL;
+    struct nl_buf m;
+    nlb_init(&m, NL80211_CMD_DEL_INTERFACE, NLM_F_ACK);
+    nlb_u32(&m, NL80211_ATTR_IFINDEX, (uint32_t)ifindex);
+    return nl_send_ack(g_nl_cmd_fd, &m);
+}
+
 /* Resolve (phy<<8)|vap to an ifindex, falling back to sysfs. */
 static int vap_ifindex(int port, uint8_t mac[6])
 {
