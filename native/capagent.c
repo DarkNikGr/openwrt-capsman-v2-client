@@ -27,6 +27,7 @@
 #include <netdb.h>
 #include <netinet/in.h>
 #include <sys/ioctl.h>
+#include <sys/file.h>        /* W54: flock for the per-phy hostapd start gate */
 #include <linux/netlink.h>
 #include <linux/genetlink.h>
 #include <linux/nl80211.h>

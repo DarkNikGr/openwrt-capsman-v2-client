@@ -161,8 +161,10 @@ static void vap_write_channel(FILE *f, uint32_t freq, int wcode)
         if (chan < 1 || chan > 14) chan = 6;
         int width = (wcode == 2 || wcode == 3) ? 40 : 20;
         fprintf(f, "hw_mode=g\nchannel=%d\nieee80211n=1\n", chan);
-        if (width == 40)
+        if (width == 40) {
             fprintf(f, "ht_capab=[HT40%c]\n", chan <= 7 ? '+' : '-');
+            fprintf(f, "noscan=1\n");       /* W54: no 40 MHz coex scan */
+        }
         return;
     }
 
@@ -176,6 +178,18 @@ static void vap_write_channel(FILE *f, uint32_t freq, int wcode)
     }
 
     fprintf(f, "hw_mode=a\nchannel=%d\n", chan);
+    /* W54: never let hostapd run the 40 MHz coexistence scan
+     * (HAPD_IFACE_HT_SCAN, ieee80211n_check_40mhz()).  On mt76x02 one
+     * wiphy = one channel, so the offchannel scan that hostapd issues
+     * before enabling an HT40/VHT BSS returns -EBUSY (or never completes)
+     * as soon as another interface exists on the phy.  After 15 retries
+     * hostapd falls back to HT20, which then cannot carry the VHT80
+     * centre frequency ("80/80+80 MHz: no second channel offset") and the
+     * BSS ends AP-DISABLED -- the W38 "5 GHz per-BSS hostapd hangs in D"
+     * symptom.  noscan=1 skips only the scan; HT40 and VHT80 stay.  The
+     * stock OpenWrt hostapd already ships this option (300-noscan.patch)
+     * and netifd sets ht_coex=0 for the same reason. */
+    if (width >= 40) fprintf(f, "noscan=1\n");
     if (g_vap_country && g_vap_country[0])
         fprintf(f, "country_code=%s\nieee80211d=1\n%s\n", g_vap_country,
                 vap_is_dfs_chan(chan) ? "ieee80211h=1" : "");
@@ -241,10 +255,37 @@ static void vap_bridge_if_present(const char *ifname, unsigned vlan,
     (void)ifname;
 }
 
+/* W54: serialise hostapd starts per agent and only report success when the
+ * BSS really reached AP-ENABLED.  hostapd -B daemonizes after driver init
+ * but before eloop setup, so a pid file exists while the interface can
+ * still be in HT_SCAN/DFS; the next start on the same phy then gets EBUSY
+ * or blocks in D state.  The lock plus the bounded wait (and the hard kill
+ * on timeout) keep one bad BSS from poisoning the whole radio. */
+static int vap_wait_ap_enabled(const char *logf, int ms)
+{
+    for (int i = 0; i < ms / 100; i++) {
+        FILE *f = fopen(logf, "r");
+        if (f) {
+            char b[4096];
+            size_t n = fread(b, 1, sizeof(b) - 1, f);
+            fclose(f);
+            b[n] = 0;
+            if (strstr(b, "AP-ENABLED") ||
+                strstr(b, "DFS-CAC-START") ||
+                strstr(b, "DFS-CAC-COMPLETED")) return 1;
+            if (strstr(b, "AP-DISABLED") ||
+                strstr(b, "driver initialization failed") ||
+                strstr(b, "Could not set interface")) return 0;
+        }
+        usleep(100000);
+    }
+    return -1;
+}
+
 /* Build and start a hostapd instance for one provisioned VAP. */
-static int vap_hostapd_start(int port, const char *ifname, int phy, int vapid,
-                             const uint8_t *body, uint16_t len,
-                             const struct vap *vp, const struct cfg *c)
+static int vap_hostapd_start_one(int port, const char *ifname, int phy, int vapid,
+                                 const uint8_t *body, uint16_t len,
+                                 const struct vap *vp, const struct cfg *c)
 {
     const uint8_t *ssid = NULL, *ie = NULL, *chv = NULL;
     uint16_t sl = 0, il = 0, cl = 0;
@@ -352,7 +393,27 @@ static int vap_hostapd_start(int port, const char *ifname, int phy, int vapid,
             return -1;
         }
     }
+    /* Bounded, log-based readiness check: the pid alone proves nothing,
+     * and hostapd -B may write it only while we are waiting. */
+    int ready = vap_wait_ap_enabled(logf, 12000);
     int hpid = vap_hostapd_pid(ifname);
+    if (ready == 0) {
+        printf("vap: hostapd %s did not enable, see %s\n", ifname, logf);
+        fflush(stdout);
+        if (hpid > 0) kill((pid_t)hpid, SIGTERM);
+        /* Never unlink the pid file here: it may belong to an instance that
+         * is already up (a repeated 0x6016) and unlinking it makes the
+         * watchdog spawn a duplicate.  A stale pid is harmless. */
+        return -1;
+    }
+    if (ready < 0) {
+        /* Still not enabled after 12 s: do not leave it holding the phy. */
+        printf("vap: hostapd %s STUCK (no AP-ENABLED in 12 s), killing pid=%d,"
+               " see %s\n", ifname, hpid, logf);
+        fflush(stdout);
+        if (hpid > 0) kill((pid_t)hpid, SIGKILL);
+        return -1;
+    }
     printf("vap: hostapd %s ssid=%s freq=%u akm=%s%s%s mfp=%d vlan=%u pid=%d\n",
            ifname, (const char *)ssid, freq,
            ri.akm_psk ? "psk" : "", ri.akm_psk256 ? ",psk256" : "",
@@ -360,6 +421,21 @@ static int vap_hostapd_start(int port, const char *ifname, int phy, int vapid,
            vp ? vp->vlan : 0, hpid);
     fflush(stdout);
     return hpid > 0 ? hpid : -1;
+}
+
+static int vap_hostapd_start(int port, const char *ifname, int phy, int vapid,
+                             const uint8_t *body, uint16_t len,
+                             const struct vap *vp, const struct cfg *c)
+{
+    int lockfd = open("/var/run/cap-vap-start.lock",
+                      O_CREAT | O_RDWR | O_CLOEXEC, 0600);
+    if (lockfd >= 0) flock(lockfd, LOCK_EX);
+    int r = vap_hostapd_start_one(port, ifname, phy, vapid, body, len, vp, c);
+    if (lockfd >= 0) {
+        flock(lockfd, LOCK_UN);
+        close(lockfd);
+    }
+    return r;
 }
 
 /* True when the pid file points at a live hostapd **that we started**.
