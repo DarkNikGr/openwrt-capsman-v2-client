@@ -124,13 +124,13 @@ The CAP certificate must be trusted by the manager (see
 
 ```sh
 # on the workstation
-curl -LO https://github.com/DarkNikGr/openwrt-capsman-v2-client/releases/latest/download/capagent-mipsel-v0.1.0-bundle.tar.gz
-scp capagent-mipsel-v0.1.0-bundle.tar.gz root@10.0.0.2:/root/
+curl -LO https://github.com/DarkNikGr/openwrt-capsman-v2-client/releases/latest/download/capagent-mipsel-bundle.tar.gz
+scp capagent-mipsel-bundle.tar.gz root@10.0.0.2:/root/
 
 # on the router
 ssh root@10.0.0.2
 mkdir -p /root/cap-bundle
-tar -C /root/cap-bundle -xzf /root/capagent-mipsel-v0.1.0-bundle.tar.gz
+tar -C /root/cap-bundle -xzf /root/capagent-mipsel-bundle.tar.gz
 cd /root/cap-bundle
 MANAGER=10.0.0.1 ./install.sh
 ```

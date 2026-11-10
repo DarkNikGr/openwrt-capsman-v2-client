@@ -157,9 +157,12 @@ the VAP and keeps the datachan alive; without it the session ends with a
 "data channel timeout".
 
 The manager sends plain Ethernet frames on the datachan (observed: IPv6 ND
-from the VAP MAC). The CAP has to bridge them to/from the local interface for
-`on-capsman` forwarding. EAPOL is the same: RX over the datachan, TX to the
-CAP via `0x201c` over TLS.
+from the VAP MAC). The datachan has a **no-encryption** variant and a secure
+AES-CCM variant; which one is used is a separate manager capability
+(`cap+0x450/0x454`), not the `0x84` bit. The lab CHR selected the
+no-encryption variant, which is why captured frames were plaintext. The CAP
+has to bridge them to/from the local interface for `on-capsman` forwarding.
+EAPOL is the same: RX over the datachan, TX to the CAP via `0x201c` over TLS.
 
 Rekey: the manager sends `0x402b` with `0xa8` (32-byte key) and `0xa9` (slot)
 and expects an empty `0xc02b`; install the new key at the slot and reset the
