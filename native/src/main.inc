@@ -20,8 +20,7 @@ static void cap_reset_session(void)
     for (int r = 0; r < MAX_RADIOS; r++)
         for (int w = 0; w < 16; w++) {
             struct vap *vp = &g_vap[r][w];
-            if (vp->extfd >= 0) close(vp->extfd);
-            vp->extfd = -1;
+            ext_auth_close(vp);      /* close *and unlink* the legacy socket */
             vp->l2fd = -1;
             if (!vp->used) continue;
             if (vp->ifname[0] && if_nametoindex(vp->ifname) > 0) {
@@ -346,6 +345,7 @@ static int run_once(struct cfg *c)
             last_refresh = time(NULL);
             if (c->mgmt_relay || c->mgmt_source) mgmt_monitor_watchdog();
             if (g_dp_bridge) dp_refresh();
+            if (c->vap_auto) vap_watchdog(c);
         }
         if (time(NULL) != last_own) {
             last_own = time(NULL);
@@ -393,10 +393,16 @@ static int run_once(struct cfg *c)
                 dc_handle_create(&dc, c, &fd, port, body, len);
             }
         } else if (type == TYPE_DESTROY) {
-            /* W33: a destroy must release our bookkeeping (the 16-slot
-               vapid map wedged the second create cycle) but must never
-               touch a netdev/hostapd that netifd owns. */
-            vap_destroy(port, c);
+            /* W25/W38/W52: full teardown before 0xe00c.  The header port is
+               authoritative on 7.25.1; a body 0x47/0x08 recovers a manager
+               that sends vap 0 or lost the registry across a reconnect. */
+            int dphy = -1, dvapid = -1;
+            printf("RX 0x600c destroy port=0x%04x len=%u\n", port, len);
+            fflush(stdout);
+            if (vap_destroy_target(port, body, len, &dphy, &dvapid) == 0)
+                vap_destroy((dphy << 8) | dvapid, c);
+            else
+                fprintf(stderr, "0x600c: bad port 0x%04x, ignored\n", port);
             send_hdr_msg(&ssl, TYPE_DESTROY_RESP, hdr + 2, NULL, 0);
         } else if (type == TYPE_JOIN_RESP) {
             dump_raw("joinresp", type, port, body, len);

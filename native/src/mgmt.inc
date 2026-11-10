@@ -708,6 +708,24 @@ static void mgmt_vap_add(int ifindex)
         mgmt_monitor_add(ifindex);
 }
 
+/* The monitor VIF is per radio, so close it only when the last VAP on that
+   radio is destroyed.  Closing the fd drops the SOCKET_OWNER netdev. */
+static void mgmt_vap_del(int phy)
+{
+    if (phy < 0 || phy >= MAX_RADIOS) return;
+    for (int w = 0; w < 16; w++)
+        if (g_vap[phy][w].used)
+            return;                     /* another VAP still needs it */
+    for (int i = 0; i < g_mon_n; i++) {
+        if (g_mon[i].phy != phy || g_mon[i].fd < 0) continue;
+        close(g_mon[i].fd);
+        g_mon[i].fd = -1;
+        g_mon[i].ifindex = -1;
+        printf("mon: phy%d monitor closed (last VAP destroyed)\n", phy);
+        fflush(stdout);
+    }
+}
+
 /* Production nl80211 event service. */
 static void mgmt_service_nl(mbedtls_ssl_context *ssl, struct dc_ctx *dc,
                             const struct cfg *c)
@@ -775,9 +793,25 @@ static int ext_auth_bind(struct vap *v, const char *dir)
     chmod(path, 0660);
     fcntl(fd, F_SETFL, fcntl(fd, F_GETFL) | O_NONBLOCK);
     v->extfd = fd;
+    snprintf(v->extpath, sizeof(v->extpath), "%s", path);
     printf("EXT-AUTH: bound %s rid=%d wid=%d\n", path, v->rid, v->wid);
     fflush(stdout);
     return 0;
+}
+
+/* Close and unlink the per-VAP ext-auth socket.  Leaving the path behind
+   makes the next hostapd bind fail with EADDRINUSE after a recreate. */
+static void ext_auth_close(struct vap *v)
+{
+    if (!v) return;
+    if (v->extfd >= 0) {
+        close(v->extfd);
+        v->extfd = -1;
+    }
+    if (v->extpath[0]) {
+        unlink(v->extpath);
+        v->extpath[0] = 0;
+    }
 }
 
 static void ext_auth_service(mbedtls_ssl_context *ssl, struct dc_ctx *dc,

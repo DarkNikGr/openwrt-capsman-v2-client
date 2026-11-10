@@ -37,6 +37,17 @@ struct vap {
        deleted, and only a hostapd we started may ever be stopped. */
     int we_created;
     int ap_started;
+    /* W25/W38/W52 lifecycle bookkeeping: one netdev and one hostapd per
+       (phy,vapid).  extpath is the legacy per-BSS ext-auth socket we bound;
+       hostapd_fail counts bounded start retries so a broken profile cannot
+       spawn a daemon every second forever. */
+    char extpath[128];
+    int own_netdev;
+    int hostapd_started;
+    int hostapd_pid;
+    time_t hostapd_started_at;
+    int hostapd_fail;
+    int hostapd_given_up;
 };
 static struct vap g_vap[MAX_RADIOS][16];
 
@@ -112,13 +123,22 @@ static int vchan_get(int port, uint32_t *freq, uint8_t *width, uint8_t *band)
     return 0;
 }
 
-static void vchan_del(int port)
+static void __attribute__((unused)) vchan_del(int port)
 {
     for (int i = 0; i < 128; i++)
         if (g_vchan[i].used && g_vchan[i].port == (int)port) {
             g_vchan[i].used = 0;
             return;
         }
+}
+
+/* Drop every channel alias for a destroyed VAP (the canonical port and the
+   possibly different 0x500b request port). */
+static void vchan_clear(int port)
+{
+    for (int i = 0; i < 128; i++)
+        if (g_vchan[i].used && g_vchan[i].port == (int)port)
+            memset(&g_vchan[i], 0, sizeof(g_vchan[i]));
 }
 
 /* 0x0a { 0x0b u32 freq, 0x0c u8 width, 0x10 u8 band } from 0x500b/0x6016. */
@@ -326,6 +346,23 @@ static void dp_del_ifindex(int ifindex)
         g_ndp--;
         return;
     }
+}
+
+/* Close every AF_PACKET reader and station mapping that belongs to one VAP,
+   including its AP_VLANs.  The netdev itself is handled by ownership.inc. */
+static void dp_vap_close(struct vap *v)
+{
+    if (!v) return;
+    for (int i = 0; i < v->napvlan; i++) {
+        dp_del_ifindex(v->apvlan[i]);
+        sta_forget_ifindex(v->apvlan[i]);
+    }
+    if (v->ifindex > 0) {
+        dp_del_ifindex(v->ifindex);
+        sta_forget_ifindex(v->ifindex);
+    }
+    v->napvlan = 0;
+    v->l2fd = -1;
 }
 
 static void dp_vap_open(struct vap *v)

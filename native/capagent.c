@@ -199,6 +199,9 @@ static int g_ca_loaded = 0;
  * Declared here because nl80211/policy/apply/mgmt/vap are included before it. */
 struct vap;
 static int  own_has_entry(int port);
+static int  own_name_claimed(const char *ifname);
+static int  own_name_is_netifd(const char *ifname);
+static int  own_forced_readonly(const struct cfg *c);
 static int  own_created_port(int port);
 static int  own_managed_strict(int port);
 static int  own_ifname_for_port(int port, char *out, size_t n);

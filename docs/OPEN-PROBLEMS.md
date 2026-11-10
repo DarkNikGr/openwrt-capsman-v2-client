@@ -28,6 +28,7 @@ the **hardware/factory-reset proof** — see `docs/MANAGER-ONLY.md`.
 | F10 | RSN-IE mismatch fixed at the CAP side: patch `9997-external-rsn-ie.patch` makes hostapd advertise the manager's 28-byte M3 element byte-for-byte; `vap.inc` writes `external_rsn_ie` when the installed `wpad` supports it. Verified on the host (`RSN: Own IEs` identical) and on the mipsel binary under qemu; station-side acceptance on hardware still pending. | `docs/patches/9997-…`, `native/src/vap.inc` |
 | F11 | The zero-touch sysupgrade image (capagent + certificate + CA + patched `wpad`, no SSH/firewall/DHCP) is built and passes 55/55 static content checks, but it has **never been flashed**, so boot, factory reset and rejoin are unverified on hardware. | image content check, `docs/MANAGER-ONLY.md` §2.3 |
 | F12 | The 5 GHz start failure is a config-shape problem (VHT80 without `vht_oper_centr_freq_seg0_idx`, no HT40 secondary, no `country_code`), not DFS or a driver limit. A candidate fix was investigated but is **not merged** in 0.4.0. | `docs/MANAGER-ONLY.md` §2.2 |
+| F13 | The VAP lifecycle is single-implementation: W34 ownership/journal + W38/W25/W28 teardown. Live: 3 × create/start/destroy cycles of 4 BSSes on phy0 with zero netdev/hostapd/pid/conf/socket left and `0x47` slots 0..3 reused every cycle; local hwsim: 5 cycles + duplicate 0x6016 ignore/restart + 3 × 8 VAPs. | W52 `REPORT.md`, `docs/W52-LIFECYCLE.md` |
 
 ## Open blockers (ranked)
 
@@ -37,9 +38,14 @@ the **hardware/factory-reset proof** — see `docs/MANAGER-ONLY.md`.
 2. **5 GHz hostapd start** on the MT7612E: the generated config needs a
    regulatory domain, HT40 secondary and `vht_oper_centr_freq_seg0_idx` before
    VHT80 can resolve a channel. Candidate fix not merged (F12).
-3. **VAP lifecycle** — `0x600c` never stops hostapd/deletes the netdev/releases
-   the id, so a second create cycle for the same port can duplicate or wedge
-   (W25/W28).
+3. ~~**VAP lifecycle**~~ — solved in W52: `0x600c` parses the target
+   (header port, body `0x47`/`0x08`), stops hostapd, drops the ext-auth
+   socket/datachan key, deletes the netdev only when the ownership table
+   proves it ours, waits for it to disappear, then releases the id.  A
+   duplicate `0x6016` is ignored (same body) or restarts in place (changed
+   body), never stacks; a failed start is retried 5 times and reported.  A
+   5 s watchdog reaps orphan hostapd/pid/conf/socket/netdev objects.  See
+   `docs/W52-LIFECYCLE.md`, `docs/W38-LIFECYCLE.md` and the live W52 run.
 4. **Station-side M3 acceptance** with the patched `wpad` on real hardware
    (one `wpa_supplicant -dd` connect); the IE bytes are already equal.
 5. **Zero-touch boot** — the client and hostapd must live in ROM (custom

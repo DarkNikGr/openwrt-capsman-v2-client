@@ -7,6 +7,7 @@ static int ext_auth_bind(struct vap *v, const char *dir);
 static int vap_netdev_create(int phy, const char *ifname, const uint8_t mac[6]);
 static void cap_vap_ready(int phy, int vapid, int ifindex, const char *ifname,
                           const uint8_t mac[6], const struct cfg *c);
+static void vap_destroy(int port, const struct cfg *c);
 
 static uint32_t ccfi80(uint32_t f)
 {
@@ -87,7 +88,33 @@ static size_t add_channel_tlvs(uint8_t *b, size_t n, int phy)
    use, it only sends the (virtual) MAC in TLV 0x08.  We must return a unique
    0..15 per interface and keep it stable for the same MAC, otherwise the
    manager rejects the reply as a duplicate ("CREATEVAP bad response") and the
-   virtual user stays in CreatingVap forever. */
+   virtual user stays in CreatingVap forever.
+
+   W25/W28/W52: the slot is a real resource.  It is released on 0x600c only
+   after the netdev is gone, and allocation never falls back to slot 0 (the
+   old bug that wedged the second create cycle).  16/16 taken returns -1 and
+   the caller sends no 0xd00b, so the manager retries instead of accepting a
+   duplicate id.  A total cap is a second line of defence against a manager
+   that keeps creating BSSes without ever destroying them. */
+#define VAP_TOTAL_MAX 64
+
+static int vap_total_limit(void)
+{
+    const char *s = getenv("CAPAGENT_MAX_VAPS");
+    long v = s ? strtol(s, NULL, 0) : 0;
+    if (v >= 1 && v <= MAX_RADIOS * 16) return (int)v;
+    return VAP_TOTAL_MAX;
+}
+
+static int vap_total_live(void)
+{
+    int n = 0;
+    for (int r = 0; r < MAX_RADIOS; r++)
+        for (int w = 0; w < 16; w++)
+            if (g_vap[r][w].used) n++;
+    return n;
+}
+
 static struct {
     int used;
     uint8_t mac[6];             /* identity the manager uses (0x08) */
@@ -243,14 +270,19 @@ static void vap_bssid_alloc(int phy, const uint8_t want[6], uint8_t out[6])
         for (int i = 0; i < 8; i++) bss_addr_of_idx(base, i, legal[i]);
         nl = 8;
     }
-    int compatible = !memcmp(want + 1, base + 1, 5);
-    if (compatible) {
-        int idx = bss_idx_of(base, want);
-        if (!(g_bss_used[r] & (1u << idx))) {
-            g_bss_used[r] |= (uint8_t)(1u << idx);
-            return;                      /* manager plan is legal: keep it */
+    /* Use the manager's address unchanged only when the driver publishes
+     * exactly that address.  Matching bytes 1..5 is not enough: byte 0
+     * also selects the index, and an address outside the plan could make
+     * the driver reprogram the radio base MAC on index 0. */
+    for (int i = 0; i < nl; i++)
+        if (!memcmp(want, legal[i], 6)) {
+            int idx = bss_idx_of(base, want);
+            if (!(g_bss_used[r] & (1u << idx))) {
+                g_bss_used[r] |= (uint8_t)(1u << idx);
+                return;                  /* manager plan is legal: keep it */
+            }
+            break;              /* legal, but its index is already taken */
         }
-    }
     for (int i = 0; i < nl; i++) {
         int idx = bss_idx_of(base, legal[i]);
         if (g_bss_used[r] & (1u << idx)) continue;
@@ -279,7 +311,8 @@ static void vap_bssid_free(int phy, const uint8_t mac[6])
 
 /* First free legal address, for the mgmt monitor.  Returns 1 and marks the
  * index when it found one, 0 when the phy does not need the treatment, -1
- * when the phy is full. */
+ * when the phy is full.  W56: index 0 is the radio MAC and the VAP0 slot, so
+ * the monitor must never take it; start the search at legal index 1. */
 static int vap_bssid_pick_free(int phy, uint8_t out[6])
 {
     if (!phy_is_mt76x02(phy)) return 0;
@@ -292,8 +325,9 @@ static int vap_bssid_pick_free(int phy, uint8_t out[6])
         for (int i = 0; i < 8; i++) bss_addr_of_idx(base, i, legal[i]);
         nl = 8;
     }
-    for (int i = 0; i < nl; i++) {
+    for (int i = 1; i < nl; i++) {
         int idx = bss_idx_of(base, legal[i]);
+        if (idx == 0 || !memcmp(legal[i], base, 6)) continue;
         if (g_bss_used[r] & (1u << idx)) continue;
         g_bss_used[r] |= (uint8_t)(1u << idx);
         memcpy(out, legal[i], 6);
@@ -301,6 +335,7 @@ static int vap_bssid_pick_free(int phy, uint8_t out[6])
     }
     return -1;
 }
+
 
 static int vapid_lookup(int phy, const uint8_t mac[6])
 {
@@ -315,22 +350,59 @@ static int vapid_lookup(int phy, const uint8_t mac[6])
 
 /* W54: match either identity so a 0x6016/0x600c that echoes the manager's
  * MAC still resolves to the VAP whose hardware BSSID had to be remapped. */
+static void vapid_claim(int phy, int vapid, const uint8_t mac[6])
+{
+    int r = phy % MAX_RADIOS;
+    if (vapid < 0 || vapid > 15) return;
+    g_vmap[r][vapid].used = 1;
+    memcpy(g_vmap[r][vapid].mac, mac, 6);
+    memcpy(g_vmap[r][vapid].bssid, mac, 6);
+}
+
+/* A slot is free only when no allocation and no (possibly not-yet-journaled)
+   VAP registry row owns it.  Returns -1 when all 16 slots are taken. */
 static int vapid_for(int phy, const uint8_t mac[6])
+{
+    int r = phy % MAX_RADIOS;
+    int id = vapid_lookup(phy, mac);
+    if (id >= 0) return id;
+    /* A registry row may exist without a g_vmap allocation (reconnect or a
+       create whose reply was lost): the MAC still owns that id. */
+    for (int i = 0; i < 16; i++)
+        if (g_vap[r][i].used && !memcmp(g_vap[r][i].bssid, mac, 6)) {
+            vapid_claim(phy, i, mac);
+            return i;
+        }
+    for (int i = 0; i < 16; i++)
+        if (!g_vmap[r][i].used && !g_vap[r][i].used) {
+            vapid_claim(phy, i, mac);
+            return i;
+        }
+    return -1;
+}
+
+static void vapid_release(int phy, const uint8_t mac[6])
 {
     int r = phy % MAX_RADIOS;
     for (int i = 0; i < 16; i++)
         if (g_vmap[r][i].used &&
             (!memcmp(g_vmap[r][i].mac, mac, 6) ||
-             !memcmp(g_vmap[r][i].bssid, mac, 6)))
-            return i;
-    for (int i = 0; i < 16; i++)
-        if (!g_vmap[r][i].used) {
-            g_vmap[r][i].used = 1;
-            memcpy(g_vmap[r][i].mac, mac, 6);
-            memcpy(g_vmap[r][i].bssid, mac, 6);
-            return i;
+             !memcmp(g_vmap[r][i].bssid, mac, 6))) {
+            vap_bssid_free(phy, g_vmap[r][i].bssid);
+            memset(&g_vmap[r][i], 0, sizeof(g_vmap[r][i]));
         }
-    return 0;
+}
+
+/* The 0x600c path releases by id: after a reconnect the registry may have
+   been cleared, so the MAC is not always available. */
+static void vapid_release_slot(int phy, int vapid)
+{
+    int r = phy % MAX_RADIOS;
+    if (vapid >= 0 && vapid < 16) {
+        if (g_vmap[r][vapid].used)
+            vap_bssid_free(phy, g_vmap[r][vapid].bssid);
+        memset(&g_vmap[r][vapid], 0, sizeof(g_vmap[r][vapid]));
+    }
 }
 
 static void vapid_set_bssid(int phy, const uint8_t mac[6], const uint8_t bssid[6])
@@ -343,19 +415,17 @@ static void vapid_set_bssid(int phy, const uint8_t mac[6], const uint8_t bssid[6
         }
 }
 
-/* Paired with vapid_alloc(); the 0x600c destroy path (open item: VAP
-   lifecycle) is expected to call it, so keep it even though the handler does
-   not exist yet. */
-static void __attribute__((unused)) vapid_release(int phy, const uint8_t mac[6])
+/* First 0x0A record of a create-vap request, as {freq,width,band}. */
+static int req_channel(const uint8_t *req, uint16_t reqlen,
+                       uint32_t *freq, uint8_t *width, uint8_t *band)
 {
-    int r = phy % MAX_RADIOS;
-    for (int i = 0; i < 16; i++)
-        if (g_vmap[r][i].used &&
-            (!memcmp(g_vmap[r][i].mac, mac, 6) ||
-             !memcmp(g_vmap[r][i].bssid, mac, 6))) {
-            vap_bssid_free(phy, g_vmap[r][i].bssid);
-            g_vmap[r][i].used = 0;
-        }
+    const uint8_t *ch = NULL; uint16_t cl = 0;
+    if (!find_el(req, reqlen, 0x0a, &ch, &cl) || cl < 4) return 0;
+    const uint8_t *v = NULL; uint16_t l = 0;
+    if (find_el(ch, cl, 0x0b, &v, &l) && l == 4) *freq = rd32(v);
+    if (find_el(ch, cl, 0x0c, &v, &l) && l == 1) *width = v[0];
+    if (find_el(ch, cl, 0x10, &v, &l) && l == 1) *band = v[0];
+    return *freq >= 2000 && *freq <= 7125;
 }
 
 /* W33: drop only the allocations whose netdev is really gone.  After a
@@ -389,18 +459,68 @@ static void createvap_response(mbedtls_ssl_context *ssl, const uint8_t hdr[10],
         memcpy(mac, rm, 6);
     else if (phy < c->nradios)
         memcpy(mac, c->macs[phy], 6);
-    int known = vapid_lookup(phy, mac);
-    int vapid = known >= 0 ? known : vapid_for(phy, mac);
+    /* W25/W52: allocate or rebind the slot before touching any resource.  A
+       duplicate create for a live MAC is idempotent; a stale mapping is torn
+       down first.  If the radio has no free id we send no reply at all. */
+    int vapid = vapid_lookup(phy, mac);
+    struct vap *vp = NULL;
+    if (vapid >= 0) {
+        vp = &g_vap[phy % MAX_RADIOS][vapid];
+        /* W54: vp->bssid is the address the netdev really carries and may
+           differ from the manager's 0x08 MAC.  The g_vmap identities decide
+           whether this is the same VAP; a repeated create is idempotent. */
+        if (!vp->used) {
+            vapid_release_slot(phy, vapid);
+            vapid = -1;
+            vp = NULL;
+        } else if (memcmp(vp->bssid, g_vmap[phy % MAX_RADIOS][vapid].mac, 6) &&
+                   memcmp(vp->bssid, g_vmap[phy % MAX_RADIOS][vapid].bssid, 6)) {
+            /* g_vmap and g_vap disagreed: clean the old owner first. */
+            vap_destroy((phy << 8) | vapid, c);
+            vapid = -1;
+            vp = NULL;
+        }
+    }
+    if (vapid < 0) {
+        if (vap_total_live() >= vap_total_limit()) {
+            fprintf(stderr, "vap: total VAP cap %d reached; refusing create "
+                    "phy=%d mac=%02x:%02x:%02x:%02x:%02x:%02x\n",
+                    vap_total_limit(), phy, mac[0], mac[1], mac[2], mac[3],
+                    mac[4], mac[5]);
+            fflush(stderr);
+            return;
+        }
+        vapid = vapid_for(phy, mac);
+        if (vapid < 0) {
+            fprintf(stderr, "vap: no free vapid on phy%d; refusing create "
+                    "mac=%02x:%02x:%02x:%02x:%02x:%02x\n", phy, mac[0],
+                    mac[1], mac[2], mac[3], mac[4], mac[5]);
+            fflush(stderr);
+            return;
+        }
+        vp = &g_vap[phy % MAX_RADIOS][vapid];
+        if (vp->used) {
+            /* g_vmap and g_vap disagreed: clean the old owner first. */
+            vap_destroy((phy << 8) | vapid, c);
+            vapid_claim(phy, vapid, mac);
+        }
+    }
+    if (!vp) return;
+    uint8_t bssid[6];
     /* W54: pick an address this radio can actually carry (mt76x02 BSS
      * index plan).  Both identities stay known: mac is what the manager
      * uses, bssid is what the netdev/beacon carries.  A repeated create for
      * the same VAP reuses its address instead of burning another index. */
-    uint8_t bssid[6];
-    if (known >= 0 && memcmp(g_vmap[phy % MAX_RADIOS][known].bssid, mac, 6)) {
-        memcpy(bssid, g_vmap[phy % MAX_RADIOS][known].bssid, 6);
-    } else {
-        vap_bssid_alloc(phy, mac, bssid);
-        vapid_set_bssid(phy, mac, bssid);
+    {
+        int known = vapid_lookup(phy, mac);
+        int r = phy % MAX_RADIOS;
+        if (known >= 0 && g_vmap[r][known].used &&
+            memcmp(g_vmap[r][known].bssid, mac, 6)) {
+            memcpy(bssid, g_vmap[r][known].bssid, 6);
+        } else {
+            vap_bssid_alloc(phy, mac, bssid);
+            vapid_set_bssid(phy, mac, bssid);
+        }
     }
     {   /* remember which vapid owns this VLAN (needed for a2=1 keys) */
         const uint8_t *vv = NULL; uint16_t vl = 0;
@@ -445,8 +565,12 @@ static void createvap_response(mbedtls_ssl_context *ssl, const uint8_t hdr[10],
 
     /* P0: bind the VAP to its netdev, VLAN and channel. */
     {
-        struct vap *vp = &g_vap[phy % MAX_RADIOS][vapid & 0x0f];
         const uint8_t *vv = NULL; uint16_t vl = 0;
+        if (!vp->used) {
+            memset(vp, 0, sizeof(*vp));
+            vp->l2fd = -1;
+            vp->extfd = -1;
+        }
         vp->used = 1;
         vp->rid = phy;
         vp->wid = vapid;
@@ -454,8 +578,15 @@ static void createvap_response(mbedtls_ssl_context *ssl, const uint8_t hdr[10],
         if (find_el(req, reqlen, 0x7d, &vv, &vl) && vl == 2)
             vp->vlan = rd16(vv);
         vp->freq = 0;
-        {   /* 0x0a channel container is authoritative (T13).  W33: read the
-               canonical port, not the (always 0) request vapid alias. */
+        {   /* The request's own 0x0A is authoritative (T13).  Never read a
+               different VAP's slot: on this manager every 0x500b for a radio
+               carries port=(phy<<8)|0, so the canonical slot is the only one
+               that belongs to the VAP being created. */
+            uint32_t rf = 0; uint8_t rw = 0, rb = 0;
+            if (req_channel(req, reqlen, &rf, &rw, &rb))
+                vp->freq = rf;
+        }
+        if (!vp->freq) {
             uint32_t vf = 0;
             if (vchan_get((phy << 8) | vapid, &vf, NULL, NULL) && vf)
                 vp->freq = vf;
@@ -478,8 +609,10 @@ static void createvap_response(mbedtls_ssl_context *ssl, const uint8_t hdr[10],
         snprintf(vp->ifname, sizeof(vp->ifname), "%s", ifname);
         vp->mode = 0;                   /* ACCESS (default) */
         vp->napvlan = 0;
-        if (managed && own_created_port((phy << 8) | vapid))
+        if (managed && own_created_port((phy << 8) | vapid)) {
             vp->we_created = 1;
+            vp->own_netdev = 1;
+        }
         vchan_set((phy << 8) | vapid, vp->freq, 1,
                   band_code_for_freq(vp->freq));
         /* The manager sends vapid=0 in every 0x500b, so only alias the
@@ -525,11 +658,9 @@ static void createvap_response(mbedtls_ssl_context *ssl, const uint8_t hdr[10],
     n += put_el(body+n, 0x47, v, 4);
     put32(v, (uint32_t)ifindex);
     n += put_el(body+n, 0x48, v, 4);
-    /* 0x49 is a nested submessage; the manager reads the interface name
-       from its 0x9e element and ignores a raw string here. */
-    uint8_t sub[64];
-    size_t sn = put_el(sub, 0x9e, ifname, (uint16_t)strlen(ifname));
-    n += put_el(body+n, 0x49, sub, (uint16_t)sn);
+    /* 0x49 is the raw interface name.  The manager stores the whole payload
+       verbatim as the VAP's name (W1); a nested 0x9e blob becomes garbage. */
+    n += put_el(body+n, 0x49, ifname, (uint16_t)strlen(ifname));
 
     /* Advertise this radio's channels so the stock manager can run chansel. */
     size_t nb = n;

@@ -79,6 +79,7 @@ struct own_entry {
     int created;                /* netdev was created by capagent */
     int active;                 /* manager sent 0x6016 for this port */
     int fail_count;             /* hostapd start backoff */
+    int start_given_up;         /* bounded retries exhausted, reported */
     uint64_t retry_at;
     uint8_t bssid[6];
     uint16_t vlan;
@@ -784,6 +785,8 @@ static void own_mirror(struct own_entry *e)
 
 /* Bring up the netdev/hostapd recorded in the journal without waiting for the
  * manager to repeat 0x6016 (netifd reload, wifi reload, agent restart). */
+#define OWN_START_TRIES 5
+
 static void own_try_start(const struct cfg *c, struct own_entry *e)
 {
     uint64_t now = own_now_ms();
@@ -796,6 +799,16 @@ static void own_try_start(const struct cfg *c, struct own_entry *e)
         return;                    /* forced legacy: never spawn hostapd */
     if (e->port != 0xffff && mlme_owns_port(e->port))
         return;                    /* W36: in-CAP MLME, never hostapd */
+    if (e->fail_count >= OWN_START_TRIES) {
+        if (!e->start_given_up) {
+            printf("own: %s: hostapd start gave up after %d attempts; "
+                   "waiting for a new 0x6016\n", e->ifname, OWN_START_TRIES);
+            fflush(stdout);
+            e->start_given_up = 1;
+            g_own_dirty = 1;
+        }
+        return;
+    }
     if (e->retry_at && now < e->retry_at)
         return;
     if (own_nd_has(e->ifname, NULL, 0)) {
@@ -808,6 +821,19 @@ static void own_try_start(const struct cfg *c, struct own_entry *e)
         e->pid = pid;
         return;
     }
+    /* The pid file can be missing while the daemon is alive (hostapd -B
+       detaches before writing it, or someone removed the file).  Use the
+       config path in /proc so we never spawn a second daemon.  The unit test
+       has no /proc scan shim, so skip it there. */
+#ifndef OWN_TEST_PID_OK
+    {
+        pid_t hp = vap_find_hostapd(e->ifname);
+        if (hp > 0) {
+            e->pid = (int)hp;
+            return;
+        }
+    }
+#endif
     memset(&vp, 0, sizeof(vp));
     vp.used = 1;
     vp.rid = e->port >> 8;
@@ -826,13 +852,22 @@ static void own_try_start(const struct cfg *c, struct own_entry *e)
         e->pid = pid;
         e->fail_count = 0;
         e->retry_at = 0;
+        e->start_given_up = 0;
         printf("own: %s: hostapd restored pid=%d\n", e->ifname, pid);
     } else {
         int shift = e->fail_count < 5 ? e->fail_count : 5;
         e->fail_count++;
-        e->retry_at = now + (uint64_t)(2000u << shift);
-        printf("own: %s: hostapd start failed, retry in %ums\n",
-               e->ifname, 2000u << shift);
+        if (e->fail_count >= OWN_START_TRIES) {
+            e->retry_at = 0;
+            e->start_given_up = 1;
+            printf("own: %s: hostapd start failed %d/%d, giving up "
+                   "(reported; a new 0x6016 resets the budget)\n",
+                   e->ifname, e->fail_count, OWN_START_TRIES);
+        } else {
+            e->retry_at = now + (uint64_t)(2000u << shift);
+            printf("own: %s: hostapd start failed %d/%d, retry in %ums\n",
+                   e->ifname, e->fail_count, OWN_START_TRIES, 2000u << shift);
+        }
     }
     fflush(stdout);
     g_own_dirty = 1;
@@ -1232,6 +1267,8 @@ static void own_note_start(const struct cfg *c, int port, const uint8_t *body,
         e->vlan = vp->vlan;
         e->freq = vp->freq;
     }
+    int same_body = body && len && len == e->start_len &&
+                    len <= OWN_START_MAX && !memcmp(e->start, body, len);
     if (body && len && len <= OWN_START_MAX) {
         memcpy(e->start, body, len);
         e->start_len = len;
@@ -1251,11 +1288,24 @@ static void own_note_start(const struct cfg *c, int port, const uint8_t *body,
         return;
     }
     if (e->pid && own_pid_alive(e->pid)) {
-        printf("vap: %s already running pid=%d, not restarted\n",
+        if (same_body) {
+            printf("vap: %s already running pid=%d, duplicate 0x6016 "
+                   "ignored\n", e->ifname, e->pid);
+            own_save();
+            return;
+        }
+        /* Profile/channel changed: replace the daemon, never stack a second
+         * one on the same BSS. */
+        printf("vap: %s profile changed, restarting hostapd pid=%d\n",
                e->ifname, e->pid);
-        own_save();
-        return;
+        own_stop_pid(e->pid);
+        own_files_remove(e->ifname);
+        e->pid = 0;
     }
+    /* A new start request gets a fresh bounded retry budget. */
+    e->fail_count = 0;
+    e->retry_at = 0;
+    e->start_given_up = 0;
     own_try_start(c, e);
     own_save();
 }
@@ -1363,6 +1413,19 @@ static void own_destroy(const struct cfg *c, int port)
 static int own_has_entry(int port)
 {
     return own_by_port((uint16_t)port) != NULL;
+}
+
+/* Watchdog helpers: never reap a name that the journal still owns (the
+   reconcile loop is the only path that may restart/recreate it) or that
+   netifd reports as its own. */
+static int own_name_claimed(const char *ifname)
+{
+    return own_by_name(ifname) != NULL;
+}
+
+static int own_name_is_netifd(const char *ifname)
+{
+    return own_nd_has(ifname, NULL, 0);
 }
 
 static int own_created_port(int port)
