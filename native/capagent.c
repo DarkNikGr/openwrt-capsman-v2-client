@@ -123,7 +123,7 @@ static int real_phy(int phy)
 {
     return (phy >= 0 && phy < MAX_RADIOS) ? g_phy_map[phy] : phy;
 }
-#define BODY_MAX   4096
+#define BODY_MAX   8192
 
 struct cfg {
     const char *manager;        /* caps-man-addresses ("auto" = discover) */

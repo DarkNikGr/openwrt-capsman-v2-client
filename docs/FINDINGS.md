@@ -63,6 +63,21 @@ Band ids: `0x81` 2ghz-g, `0x82` 2ghz-n, `1` 5ghz-a, `2` 5ghz-n, `3` 5ghz-ac,
 `0x80` (the "2.4 GHz" bit used by the regulatory matcher) makes every channel
 fail with `no available channels`. Use `0x81` for a `2ghz-g` configuration.
 
+**The width byte is compared too, and there is no fallback.** A `20mhz`
+configuration needs a `000c=01` descriptor, `20/40mhz` needs `02`, and
+`20/40/80mhz` needs `03`. The manager does not derive band or width from the
+frequency: it selects exactly the descriptor whose band and width match the
+configuration and echoes that descriptor back in `0x6016`. Advertise **one**
+descriptor per `(frequency, band, width)`; a duplicate triple makes the channel
+unusable even though `radio print` lists both rows.
+
+For the Xiaomi MT7603E/MT7612E (no HE) the reply therefore contains
+`0x81@20`, `0x82@20/40` in 2.4 GHz and `0x01@20`, `0x02@20/40`, `0x03@20/40/80`
+in 5 GHz. `0x0d` is the centre of the wider block: 40 MHz = primary ±10
+(`5180→5190`, `5200→5190`, `5745→5755`), 80 MHz one of
+5210/5290/5530/5610/5690/5775/5855. The 28-channel 5 GHz reply body is 4534
+bytes, so the reply buffer must be at least 8 KiB.
+
 Two more TLVs in the same `0xd00b` body are required:
 
 * `0x0061` — current operating frequency (BE32).

@@ -16,32 +16,69 @@ static uint32_t ccfi80(uint32_t f)
     if (f >= 5580 && f <= 5640) return 5610;
     if (f >= 5660 && f <= 5720) return 5690;
     if (f >= 5745 && f <= 5805) return 5775;
-    if (f >= 5825 && f <= 5865) return 5855;
+    if (f >= 5825 && f <= 5885) return 5855;
     return f;
 }
 
 /* 0x000A channel-descriptor TLVs for the CREATEVAP-response (0xD00B) body.
-   The manager's ActManBase::updateHwChans() rebuilds phy+0x20 (+0x28 row ids)
-   from these.  2.4 GHz: 20 MHz, band 0x81 (2ghz-g).  5 GHz: 80 MHz (width 3)
-   with ccfi1, band 0x03 (5ghz-ac), because the 5 GHz configs use 20/40/80. */
+   The manager keeps one row per (frequency, band, width) and echoes the
+   chosen descriptor verbatim in 0x6016.  A profile channel is available
+   only when a descriptor with the profile's band and frequency exists in
+   the width the profile asks for, so every supported combination is
+   emitted.  Widths: 1 = 20, 2 = 40, 3 = 80 MHz; 0x0d is the centre
+   frequency and is required for widths > 20 MHz. */
+static size_t add_chan_desc(uint8_t *b, size_t n, uint32_t freq,
+                            uint8_t width, uint8_t band, uint32_t ccfi)
+{
+    uint8_t sub[48], f[4], c[4];
+    size_t sn = 0;
+    put32(f, freq);
+    sn += put_el(sub + sn, 0x0b, f, 4);
+    sn += put_el(sub + sn, 0x0c, &width, 1);
+    if (width > 1) {
+        put32(c, ccfi);
+        sn += put_el(sub + sn, 0x0d, c, 4);
+    }
+    sn += put_el(sub + sn, 0x10, &band, 1);
+    return n + put_el(b + n, 0x0a, sub, (uint16_t)sn);
+}
+
+/* Centre of the 40 MHz block that contains a 20 MHz primary. */
+static uint32_t c40_for(uint32_t f)
+{
+    if (f < 3000) {
+        if (f + 10 > 2462) return f - 10;   /* top of the band */
+        if (f - 10 < 2412) return f + 10;   /* bottom of the band */
+        return ((((f - 2407) / 5) & 1) ? f + 10 : f - 10);
+    }
+    uint32_t ch = (f - 5000) / 5;
+    return (((ch - 36) % 8) < 4) ? f + 10 : f - 10;
+}
+
 static size_t add_channel_tlvs(uint8_t *b, size_t n, int phy)
 {
     struct phy_bands pb;
     read_phy_bands(phy, &pb);
     for (int i = 0; i < pb.nfreq; i++) {
-        uint8_t sub[48], f[4], c[4];
-        size_t sn = 0;
-        uint8_t width = (pb.freq[i] < 3000) ? 1 : 3;
-        uint8_t band = band_code_for_freq(pb.freq[i]);
-        put32(f, pb.freq[i]);
-        sn += put_el(sub + sn, 0x0b, f, 4);
-        sn += put_el(sub + sn, 0x0c, &width, 1);
-        if (width > 1) {
-            put32(c, ccfi80(pb.freq[i]));
-            sn += put_el(sub + sn, 0x0d, c, 4);
+        uint32_t f = pb.freq[i];
+        if (f < 3000) {                                   /* 2.4 GHz */
+            n = add_chan_desc(b, n, f, 1, 0x81, f);       /* g  20 */
+            n = add_chan_desc(b, n, f, 1, 0x82, f);       /* n  20 */
+            if (f >= 2412 && f <= 2472)                   /* n  40 */
+                n = add_chan_desc(b, n, f, 2, 0x82, c40_for(f));
+        } else if (f < 5925) {                            /* 5 GHz */
+            n = add_chan_desc(b, n, f, 1, 0x01, f);       /* a  20 */
+            n = add_chan_desc(b, n, f, 1, 0x02, f);       /* n  20 */
+            n = add_chan_desc(b, n, f, 1, 0x03, f);       /* ac 20 */
+            if (f >= 5180 && f <= 5885) {
+                n = add_chan_desc(b, n, f, 2, 0x02, c40_for(f)); /* n 40 */
+                n = add_chan_desc(b, n, f, 2, 0x03, c40_for(f)); /* ac 40 */
+            }
+            if (ccfi80(f) != f)                           /* ac 80 */
+                n = add_chan_desc(b, n, f, 3, 0x03, ccfi80(f));
+        } else {                                          /* 6 GHz */
+            n = add_chan_desc(b, n, f, 1, 0x06, f);
         }
-        sn += put_el(sub + sn, 0x10, &band, 1);
-        n += put_el(b + n, 0x0a, sub, (uint16_t)sn);
     }
     return n;
 }
