@@ -94,7 +94,7 @@ static void createvap_response(mbedtls_ssl_context *ssl, const uint8_t hdr[10],
                                const uint8_t *req, uint16_t reqlen)
 {
     uint8_t body[BODY_MAX], v[4], mac[6] = {0};
-    char ifname[32], macname[32] = "";
+    char ifname[32];
     size_t n = 0;
     uint32_t curfreq = 0;
     /* The manager identifies each interface only by the MAC in 0x08. */
@@ -110,57 +110,25 @@ static void createvap_response(mbedtls_ssl_context *ssl, const uint8_t hdr[10],
         if (find_el(req, reqlen, 0x7d, &vv, &vl) && vl == 2)
             vlan_wid_set(phy, rd16(vv), vapid);
     }
-    snprintf(ifname, sizeof(ifname), "phy%d-ap%d", phy, vapid);
-    int ifindex = have_mac
-                  ? ifindex_by_mac_ap(mac, phy, macname,
-                                      sizeof(macname))
-                  : 0;
-    if (ifindex <= 0) {
-        ifindex = read_sysfs_int(ifname, "ifindex");
-        if (ifindex > 0) {
-            int t = nl_get_iftype(ifindex);
-            if (t != NL80211_IFTYPE_AP && t != NL80211_IFTYPE_AP_VLAN) {
-                /* a monitor VIF called phyN-apM is not a BSS */
-                ifindex = 0;
-            }
-        }
-        snprintf(macname, sizeof(macname), "%s", ifname);
-    } else if (macname[0]) {
-        snprintf(ifname, sizeof(ifname), "%s", macname);
-    }
-    /* U3/W36: an explicit -i name for the master is authoritative.  This is
-       also how a CAP avoids colliding with another radio's phyX-apY netdev
-       name (device names are global). */
-    if (vapid == 0 && phy < MAX_RADIOS && c->ifnames[phy][0]) {
-        char conventional[32];
-        snprintf(conventional, sizeof(conventional), "phy%d-ap%d", phy, vapid);
-        if (strcmp(c->ifnames[phy], conventional) != 0) {
-            snprintf(ifname, sizeof(ifname), "%s", c->ifnames[phy]);
-            ifindex = read_sysfs_int(ifname, "ifindex");
-            if (ifindex > 0) snprintf(macname, sizeof(macname), "%s", ifname);
-        }
-    }
-    if (ifindex <= 0 && vapid == 0 && phy < MAX_RADIOS && c->ifnames[phy][0]) {
-        snprintf(ifname, sizeof(ifname), "%s", c->ifnames[phy]);
-        ifindex = read_sysfs_int(ifname, "ifindex");
-    }
-
-    /* W14: the manager treats the reply's ifindex as authoritative, so an
-       existing netdev must be found before 0xd00b is sent.  W33: only
-       capagent may create one, and only when no legacy UCI owns the radios.
-       In legacy mode a missing netdev is reported as ifindex 0; we never
-       create a second BSS behind netifd's back. */
-    int created = 0;
-    if (ifindex <= 0 && ifname[0] && wl_own()) {
-        ifindex = vap_netdev_create(phy, ifname, mac);
-        created = ifindex > 0;
-    }
-    if (ifindex <= 0 && wl_legacy()) {
-        printf("vap: phy=%d vapid=%d mac=%02x:%02x:%02x:%02x:%02x:%02x has no "
-               "netdev; legacy UCI owns the radios, not creating\n",
-               phy, vapid, mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
-        fflush(stdout);
-    }
+    char pref[32];
+    snprintf(pref, sizeof(pref), "phy%d-ap%d", phy, vapid);
+    /* W34: one ownership decision for 0x500b and 0x6016.  netifd wins its
+     * names; the manager VAP moves to cap<phy>-<vapid> instead. */
+    const char *preferred = NULL;
+    if (vapid == 0 && phy < MAX_RADIOS && c->ifnames[phy][0] &&
+        strcmp(c->ifnames[phy], pref) != 0)
+        preferred = c->ifnames[phy];
+    int managed = 0;
+    int ifindex = 0;
+    own_claim(c, phy, vapid, preferred, mac, ifname, sizeof(ifname),
+              &ifindex, &managed);
+    if (ifindex < 0)
+        ifindex = 0;
+    if (!ifname[0])
+        snprintf(ifname, sizeof(ifname), "%s", pref);
+    if (ifindex <= 0)
+        printf("vap: phy=%d vapid=%d has no netdev and no name is available "
+               "(owned=%d)\n", phy, vapid, managed);
 
     /* P0: bind the VAP to its netdev, VLAN and channel. */
     {
@@ -197,7 +165,8 @@ static void createvap_response(mbedtls_ssl_context *ssl, const uint8_t hdr[10],
         snprintf(vp->ifname, sizeof(vp->ifname), "%s", ifname);
         vp->mode = 0;                   /* ACCESS (default) */
         vp->napvlan = 0;
-        if (created) vp->we_created = 1;
+        if (managed && own_created_port((phy << 8) | vapid))
+            vp->we_created = 1;
         vchan_set((phy << 8) | vapid, vp->freq, 1,
                   band_code_for_freq(vp->freq));
         /* The manager sends vapid=0 in every 0x500b, so only alias the
@@ -211,8 +180,9 @@ static void createvap_response(mbedtls_ssl_context *ssl, const uint8_t hdr[10],
                vp->freq, mac[0], mac[1], mac[2], mac[3], mac[4], mac[5],
                ifindex, ifname);
         fflush(stdout);
-        if (c->datapath_bridge) dp_vap_open(vp);
-        if (c->mgmt_relay || c->mgmt_source) mgmt_vap_add(ifindex);
+        if (managed && c->datapath_bridge) dp_vap_open(vp);
+        if (managed && (c->mgmt_relay || c->mgmt_source))
+            mgmt_vap_add(ifindex);
         cap_vap_ready(phy, vapid, ifindex, ifname, mac, c);
     }
 

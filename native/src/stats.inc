@@ -160,11 +160,16 @@ static void send_station_stats(mbedtls_ssl_context *ssl, const struct cfg *c)
             char ifn[32], cmd[96], line[256];
             unsigned freq = 0, width = 0;
             uint32_t tx_kbps = 0, rx_kbps = 0, v;
-            /* Production: phyN-apM.  Lab builds may pass the real netdev. */
-            if (vap == 0 && phy < MAX_RADIOS && c->ifnames[phy][0])
-                snprintf(ifn, sizeof(ifn), "%s", c->ifnames[phy]);
-            else
-                snprintf(ifn, sizeof(ifn), "phy%d-ap%d", phy, vap);
+            /* W34: never poll a netifd/foreign port; use the owned name
+               (it may be an alternate after a collision). */
+            if (!wl_port_managed((phy << 8) | vap)) continue;
+            if (!own_ifname_for_port((phy << 8) | vap, ifn, sizeof(ifn))) {
+                /* Production: phyN-apM.  Lab builds may pass the real netdev. */
+                if (vap == 0 && phy < MAX_RADIOS && c->ifnames[phy][0])
+                    snprintf(ifn, sizeof(ifn), "%s", c->ifnames[phy]);
+                else
+                    snprintf(ifn, sizeof(ifn), "phy%d-ap%d", phy, vap);
+            }
             iface_chan(ifn, &freq, &width);
             snprintf(cmd, sizeof(cmd),
                      "/usr/sbin/iw dev %s station dump 2>/dev/null", ifn);

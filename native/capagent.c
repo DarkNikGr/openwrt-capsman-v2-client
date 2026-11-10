@@ -166,6 +166,7 @@ struct cfg {
     const char *ext_auth_dir;   /* --ext-auth-dir */
     const char *ext_ctrl_dir;   /* hostapd ctrl_interface dir (W8) */
     const char *state_file;     /* key-free extmux journal (W8) */
+    const char *vap_state;      /* W34 netdev ownership journal */
     int fourway_ms;             /* CAP-side 4-way deadline (W8) */
     int m1_retry_ms;            /* M1 retransmit interval (W8) */
     const char *manager_spec;   /* --manager as given, before discovery */
@@ -186,6 +187,30 @@ struct cfg {
 static mbedtls_x509_crt g_ca;
 static int g_ca_loaded = 0;
 
+/* ---- W34 netdev ownership (src/ownership.inc, included after vap.inc) ----
+ * Declared here because nl80211/policy/apply/mgmt/vap are included before it. */
+struct vap;
+static int  own_has_entry(int port);
+static int  own_created_port(int port);
+static int  own_managed_strict(int port);
+static int  own_ifname_for_port(int port, char *out, size_t n);
+static int  own_claim(const struct cfg *c, int phy, int vapid,
+                      const char *preferred, const uint8_t mac[6],
+                      char *ifname, size_t ifname_len,
+                      int *ifindex, int *managed);
+static void own_note_start(const struct cfg *c, int port,
+                           const uint8_t *body, uint16_t len,
+                           const struct vap *vp, int ifindex, int managed);
+static void own_service(const struct cfg *c);
+static void own_init(struct cfg *c);
+static void own_inspect(struct cfg *c);
+static void own_restore_vaps(const struct cfg *c);
+static void own_destroy(const struct cfg *c, int port);
+static void own_policy_refresh(void);
+static int  own_netifd_count(void);
+static int  own_managed_count(void);
+static int  own_any_managed(void);
+
 static void put16(uint8_t *p, uint16_t v) { p[0] = v >> 8; p[1] = v & 0xff; }
 static uint16_t rd16(const uint8_t *p) { return (uint16_t)((p[0] << 8) | p[1]); }
 static void put32(uint8_t *p, uint32_t v) { p[0]=v>>24; p[1]=v>>16; p[2]=v>>8; p[3]=v; }
@@ -201,6 +226,7 @@ static void put32(uint8_t *p, uint32_t v) { p[0]=v>>24; p[1]=v>>16; p[2]=v>>8; p
 #include "src/mgmt.inc"   /* EAPOL/key descriptors, 0x200e/0x2015/0x2018 helpers */
 #include "src/mlme.inc"   /* W36: in-CAP MLME for one VAP (no hostapd) */
 #include "src/vap.inc"    /* manager-driven VAP creation + hostapd (0x500b/0x6016) */
+#include "src/ownership.inc"   /* W34 netdev ownership: netifd vs capagent */
 #include "src/discovery.inc"   /* manager discovery and MAC/ifname resolution */
 #include "src/stats.inc"   /* 0x200e signal + 0x2015 counters/rates */
 #include "src/lab.inc"   /* CAPAGENT_LAB: hwsim AP, mgmt relay, test injection */

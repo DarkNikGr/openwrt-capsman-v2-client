@@ -10,7 +10,9 @@ mbedTLS and nl80211 so it can also be unit-tested on a host.
 |---|---|
 | `util.inc` | TLV/hex helpers, sysfs readers, join (`0x4029`) and NEWPHY (`0x001d`) builders |
 | `nl80211.inc` | generic netlink: control-port EAPOL, mgmt-frame TX, `NEW_KEY`/`SET_KEY`, station authorize, validated port→ifindex map |
-| `policy.inc` | **W33**: legacy-vs-own ownership decision, deterministic AP-only MAC→netdev lookup, `--selftest-policy` |
+| `policy.inc` | W33 API: session mode, per-port authority, deterministic AP-only MAC→netdev lookup, `--selftest-policy` |
+| `netifd_status.inc` | **W34**: dependency-free parser for `ubus call network.wireless status` |
+| `ownership.inc` | **W34**: single port→ifname/ifindex/pid/owner table, journal, netifd reconcile, `0x600c` delete |
 | `apply.inc` | `0x77`/M2 config parse and UCI apply (argv, no shell); refused in legacy mode |
 | `datapath.inc` | split-MAC VAP registry, station map, AF_PACKET bridge, VLAN policy |
 | `datachan.inc` | c2 datachan: AES-CCM/plain (`a2`), keepalive, per-VAP keys, `0x402b` rekey |
@@ -23,18 +25,27 @@ mbedTLS and nl80211 so it can also be unit-tested on a host.
 | `main.inc` | run loop, per-attempt discovery/session reset, options, `main` |
 | `extmux.c` / `extmux.h` | per-BSS external-RSN relay: sessions keyed by (port, MAC), 4-way deadline/retry, ctrl reply checking, journal/resync |
 
-## Ownership invariant (W33)
+## Ownership invariant (W33 API, W34 model)
 
-`policy.inc` classifies `/etc/config/wireless` at the start of every session:
+`policy.inc` keeps the W33 API (`wl_legacy()`, `wl_own()`,
+`vap_should_start_bss()`, `vap_port_alias_ok()`, `--check-wireless`,
+`--selftest-policy`) but the production decision now comes from
+`ubus call network.wireless status` parsed by `netifd_status.inc`, reconciled
+into the one table in `ownership.inc` (journal:
+`/var/run/capagent-vaps.state`, `--vap-state FILE`).
 
-| wifi-iface sections | Mode | capagent may |
+| Netdev state | Owner | capagent may |
 |---|---|---|
-| **>= 1** | `legacy` | observe only: report `0x2018`, answer the control channel. **Never** create/delete/up/down/tune a netdev, start or stop hostapd, install keys, write UCI or call `network.wireless reconf`. |
-| **0** | `own` | create the AP netdevs and hostapd BSSes the manager asks for, and tear them down on `0x600c`. |
+| in `network.wireless status` | `netifd` | observe only; never create/delete/start/stop/install keys |
+| in the journal / our `vap-*.pid` | `capagent` | create, start hostapd, install keys, tear down on `0x600c` |
+| exists, neither | `foreign` | never touch; manager VAP gets an alternate name |
+| manager asked, probe unusable | `pending` | retry when the probe recovers |
 
-The switch is one predicate (`wl_legacy()`); every side-effect site is behind
-it. `capagent --check-wireless [--wireless-config FILE]` prints the decision.
-
+`wl_legacy()` remains the coarse "netifd owns at least one wireless ifname"
+predicate for global UCI/apply decisions.  Per-netdev effects use
+`wl_port_managed()` / `own_claim()`.  `--wireless-owner legacy` forces the old
+fully read-only contract.  `--check-wireless` is read-only (journal + ubus
+probe, no reconcile/cleanup).
 
 ## Build
 
@@ -42,7 +53,7 @@ With an OpenWrt SDK tree (mt7621, mbedTLS in staging_dir):
 
 ```sh
 make SDK=/path/to/openwrt-sdk
-make SDK=/path/to/openwrt-sdk check     # crypto + ownership-policy tests under qemu-mipsel
+make SDK=/path/to/openwrt-sdk check     # crypto + policy + W34 parser/state-machine tests under qemu-mipsel
 ```
 
 With a standalone toolchain + mbedTLS source prefix:

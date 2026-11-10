@@ -9,7 +9,8 @@
 #   make TOOLCHAIN=... MBEDTLS=...
 #       classic standalone toolchain + mbedtls source prefix
 #
-# `make check` runs the AES-CCM known-answer tests under qemu-mipsel.
+# `make check` runs the AES-CCM known-answer tests, the W33 policy selftest,
+# and the W34 ownership/parser tests under qemu-mipsel.
 
 SDK ?=
 
@@ -51,11 +52,28 @@ capagent-mipsel: $(SRCS) $(HDRS)
 
 # AES-CCM known-answer tests (RFC 3610 + the c2 datachan header) and the
 # W33 ownership-policy checks, both under qemu-mipsel.
-check: capagent-mipsel
+W34_TEST_DIR := $(CURDIR)/.w34-tests
+
+# Host-style tests built for mipsel and executed with qemu-mipsel, so they run
+# in the same ABI as the target binary.
+w34-tests:
+	mkdir -p $(W34_TEST_DIR)/run $(W34_TEST_DIR)/tmp
+	$(CC) $(CFLAGS) -Wno-unused-function -Wno-format-truncation -static -I. \
+	    -DOWN_RUN_DIR="\"$(W34_TEST_DIR)/run\"" \
+	    -DOWN_TMP_DIR="\"$(W34_TEST_DIR)/tmp\"" \
+	    -DOWN_PROBE_MS=0 -DOWN_TEST_PID_OK \
+	    -o $(W34_TEST_DIR)/test_ownership ../tests/test_ownership.c
+	W34_TEST_DIR=$(W34_TEST_DIR)/run $(QEMU) $(W34_TEST_DIR)/test_ownership
+	$(CC) $(CFLAGS) -Wno-format-truncation -static -I. \
+	    -o $(W34_TEST_DIR)/test_netifd_status ../tests/test_netifd_status.c
+	$(QEMU) $(W34_TEST_DIR)/test_netifd_status
+
+check: capagent-mipsel w34-tests
 	$(QEMU) ./capagent-mipsel --crypto-selftest
 	$(QEMU) ./capagent-mipsel --selftest-policy
 
 clean:
 	rm -f capagent-mipsel
+	rm -rf $(W34_TEST_DIR)
 
-.PHONY: all check clean
+.PHONY: all check clean w34-tests

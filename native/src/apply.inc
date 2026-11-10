@@ -287,7 +287,8 @@ static void apply_vaps(void)
     run_argv(commit);
     for (int i = 0; i < ndev; i++) {
         char json[64];
-        snprintf(json, sizeof(json), "{\"device\":\"%s\"}", devs[i]);
+        snprintf(json, sizeof(json), "{\"device\":\"%.*s\"}",
+                 (int)sizeof(devs[i]) - 1, devs[i]);
         char *av[] = { "ubus", "call", "network.wireless", "reconf",
                        json, NULL };
         run_argv(av);

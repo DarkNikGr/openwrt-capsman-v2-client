@@ -84,10 +84,11 @@ static void handle_201c(mbedtls_ssl_context *ssl, int port,
     eapol_strip(&eapol, &elen);
     eapol_log("TX", mac, eapol, elen);
 
-    if (wl_legacy()) {
-        /* hostapd/wpad on the CAP is the RSN authenticator for a legacy BSS;
-           injecting the manager's EAPOL would race its 4-way.  Read-only. */
-        printf("0x201c: legacy UCI owns the 4-way, not relaying to STA\n");
+    if (!wl_port_managed(xm_canon_port(port))) {
+        /* netifd/wpad (or a foreign netdev) owns this BSS: injecting the
+           manager's EAPOL would race its 4-way.  Read-only. */
+        printf("0x201c: port 0x%04x is not capagent-owned, not relaying\n",
+               port);
         fflush(stdout);
         return;
     }
@@ -479,13 +480,13 @@ static void mgmt_monitor_add(int ifindex)
     if (slot < 0 && g_mon_n < MON_MAX) slot = g_mon_n++;
     if (slot < 0) return;
     int mi;
-    if (wl_legacy()) {
+    if (!own_any_managed()) {
         mi = mon_find_existing(phy);
         if (mi <= 0) {
             g_mon[slot].phy = phy; g_mon[slot].fd = -1;
             g_mon[slot].ifindex = -1;
-            printf("mon: legacy mode, no existing monitor VIF on phy%d; "
-                   "not creating one\n", phy);
+            printf("mon: no capagent VAP on phy%d and no existing monitor "
+                   "VIF; not creating one\n", phy);
             fflush(stdout);
             return;
         }
@@ -650,12 +651,12 @@ static void mgmt_vap_add(int ifindex)
 {
     if (ifindex <= 0) return;
     if (g_msrc < 0) {
-        if (wl_legacy()) {
-            /* Legacy mode: REGISTER_FRAME belongs to wpad and a new monitor
-               VIF would be a netdev creation.  Observe through a monitor VIF
-               that already exists, or stay off if the operator said off. */
+        if (!own_any_managed() && wl_legacy()) {
+            /* No capagent VAP yet and netifd owns the radios: REGISTER_FRAME
+               belongs to wpad and a new monitor VIF would be a netdev
+               creation.  Observe through an existing monitor, or stay off. */
             g_msrc = (g_msrc_cfg == MSRC_OFF) ? MSRC_OFF : MSRC_MONITOR;
-            printf("mgmt: source=%s (legacy read-only: no registration, "
+            printf("mgmt: source=%s (no capagent VAP: no registration, "
                    "no VIF creation)\n",
                    g_msrc == MSRC_OFF ? "off" : "monitor");
         } else if (g_msrc_cfg == MSRC_AUTO) {
@@ -663,7 +664,7 @@ static void mgmt_vap_add(int ifindex)
         } else {
             g_msrc = g_msrc_cfg;
         }
-        if (!wl_legacy())
+        if (own_any_managed() || !wl_legacy())
             printf("mgmt: source=%s%s\n",
                    g_msrc == MSRC_NL80211 ? "nl80211" :
                    g_msrc == MSRC_MONITOR ? "monitor" : "off",
@@ -672,7 +673,7 @@ static void mgmt_vap_add(int ifindex)
         fflush(stdout);
     }
     if (g_msrc == MSRC_OFF) return;
-    if (g_msrc == MSRC_NL80211 && !wl_legacy()) {
+    if (g_msrc == MSRC_NL80211) {
         int r = mgmt_register_sta(ifindex);
         if (r == -EALREADY || r == -EOPNOTSUPP || r == -ENODEV) {
             fprintf(stderr, "mgmt: nl80211 registration failed (%d: %s); "
@@ -971,13 +972,11 @@ static void handle_201f(mbedtls_ssl_context *ssl, int port,
         return;
     }
 
-    if (wl_legacy()) {
-        /* A legacy BSS has its own hostapd/wpad 4-way with the passphrase
-           from /etc/config/wireless.  Installing the manager's PTK/GTK on
-           the same station would desynchronise that handshake, so the key
-           plane is read-only too. */
-        printf("0x201f: legacy UCI owns the RSN authenticator, %d key(s) not "
-               "installed (port 0x%04x)\n", nkd, port);
+    if (!wl_port_managed(xm_canon_port(port))) {
+        /* A netifd/foreign BSS has its own hostapd/wpad 4-way; installing
+           the manager's PTK/GTK on the same station would desynchronise it. */
+        printf("0x201f: port 0x%04x is not capagent-owned, %d key(s) not "
+               "installed\n", port, nkd);
         fflush(stdout);
         return;
     }
@@ -1066,9 +1065,9 @@ static void handle_2019(mbedtls_ssl_context *ssl, int port,
 
     /* W33: a legacy BSS belongs to netifd/wpad (or, if it were ours, to the
        in-process MLME).  Never transmit manager frames in legacy mode. */
-    if (wl_legacy()) {
-        printf("0x2019 subtype %d: legacy UCI owns the BSS, not transmitted\n",
-               st);
+    if (!wl_port_managed(xm_canon_port(port))) {
+        printf("0x2019 subtype %d: port 0x%04x is not capagent-owned, "
+               "not transmitted\n", st, port);
         fflush(stdout);
         return;
     }
@@ -1288,12 +1287,10 @@ static void cap_vap_ready(int phy, int vapid, int ifindex, const char *ifname,
                       band_code_for_freq(freq));
     }
 
-    /* Legacy mode: the port map and the channel are read-only knowledge
-       used to address the manager's frames; no socket is bound in hostapd's
-       directory and no VAP is handed to the relay. */
-    if (wl_legacy()) {
-        printf("wl: %s is netifd/wpad's (legacy read-only, no relay)\n",
-               ifname);
+    /* Only a capagent-owned port may bind a relay socket.  A netifd/foreign
+       BSS keeps the pmap entry as read-only addressing knowledge. */
+    if (!wl_port_managed(port)) {
+        printf("wl: %s is not capagent-owned (no relay)\n", ifname);
         fflush(stdout);
         return;
     }
@@ -1314,38 +1311,11 @@ static void cap_vap_ready(int phy, int vapid, int ifindex, const char *ifname,
     }
 }
 
-/* Re-adopt interfaces that survived an agent restart/reconnect before the
- * manager re-sends 0x500b.  Names are the ones vap_provision created. */
-static void cap_extmux_restore(void)
+/* Re-adoption is ownership-driven now (W34): the journal says which names
+ * are ours and own_restore_vaps() registers exactly those with extmux. */
+static void cap_extmux_restore(const struct cfg *c)
 {
-    if (wl_legacy()) {
-        printf("EXTMUX: legacy UCI owns the BSSes, not adopting them\n");
-        fflush(stdout);
-        return;
-    }
-    for (int phy = 0; phy < MAX_RADIOS; phy++) {
-        for (int vapid = 0; vapid < 16; vapid++) {
-            char ifname[32];
-            unsigned freq = 0, width = 0;
-            uint8_t mac[6];
-            int ifindex;
-            uint16_t port;
-            snprintf(ifname, sizeof(ifname), "phy%d-ap%d", phy, vapid);
-            ifindex = read_sysfs_int(ifname, "ifindex");
-            if (ifindex <= 0) continue;
-            if (nl_get_iftype(ifindex) != NL80211_IFTYPE_AP) continue;
-            if (read_sysfs_mac(ifname, mac) != 0) continue;
-            port = (uint16_t)((phy << 8) | vapid);
-            pmap_set(port, ifindex, mac);
-            iface_chan(ifname, &freq, &width);
-            if (freq)
-                vchan_set(port, freq, (uint8_t)(width ? width : 1),
-                          band_code_for_freq(freq));
-            if (extmux_add_vap(g_extmux, port, ifname, ifindex, mac) == 0)
-                printf("EXTMUX: restored %s port=0x%04x\n", ifname, port);
-        }
-    }
-    fflush(stdout);
+    own_restore_vaps(c);
 }
 
 /* Enumerate the stations hostapd still has and adopt them.  Authorized
@@ -1399,11 +1369,6 @@ static void cap_extmux_start(struct cfg *c, mbedtls_ssl_context *ssl,
     };
     struct extmux_stats st;
 
-    if (wl_legacy()) {
-        printf("EXTMUX: legacy UCI owns the BSSes, relay disabled (read-only)\n");
-        fflush(stdout);
-        return;
-    }
     if (!c->ext_auth_dir || g_extmux) return;
     memset(&g_xmctx, 0, sizeof(g_xmctx));
     g_xmctx.ssl = ssl;
@@ -1422,7 +1387,7 @@ static void cap_extmux_start(struct cfg *c, mbedtls_ssl_context *ssl,
                         (unsigned)(c->m1_retry_ms > 0 ? c->m1_retry_ms : 3000),
                         1000);
     if (c->state_file) extmux_load(g_extmux, c->state_file);
-    cap_extmux_restore();
+    cap_extmux_restore(c);
     extmux_resync_begin(g_extmux);
     cap_extmux_resync();
     extmux_resync_finish(g_extmux);

@@ -1,23 +1,29 @@
-/* policy.inc — W33: wireless ownership policy + deterministic netdev identity
+/* policy.inc — W33/W34: wireless ownership policy + deterministic identity
  *
  * Part of capagent.c (single translation unit; included after nl80211.inc).
  *
- * The invariant this module enforces (W33):
+ * The single source of truth is the ownership table in src/ownership.inc,
+ * populated from `ubus call network.wireless status` (src/netifd_status.inc)
+ * and from the netdev journal.  There is no /etc/config/wireless heuristic in
+ * production any more.
  *
- *   LEGACY  /etc/config/wireless contains >= 1 "config wifi-iface".
- *           netifd/wpad owns every wireless interface.  capagent is a
- *           read-only participant: it must never create, delete, bring
- *           up/down, tune or reconfigure a netdev, never spawn or stop
- *           hostapd, never write UCI and never call
- *           network.wireless reconf.
+ * Per netdev:
+ *   NETIFD    the name appears in network.wireless status.  capagent never
+ *             creates, starts, deletes or reconfigures it.
+ *   CAPAGENT  the journal says we created/adopted it.  Full lifecycle.
+ *   FOREIGN   exists, neither netifd nor ours.  Never touched; the manager
+ *             VAP is placed on an alternate name.
+ *   PENDING   manager asked while the netifd probe was unusable.  Retried.
  *
- *   OWN     zero wifi-iface.  capagent creates and owns the AP netdevs and
- *           the hostapd instances for the BSSes the manager asks for.
- *
- * The decision is re-evaluated at the start of every session: a manager
- * reconnect must observe a /etc/config/wireless the operator just changed.
- * The override exists only for tests (--wireless-owner / env).
+ * `wl_legacy()` is the coarse session predicate: at least one netifd wireless
+ * ifname exists (so UCI apply and other global config writes stay off).  All
+ * per-netdev effects use wl_port_managed()/own_claim(), which is what makes a
+ * mixed legacy+manager setup safe.  --wireless-owner legacy / the env override
+ * forces the old fully read-only contract.  An explicitly supplied
+ * --wireless-config FILE is still counted for diagnostics/selftests.
  */
+
+#include "netifd_status.inc"
 
 #define WL_CONF_DEFAULT "/etc/config/wireless"
 
@@ -67,16 +73,63 @@ static const char *wl_mode_name(void)
 static int wl_legacy(void) { return g_wl_legacy; }
 static int wl_own(void)    { return !g_wl_legacy; }
 
+/* Count ifnames in a network.wireless status payload (ubus).  Also exposes
+ * the pending flag and the first name for diagnostics/selftests. */
+static int wl_status_ifaces(const char *json, int *pending, char *first,
+                            size_t first_len)
+{
+    struct nd_status st;
+    if (nd_parse(json, &st) != 0)
+        return -1;
+    if (pending) *pending = st.pending;
+    if (first && first_len)
+        snprintf(first, first_len, "%s",
+                 st.n ? st.iface[0].ifname : "");
+    return st.n;
+}
+
+/* Print the live ubus/journal decision without reconciling or writing
+ * anything (--check-wireless is strictly read-only). */
+static void wl_report_ubus(const struct cfg *c)
+{
+    const char *env_mode = getenv("CAPAGENT_WIRELESS_MODE");
+    int forced = -1;
+
+    if (c->wireless_mode >= 0)
+        forced = c->wireless_mode;
+    else if (env_mode && *env_mode)
+        forced = !strcmp(env_mode, "legacy");
+    g_wl_ifaces = own_netifd_count();
+    if (forced >= 0)
+        g_wl_legacy = forced;
+    else
+        g_wl_legacy = g_wl_ifaces > 0;
+    printf("wl: ownership=%s (%s; ubus: %d netifd ifname%s, %d capagent row%s)\n",
+           wl_mode_name(), forced >= 0 ? "forced" : "auto",
+           g_wl_ifaces, g_wl_ifaces == 1 ? "" : "s",
+           own_managed_count(), own_managed_count() == 1 ? "" : "s");
+    if (g_wl_legacy)
+        printf("wl: netifd owns %d name(s); capagent only manages names outside "
+               "that set\n", g_wl_ifaces);
+    fflush(stdout);
+}
+
+/* Every session starts here.  In auto mode the decision is the live netifd
+ * status plus our journal; the config file is only read when the operator
+ * explicitly points at one (tests, --check-wireless diagnostics). */
 static void wl_classify(const struct cfg *c)
 {
     const char *path = c->wireless_conf ? c->wireless_conf : WL_CONF_DEFAULT;
-    const char *env = getenv("CAPAGENT_WIRELESS_CONF");
-    int n;
+    const char *env_conf = getenv("CAPAGENT_WIRELESS_CONF");
+    const char *env_mode = getenv("CAPAGENT_WIRELESS_MODE");
+    int explicit_file;
 
-    if (env && *env) path = env;
+    if (env_conf && *env_conf) path = env_conf;
     snprintf(g_wl_path, sizeof(g_wl_path), "%s", path);
+    explicit_file = (env_conf && *env_conf) ||
+                    (c->wireless_conf &&
+                     strcmp(c->wireless_conf, WL_CONF_DEFAULT) != 0);
 
-    env = getenv("CAPAGENT_WIRELESS_MODE");
     if (c->wireless_mode >= 0) {
         g_wl_legacy = c->wireless_mode ? 1 : 0;
         g_wl_ifaces = 0;
@@ -84,28 +137,35 @@ static void wl_classify(const struct cfg *c)
         fflush(stdout);
         return;
     }
-    if (env && *env) {
-        g_wl_legacy = !strcmp(env, "legacy");
+    if (env_mode && *env_mode) {
+        g_wl_legacy = !strcmp(env_mode, "legacy");
         g_wl_ifaces = 0;
         printf("wl: ownership=%s (env), config=%s\n", wl_mode_name(), path);
         fflush(stdout);
         return;
     }
 
-    n = wl_count_iface(path);
-    if (n < 0) {
-        /* No file at all: nothing owns the radios, so we do. */
-        g_wl_ifaces = 0;
-        g_wl_legacy = 0;
-        printf("wl: ownership=own (%s: no wireless config)\n", path);
-    } else {
-        g_wl_ifaces = n;
+    if (explicit_file) {
+        int n = wl_count_iface(path);
+        g_wl_ifaces = n < 0 ? 0 : n;
         g_wl_legacy = n > 0;
-        printf("wl: ownership=%s (%s: %d wifi-iface)%s\n", wl_mode_name(),
-               path, n,
-               g_wl_legacy ? " -- read-only, netifd/wpad owns the BSSes" : "");
+        printf("wl: ownership=%s (%s: %d wifi-iface, explicit file)\n",
+               wl_mode_name(), path, g_wl_ifaces);
+        fflush(stdout);
+        return;
     }
-    fflush(stdout);
+
+    own_policy_refresh();
+    wl_report_ubus(c);
+}
+
+/* Per-port authority.  With a table row the row decides; without one the
+ * legacy session predicate does (lab/own mode boots). */
+static int wl_port_managed(int port)
+{
+    if (own_has_entry(port))
+        return own_managed_strict(port);
+    return !g_wl_legacy;
 }
 
 /* ---- deterministic netdev identity -------------------------------- */
@@ -349,6 +409,58 @@ static int wl_selftest(void)
         uint8_t z[6] = {0};
         if (ifindex_by_mac_ap(z, -1, NULL, 0) != 0) {
             printf("policy-selftest: FAIL zero MAC resolved\n");
+            fails++;
+        }
+    }
+
+    /* W34: the ubus payload is the production ownership source. */
+    {
+        static const char *empty = "{}";
+        static const char *legacy =
+            "{\"radio0\":{\"up\":true,\"pending\":false,\"interfaces\":["
+            "{\"section\":\"s0\",\"ifname\":\"phy0-ap0\"},"
+            "{\"section\":\"s1\",\"ifname\":\"phy0-ap1\"},"
+            "{\"section\":\"v\",\"ifname\":\"phy0-ap1.10\"}]}}";
+        static const char *busy =
+            "{\"radio0\":{\"pending\":true,\"interfaces\":["
+            "{\"section\":\"s0\",\"ifname\":\"phy0-ap0\"}]}}";
+        int pending = 0, n;
+        char first[ND_NAME_MAX];
+
+        checks++;
+        if (wl_status_ifaces(empty, &pending, first, sizeof(first)) != 0) {
+            printf("policy-selftest: FAIL ubus empty count\n");
+            fails++;
+        }
+        checks++;
+        n = wl_status_ifaces(legacy, &pending, first, sizeof(first));
+        if (n != 3 || pending) {
+            printf("policy-selftest: FAIL ubus legacy count=%d pending=%d\n",
+                   n, pending);
+            fails++;
+        }
+        checks++;
+        if (!strcmp(first, "phy0-ap0")) {
+            /* expected */
+        } else {
+            printf("policy-selftest: FAIL ubus first ifname %s\n", first);
+            fails++;
+        }
+        checks++;
+        n = wl_status_ifaces(busy, &pending, first, sizeof(first));
+        if (n != 1 || !pending) {
+            printf("policy-selftest: FAIL ubus busy count=%d pending=%d\n",
+                   n, pending);
+            fails++;
+        }
+        checks++;
+        if (wl_status_ifaces("Command failed: Not found", NULL, NULL, 0) != -1) {
+            printf("policy-selftest: FAIL ubus error text accepted\n");
+            fails++;
+        }
+        checks++;
+        if (wl_status_ifaces(legacy, NULL, NULL, 0) != 3) {
+            printf("policy-selftest: FAIL ubus AP_VLAN not counted\n");
             fails++;
         }
     }

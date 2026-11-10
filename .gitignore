@@ -27,3 +27,6 @@ __pycache__/
 dist/
 build/
 out/
+
+# W34 qemu-test scratch
+native/.w34-tests/

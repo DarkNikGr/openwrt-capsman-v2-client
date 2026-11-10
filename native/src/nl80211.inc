@@ -411,6 +411,13 @@ static int vap_ifindex(int port, uint8_t mac[6])
     uint8_t cmac[6] = {0};
     char nm[IF_NAMESIZE];
 
+    /* W34: never hand a netifd/foreign netdev to the key or mgmt plane. */
+    if (own_has_entry(port) && !own_managed_strict(port)) {
+        printf("vap: port 0x%04x is not capagent-owned; refusing ifindex\n",
+               port);
+        return 0;
+    }
+
     if (pmap_get(port, &ifindex, cmac) && ifindex > 0 &&
         if_indextoname((unsigned)ifindex, nm)) {
         uint8_t now[6];

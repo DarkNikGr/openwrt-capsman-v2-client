@@ -94,6 +94,8 @@ static int run_once(struct cfg *c)
     /* W8: bind one ext-auth socket per BSS before the manager provisions any
      * VAP, and adopt anything that survived the previous connection. */
     cap_extmux_start(c, &ssl, &dc);
+    /* W34: journal repair even when ext-auth is disabled (idempotent). */
+    own_restore_vaps(c);
 
     /* Test override: listen before the manager sends a create. */
     if (c->datachan && c->dc_key_len) {
@@ -128,6 +130,7 @@ static int run_once(struct cfg *c)
     time_t last_stats = 0;
     time_t last_dc_ka = 0;
     time_t last_refresh = 0;
+    time_t last_own = 0;
 #ifdef CAPAGENT_LAB
     if (c->lab_iface && lab_ap_setup(c) != 0) {
         fprintf(stderr, "lab: AP setup failed\n");
@@ -240,6 +243,10 @@ static int run_once(struct cfg *c)
             if (c->mgmt_relay || c->mgmt_source) mgmt_monitor_watchdog();
             if (g_dp_bridge) dp_refresh();
         }
+        if (time(NULL) != last_own) {
+            last_own = time(NULL);
+            own_service(c);       /* W34: netifd probe + reconcile + journal */
+        }
         if (time(NULL) - last_echo > 5) {
             send_msg(&ssl, TYPE_ECHO, 0, NULL, 0);
             last_echo = time(NULL);
@@ -274,8 +281,9 @@ static int run_once(struct cfg *c)
             fflush(stdout);
             if (phy >= 0 && phy < c->nradios)
                 createvap_response(&ssl, hdr + 2, phy, vap, c, body, len);
-            if (wl_legacy()) {
-                printf("0x500b: legacy UCI owns the BSS, datachan not armed\n");
+            if (!own_managed_strict(port)) {
+                printf("0x500b: port 0x%04x is not capagent-owned, datachan "
+                       "not armed\n", port);
                 fflush(stdout);
             } else {
                 dc_handle_create(&dc, c, &fd, port, body, len);
@@ -297,7 +305,8 @@ static int run_once(struct cfg *c)
             char in27[32];
             uint8_t m27[6] = {0}, b27[BODY_MAX], x27[4];
             size_t z27 = 0;
-            snprintf(in27, sizeof(in27), "phy%d-ap%d", p27, v27);
+            if (!own_ifname_for_port(port, in27, sizeof(in27)))
+                snprintf(in27, sizeof(in27), "phy%d-ap%d", p27, v27);
             read_sysfs_mac(in27, m27);
             int i27 = read_sysfs_int(in27, "ifindex");
             z27 += put_el(b27 + z27, 0x08, m27, 6);
@@ -466,6 +475,8 @@ static void usage(const char *p)
         "  --country CC                 hostapd country_code (e.g. GR)\n"
         "  --ext-ctrl-dir DIR           hostapd ctrl_interface dir (default: dir above)\n"
         "  --state-file FILE            key-free extmux restart journal\n"
+        "  --vap-state FILE             netdev ownership journal\n"
+        "                               (default: /var/run/capagent-vaps.state)\n"
         "  --fourway-timeout MS         CAP-side 4-way deadline (default 10000)\n"
         "  --m1-retry MS                M1 retransmit interval (default 3000)\n"
         "  --wireless-config FILE       UCI wireless file to classify (default\n"
@@ -519,7 +530,7 @@ int main(int argc, char **argv)
            OPT_EXTCTRL, OPT_STATE, OPT_FOURWAY, OPT_M1RETRY,
            OPT_MLME, OPT_MLME_PORT,
            OPT_WLCONF, OPT_WLOWNER, OPT_NOTEARDOWN, OPT_POLICYTEST,
-           OPT_CHECKWL };
+           OPT_CHECKWL, OPT_VAPSTATE };
     static struct option opts[] = {
         {"manager", required_argument, 0, 'm'},
         {"port", required_argument, 0, 'p'},
@@ -559,6 +570,7 @@ int main(int argc, char **argv)
         {"country", required_argument, 0, OPT_COUNTRY},
         {"ext-ctrl-dir", required_argument, 0, OPT_EXTCTRL},
         {"state-file", required_argument, 0, OPT_STATE},
+        {"vap-state", required_argument, 0, OPT_VAPSTATE},
         {"fourway-timeout", required_argument, 0, OPT_FOURWAY},
         {"m1-retry", required_argument, 0, OPT_M1RETRY},
         {"wireless-config", required_argument, 0, OPT_WLCONF},
@@ -629,6 +641,7 @@ int main(int argc, char **argv)
         case OPT_EXTAUTH: c.ext_auth_dir = optarg; break;
         case OPT_EXTCTRL: c.ext_ctrl_dir = optarg; break;
         case OPT_STATE: c.state_file = optarg; break;
+        case OPT_VAPSTATE: c.vap_state = optarg; break;
         case OPT_FOURWAY: c.fourway_ms = atoi(optarg); break;
         case OPT_M1RETRY: c.m1_retry_ms = atoi(optarg); break;
         case OPT_MLME: c.mlme = 1; break;
@@ -677,18 +690,28 @@ int main(int argc, char **argv)
     if (!c.eapol_leg) c.eapol_leg = 1;
     if (!c.lab_ssid) c.lab_ssid = "T14-CAP";
     if (!c.lab_chan) c.lab_chan = 1;
-    if (check_wireless) { wl_classify(&c); return 0; }
+    if (check_wireless) {
+        /* Strictly read-only: journal + ubus probe, no reconcile/cleanup. */
+        own_inspect(&c);
+        wl_report_ubus(&c);
+        return 0;
+    }
     if (c.crypto_selftest) return dc_selftest();
     if (c.nradios == 0) resolve_phy_macs(&c);
     if (c.nradios == 0) {
         fprintf(stderr, "no valid radio MACs\n");
         return 1;
     }
+    /* W34: load the ownership journal before the first manager connection and
+     * drop stale /tmp/vap-*.conf files that no live process owns. */
+    own_init(&c);
     /* W14: discovery and session setup are per attempt; run_once() owns both
      * so an early failure (no WAN lease yet) is never permanent. */
     c.manager_spec = c.manager;
     for (;;) {
         run_once(&c);
+        /* W34: keep repairing our netdevs even while the manager is away. */
+        own_service(&c);
         fprintf(stderr, "reconnect in 5s\n");
         sleep(5);
     }

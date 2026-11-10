@@ -4,11 +4,21 @@ Audit of `be2e23d` (extmux + SDK build), `38581fc` (per-BSS relay / 0x2018 /
 reconnect) and `8bd0258` (deploy preflight), and the fixes that restore the
 two-mode contract.
 
-## 1. The invariant
+> **W34 update (current behaviour):** the `config wifi-iface` count is no
+> longer the production ownership source.  capagent reads
+> `ubus call network.wireless status`, keeps one port→ifname/ifindex/pid/owner
+> table, and journals it to `/var/run/capagent-vaps.state`.  Netifd always
+> wins a name; the manager VAP moves to `cap<phy>-<vapid>` on collision.
+> `wl_legacy()` is now the coarse "netifd owns at least one wireless ifname"
+> predicate for global UCI decisions; per-netdev guards use
+> `wl_port_managed()`.  `--wireless-owner legacy` still forces the fully
+> read-only contract below.  See `REPORT.md` (W34) and
+> `native/src/ownership.inc`.
 
-`/etc/config/wireless` decides who owns the radios. It is re-read at the start
-of every session (`run_once()`), so a manager reconnect or a `wifi reload`
-takes effect without restarting the daemon.
+## 1. The invariant (W33 history)
+
+`/etc/config/wireless` decided who owned the radios in W33.  W34 replaced this
+with live ubus status; the historical contract is kept here for context.
 
 | `config wifi-iface` | mode | allowed side effects |
 |---|---|---|

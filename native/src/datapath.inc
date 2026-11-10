@@ -315,11 +315,24 @@ static void dp_scan_apvlans(struct vap *v)
     closedir(d);
 }
 
+static void dp_del_ifindex(int ifindex)
+{
+    for (int i = 0; i < g_ndp; i++) {
+        if (g_dp[i].ifindex != ifindex)
+            continue;
+        close(g_dp[i].fd);
+        for (int k = i; k + 1 < g_ndp; k++)
+            g_dp[k] = g_dp[k + 1];
+        g_ndp--;
+        return;
+    }
+}
+
 static void dp_vap_open(struct vap *v)
 {
-    /* W33: the bridge client rewrites the VAP's MTU and takes part in the
-       data path; a legacy BSS belongs to netifd/wpad, so stay out of it. */
-    if (wl_legacy()) return;
+    /* W33/W34: the bridge client rewrites the VAP's MTU and takes part in
+       the data path; only a capagent-owned port may enter it. */
+    if (!wl_port_managed((v->rid << 8) | v->wid)) return;
     if (!g_dp_bridge || !v->used || v->ifindex <= 0) return;
     if (v->l2fd < 0) {
         if (dp_add_fd(v->ifindex, v) == 0) v->l2fd = v->ifindex;
@@ -554,6 +567,7 @@ static void dp_refresh(void)
         for (int w = 0; w < 16; w++) {
             struct vap *v = &g_vap[r][w];
             if (!v->used) continue;
+            if (!wl_port_managed((v->rid << 8) | v->wid)) continue;
             if (g_dp_bridge) dp_scan_apvlans(v);
             nl_sta_dump(v->ifindex);
             for (int i = 0; i < v->napvlan; i++)

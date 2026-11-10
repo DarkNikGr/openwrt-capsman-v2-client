@@ -52,10 +52,12 @@ start_service() {
 	[ -n "${STATE_FILE:-}" ] && set -- "$@" --state-file "${STATE_FILE}"
 	[ -n "${FOURWAY_TIMEOUT:-}" ] && set -- "$@" --fourway-timeout "${FOURWAY_TIMEOUT}"
 	[ -n "${M1_RETRY:-}" ] && set -- "$@" --m1-retry "${M1_RETRY}"
-	# Ownership policy (W33).  WIRELESS_OWNER=auto is the production mode:
-	# a legacy wifi-iface config makes the agent read-only.
+	# Ownership policy (W33 API + W34 ubus model).  WIRELESS_OWNER=auto is
+	# production: ubus decides per netdev and the manager VAP yields to
+	# netifd's names.  WIRELESS_CONFIG is for offline diagnostics.
 	[ -n "${WIRELESS_CONFIG:-}" ] && set -- "$@" --wireless-config "${WIRELESS_CONFIG}"
 	[ -n "${WIRELESS_OWNER:-}" ] && set -- "$@" --wireless-owner "${WIRELESS_OWNER}"
+	[ -n "${VAP_STATE:-}" ] && set -- "$@" --vap-state "${VAP_STATE}"
 	[ "${VAP_TEARDOWN:-yes}" = no ] && set -- "$@" --no-vap-teardown
 	[ "${DATAPATH_BRIDGE:-no}" = yes ] && set -- "$@" --datapath-bridge
 	[ -n "${BCAST:-}" ] && set -- "$@" --bcast "${BCAST}"

@@ -381,33 +381,51 @@ tree; stock RouterOS 7.25.1 does not. The SSID/RSN in `0x6016` is received and
 acked but does not contain the passphrase. Use the boot-pull fallback (or a
 local key) for local forwarding.
 
-### Ownership: legacy UCI vs manager-only (W33)
+### Ownership: netifd vs capagent (W33 policy, W34 ubus model)
 
-At the start of every session capagent counts the `config wifi-iface` sections
-in `/etc/config/wireless`:
+At the start of every session capagent reads the **live** netifd state with
+`ubus call network.wireless status` and reconciles it with its own per-netdev
+journal (`/var/run/capagent-vaps.state`, `--vap-state FILE`).  There is one
+ownership table and one decision path:
 
-* **one or more** → *legacy* mode. netifd/wpad owns every wireless interface.
-  capagent never creates, deletes, up/down's or tunes a netdev, never starts or
-  stops hostapd, never installs keys and never writes UCI or calls
-  `network.wireless reconf`. `APPLY=yes` is ignored. It still joins the manager
-  and reports `0x2018` through an existing monitor VIF if one is present.
-* **zero** → *own* mode. capagent creates the AP netdevs on `0x500b`, starts a
-  hostapd BSS per `0x6016`, and tears both down on `0x600c`.
+* a netdev whose name appears in `network.wireless status` is **netifd's**.
+  capagent never creates, deletes, up/downs, tunes or reconfigures it, never
+  starts/stops its hostapd, never installs keys on it and never writes UCI;
+* a netdev created (or adopted from the journal) by capagent is **ours**.  It
+  gets a hostapd BSS on `0x6016` and is torn down on `0x600c`;
+* a netdev that is neither is **foreign** and is never touched;
+* when netifd already owns the conventional `phy<N>-ap<M>` name, the manager
+  VAP is created as `cap<N>-<M>` instead.  This is what makes a mixed
+  legacy + manager setup safe: netifd always wins its names.
 
-Check the decision without touching anything:
+The session is still *legacy-coarse* when netifd owns at least one wireless
+ifname (`wl_legacy()`), which keeps `APPLY=yes` and other global UCI writes
+off.  Per-netdev effects use the ownership table, so manager VAPs work in a
+mixed setup.  `--wireless-owner legacy` (or
+`CAPAGENT_WIRELESS_MODE=legacy`) forces the fully read-only W33 contract.
+
+The journal makes `wifi reload`, a netifd restart and a capagent restart
+repair themselves: missing netdevs are recreated from the last `0x6016` body,
+hostapd is restarted with backoff, and stale `/tmp/vap-*.conf` files are
+removed only when no live process/journal row backs them.  A `busy`/`unknown`
+ubus probe disables create/delete/steal until it recovers.
+
+Check the live decision without touching anything:
 
 ```sh
-capagent --check-wireless                          # /etc/config/wireless
-capagent --check-wireless --wireless-config FILE   # any fixture
+capagent --check-wireless                          # ubus + journal (read-only)
+capagent --check-wireless --wireless-config FILE   # offline fixture count
 ```
 
 To hand the radios back to netifd after a manager-only run, stop capagent
-first and remove its leftovers (`/var/run/vap-*.pid`, `pkill -f /tmp/vap-`),
-then write the legacy `/etc/config/wireless` and run `wifi reload`.
+first and remove its leftovers (`/var/run/vap-*.pid`,
+`/var/run/capagent-vaps.state`, `pkill -f /tmp/vap-`), then write the legacy
+`/etc/config/wireless` and run `wifi reload`.
 
 Developer-only flags in the client (not wired into the init script):
 `--eapol-leg tls|datachan|both`, `--crypto-selftest`, `--selftest-policy`,
-`--wireless-owner own|legacy` (test override), `--no-vap-teardown`,
+`--wireless-owner own|legacy` (test override), `--vap-state FILE`,
+`--no-vap-teardown`,
 `--dc-*` test overrides, and the `-DCAPAGENT_LAB` harness (`--lab-ap`,
 `--lab-ssid`, `--lab-chan`).
 

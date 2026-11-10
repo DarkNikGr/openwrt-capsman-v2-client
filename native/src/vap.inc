@@ -31,10 +31,7 @@
  * else already set the regdomain. */
 static const char *g_vap_country;
 
-/* One hostapd per (phy, vapid).  A pid file is not enough: hostapd -B detaches
- * before it writes one, so two creates arriving back to back both see "not
- * running" and spawn a second instance that then fights for the netdev. */
-static int g_vap_started[MAX_RADIOS][16];
+static int vap_hostapd_pid(const char *ifname);
 
 /* Parse the RSN IE (element 48) out of the manager's IE blob. */
 struct rsn_info {
@@ -355,13 +352,14 @@ static int vap_hostapd_start(int port, const char *ifname, int phy, int vapid,
             return -1;
         }
     }
-    printf("vap: hostapd %s ssid=%s freq=%u akm=%s%s%s mfp=%d vlan=%u\n",
+    int hpid = vap_hostapd_pid(ifname);
+    printf("vap: hostapd %s ssid=%s freq=%u akm=%s%s%s mfp=%d vlan=%u pid=%d\n",
            ifname, (const char *)ssid, freq,
            ri.akm_psk ? "psk" : "", ri.akm_psk256 ? ",psk256" : "",
            ri.akm_sae ? ",sae" : "", ri.mfpr ? 2 : (ri.mfpc ? 1 : 0),
-           vp ? vp->vlan : 0);
+           vp ? vp->vlan : 0, hpid);
     fflush(stdout);
-    return 0;
+    return hpid > 0 ? hpid : -1;
 }
 
 /* True when the pid file points at a live hostapd **that we started**.
@@ -402,95 +400,43 @@ static int vap_hostapd_running(const char *ifname)
     return vap_hostapd_pid(ifname) > 0;
 }
 
-/* Stop the hostapd we started for this BSS (own mode only). */
-static void vap_hostapd_stop(struct vap *vp)
+/* Delete a netdev by ifindex — only ever one the ownership table proved ours
+ * and netifd does not list. */
+static int vap_netdev_del(int ifindex)
 {
-    int pid;
-    if (!vp || !vp->ap_started || !vp->ifname[0]) return;
-    if (wl_legacy()) return;                 /* never touch netifd's wpad */
-    pid = vap_hostapd_pid(vp->ifname);
-    if (pid > 0) {
-        kill((pid_t)pid, SIGTERM);
-        printf("vap: stopped our hostapd %s pid=%d\n", vp->ifname, pid);
-    }
-    vp->ap_started = 0;
-    fflush(stdout);
-}
-
-/* Delete a netdev — only ever one this agent created. */
-static int vap_netdev_del(const char *ifname)
-{
-    int ifindex;
-    if (!ifname || !*ifname) return -EINVAL;
-    if (wl_legacy()) return -EPERM;          /* invariant: never in legacy mode */
-    ifindex = if_nametoindex(ifname);
     if (ifindex <= 0) return 0;
     if (nl_cmd_open() != 0) return -1;
     struct nl_buf m;
     nlb_init(&m, NL80211_CMD_DEL_INTERFACE, NLM_F_ACK);
     nlb_u32(&m, NL80211_ATTR_IFINDEX, (uint32_t)ifindex);
     int r = nl_send_ack(g_nl_cmd_fd, &m);
-    printf("vap: DEL_INTERFACE %s ifindex=%d ret=%d (%s)\n", ifname, ifindex,
+    printf("vap: DEL_INTERFACE ifindex=%d ret=%d (%s)\n", ifindex,
            r, r ? strerror(-r) : "ok");
     fflush(stdout);
     return r;
 }
 
-/* Resolve the netdev that belongs to (phy,vapid) without guessing.
- *
- * Order of authority:
- *   1. the interface this session already bound to the VAP (validated);
- *   2. the conventional phy<N>-ap<M> name;
- *   3. the manager's MAC, but only among AP/AP_VLAN netdevs of that phy;
- *   4. create phy<N>-ap<M>, and only when capagent owns the radios.
- * Step 4 is the single place where a netdev is ever created, so the legacy
- * invariant is one branch, not five. */
-static int vap_resolve(int phy, int vapid, const uint8_t mac[6],
-                       char *name, size_t n, int *created)
+/* Resolve the netdev that belongs to (phy,vapid).  W34: the ownership table
+ * is the only authority; it also incorporates W33's deterministic AP-only MAC
+ * lookup (never a monitor VIF) and netifd name protection. */
+static int vap_resolve(const struct cfg *c, int phy, int vapid,
+                       const uint8_t mac[6], char *name, size_t n,
+                       int *created)
 {
-    struct vap *vp = vap_get(phy, vapid);
-    char conv[32];
-    int ifindex = 0;
+    char pref[32];
+    const char *preferred = NULL;
+    int ifindex = 0, managed = 0;
 
     if (created) *created = 0;
-    snprintf(conv, sizeof(conv), "phy%d-ap%d", phy, vapid);
+    snprintf(pref, sizeof(pref), "phy%d-ap%d", phy, vapid);
+    if (vapid == 0 && phy < MAX_RADIOS && c->ifnames[phy][0] &&
+        strcmp(c->ifnames[phy], pref) != 0)
+        preferred = c->ifnames[phy];
 
-    if (vp && vp->used && vp->ifname[0]) {
-        ifindex = (int)if_nametoindex(vp->ifname);
-        if (ifindex > 0) {
-            vp->ifindex = ifindex;
-            if (name) snprintf(name, n, "%s", vp->ifname);
-            return ifindex;
-        }
-        /* The netdev is gone: forget the identity but keep the slot. */
-        vp->ifname[0] = 0;
-        vp->ifindex = 0;
-        vp->we_created = 0;
-        vp->ap_started = 0;
-    }
-
-    /* An AP netdev for this VAP that already exists (legacy netifd BSS or a
-     * BSS that survived a reconnect).  Validated by iftype + phy. */
-    if (mac && (mac[0] | mac[1] | mac[2] | mac[3] | mac[4] | mac[5])) {
-        ifindex = ifindex_by_mac_ap(mac, phy, name, n);
-        if (ifindex > 0) return ifindex;
-    }
-    ifindex = read_sysfs_int(conv, "ifindex");
-    if (ifindex > 0) {
-        int t = nl_get_iftype(ifindex);
-        if (t == NL80211_IFTYPE_AP || t == NL80211_IFTYPE_AP_VLAN) {
-            if (name) snprintf(name, n, "%s", conv);
-            return ifindex;
-        }
-        ifindex = 0;             /* a monitor with the same name: not ours */
-    }
-
-    if (wl_legacy()) return 0;   /* read-only: never create in legacy mode */
-
-    ifindex = vap_netdev_create(phy, conv, mac);
-    if (ifindex <= 0) return 0;
-    if (name) snprintf(name, n, "%s", conv);
-    if (created) *created = 1;
+    own_claim(c, phy, vapid, preferred, mac, name, n, &ifindex, &managed);
+    if (ifindex <= 0)
+        return 0;
+    if (created) *created = own_created_port((phy << 8) | vapid);
     return ifindex;
 }
 
@@ -511,6 +457,8 @@ static int vap_refresh_ifindex(int port, uint8_t mac[6], int *changed)
     int old = 0, idx = 0;
 
     if (changed) *changed = 0;
+    if (own_has_entry(port) && !own_managed_strict(port))
+        return 0;                    /* netifd/foreign: never install keys */
     pmap_get(port, &old, NULL);
 
     if (vp && vp->used && vp->ifname[0]) {
@@ -543,7 +491,8 @@ static int vap_refresh_ifindex(int port, uint8_t mac[6], int *changed)
 }
 
 /* Called from the 0x6016 handler.  Resolves the netdev, registers the port,
- * and (own mode only) starts hostapd. */
+ * journals the request and (only when the ownership table says ours) starts
+ * hostapd.  netifd-owned names are read-only. */
 static void vap_provision(int port, const uint8_t *body, uint16_t len,
                           const struct cfg *c)
 {
@@ -554,14 +503,14 @@ static void vap_provision(int port, const uint8_t *body, uint16_t len,
 
     char ifname[32];
     int created = 0;
-    /* W33: one resolution path for 0x500b and 0x6016 (bound name -> phyN-apM
-       -> AP-only MAC -> create only in own mode). */
-    int ifindex = vap_resolve(phy, vapid, vp->bssid, ifname, sizeof(ifname),
-                              &created);
+    int ifindex = vap_resolve(c, phy, vapid, vp->bssid, ifname,
+                              sizeof(ifname), &created);
+    int managed = own_managed_strict(port);
     if (ifindex <= 0) {
-        printf("vap: port 0x%04x has no AP netdev%s\n", port,
-               wl_legacy() ? " (legacy UCI owns the radios: not created)" : "");
+        printf("vap: port 0x%04x has no AP netdev (ownership: %s)\n", port,
+               managed ? "ours" : "netifd/foreign/forced-legacy");
         fflush(stdout);
+        own_note_start(c, port, body, len, vp, 0, 0);
         return;
     }
     vp->used = 1;
@@ -569,18 +518,18 @@ static void vap_provision(int port, const uint8_t *body, uint16_t len,
     vp->wid = vapid;
     vp->ifindex = ifindex;
     snprintf(vp->ifname, sizeof(vp->ifname), "%s", ifname);
-    if (created) vp->we_created = 1;
+    if (managed && (created || own_created_port(port))) vp->we_created = 1;
     if (!vp->bssid[0] && !vp->bssid[1]) read_sysfs_mac(ifname, vp->bssid);
 
     /* Bind (or re-bind) the per-BSS ext-auth relay socket before hostapd
-     * starts accepting clients.  Also seeds the port/channel map. */
+     * starts accepting clients.  cap_vap_ready() itself enforces ownership. */
     cap_vap_ready(phy, vapid, ifindex, ifname, vp->bssid, c);
 
-    /* W33: legacy mode is read-only; nothing below may touch the BSS. */
-    if (wl_legacy()) {
-        printf("vap: %s is netifd/wpad's (legacy read-only, no hostapd)\n",
-               ifname);
+    if (!managed) {
+        printf("vap: %s is not capagent-owned (netifd/foreign/forced-legacy), "
+               "no hostapd\n", ifname);
         fflush(stdout);
+        own_note_start(c, port, body, len, vp, ifindex, 0);
         return;
     }
 
@@ -589,20 +538,24 @@ static void vap_provision(int port, const uint8_t *body, uint16_t len,
         int mr = mlme_vap_start(phy, vapid, ifindex, ifname, body, len, c);
         if (mr < 0)
             fprintf(stderr, "vap: %s in-CAP MLME failed (%d)\n", ifname, mr);
+        own_note_start(c, port, body, len, vp, ifindex, 0);
         return;
     }
 
-    int *started = &g_vap_started[phy % MAX_RADIOS][vapid & 0x0f];
-    if (!vap_should_start_bss(0, c->vap_auto, ifindex,
-                              vap_hostapd_running(ifname) || *started)) {
-        if (vap_hostapd_running(ifname) || *started)
+    /* One hostapd per VAP is enforced by the ownership row + pid check, not
+     * by an extra in-memory flag. */
+    int running = vap_hostapd_running(ifname);
+    if (!vap_should_start_bss(0, c->vap_auto, ifindex, running)) {
+        if (running)
             printf("vap: %s already running, not restarted\n", ifname);
         fflush(stdout);
+        own_note_start(c, port, body, len, vp, ifindex, 0);
         return;
     }
-    *started = 1;
-    if (vap_hostapd_start(port, ifname, phy, vapid, body, len, vp, c) == 0)
-        vp->ap_started = 1;
+    /* own_note_start journals the 0x6016 body and starts hostapd with the
+     * W33 start function (pid journaled for reconcile). */
+    own_note_start(c, port, body, len, vp, ifindex, 1);
+    if (vap_hostapd_running(ifname)) vp->ap_started = 1;
 }
 
 /* 0x600c destroy.  Always ack, always release our bookkeeping (the vapid
@@ -634,20 +587,11 @@ static void vap_destroy(int port, const struct cfg *c)
     pmap_del((phy << 8) | vapid);
     vchan_del((phy << 8) | vapid);
 
-    g_vap_started[phy % MAX_RADIOS][vapid & 0x0f] = 0;
-    if (wl_own() && c->vap_teardown && vp->used) {
-        if (vp->ap_started) vap_hostapd_stop(vp);
-        /* Drop any AF_PACKET bridge client before the netdev disappears. */
-        for (int i = 0; i < g_ndp; ) {
-            if (g_dp[i].ifindex == vp->ifindex) {
-                close(g_dp[i].fd);
-                g_dp[i] = g_dp[--g_ndp];
-            } else {
-                i++;
-            }
-        }
-        if (vp->we_created) vap_netdev_del(vp->ifname);
-    }
+    /* W34: the ownership table decides stop/delete and journals the result;
+     * --no-vap-teardown is honoured inside own_destroy(). */
+    own_destroy(c, port);
+    if (vp->ifindex > 0)
+        dp_del_ifindex(vp->ifindex);
 
     if (mac[0] | mac[1] | mac[2] | mac[3] | mac[4] | mac[5])
         vapid_release(phy, mac);
