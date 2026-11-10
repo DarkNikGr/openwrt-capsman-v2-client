@@ -404,7 +404,7 @@ static void maybe_inject_assoc(mbedtls_ssl_context *ssl, const struct cfg *c)
     if (!c->inject_assoc || done) return;
     done = 1;
     for (int phy = 0; phy < c->nradios; phy++) {
-        for (int vap = 0; vap < 8; vap++) {
+        for (int vap = 0; vap < 16; vap++) {
             char ifn[32], cmd[96], line[256], ssid[33] = "test";
             uint8_t bssid[6] = {0};
             int freq = (int)phy_freq_hint(phy), have_bssid = 0;

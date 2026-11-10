@@ -106,7 +106,7 @@ struct vapcfg {
     uint32_t auth;
 };
 
-static struct vapcfg g_vaps[4];
+static struct vapcfg g_vaps[8];
 static int g_nvap;
 static int g_apply;
 
@@ -211,7 +211,7 @@ static void apply_vaps(void)
         return;
     }
     char line[512];
-    char devs[8][32];
+    char devs[MAX_RADIOS][32];
     int ndev = 0;
     while (fgets(line, sizeof(line), p)) {
         /* wireless.<dev>=wifi-device -> collect for reconf */
@@ -220,7 +220,7 @@ static void apply_vaps(void)
             if (eqd && strstr(eqd + 1, "wifi-device")) {
                 *eqd = 0;
                 char *nm = line + 9;
-                if (!strchr(nm, '.') && ndev < 8) {
+                if (!strchr(nm, '.') && ndev < MAX_RADIOS) {
                     size_t nl = strlen(nm);
                     int okd = (nl > 0 && nl < 32);
                     for (size_t k = 0; k < nl; k++)
@@ -303,8 +303,9 @@ static void handle_c029(const uint8_t *body, uint16_t len)
     }
 
     dump_raw("cfg77", TYPE_JOIN_RESP, 0, tree, tlen);
-    int cfd = open("/tmp/capagent-cfg77.bin",
-                   O_CREAT | O_WRONLY | O_TRUNC, 0600);
+    int cfd = getenv("CAPAGENT_DEBUG")
+              ? open("/tmp/capagent-cfg77.bin", O_CREAT | O_WRONLY | O_TRUNC, 0600)
+              : -1;
     FILE *f = cfd >= 0 ? fdopen(cfd, "wb") : NULL;
     if (f) { fwrite(tree, 1, tlen, f); fclose(f); }
     printf("0xc029: 0x77 payload len=%u -> /tmp/capagent-cfg77.bin\n",
@@ -324,11 +325,11 @@ static void handle_c029(const uint8_t *body, uint16_t len)
     } else {
         printf("0xc029: parsing 0x77 as a TLV tree\n");
         cfg_walk(tree, tlen, 0);
-        printf("0xc029: seen ssid=%s vlan=%u auth=0x%08x passphrase=%s\n",
+        printf("0xc029: seen ssid=%s vlan=%u auth=0x%08x passphrase_set=%d\n",
                g_cfg_seen.have_ssid ? g_cfg_seen.ssid : "-",
                g_cfg_seen.have_vlan ? g_cfg_seen.vlan : 0,
                g_cfg_seen.have_auth ? g_cfg_seen.auth : 0,
-               g_cfg_seen.have_pass ? g_cfg_seen.passphrase : "-");
+               g_cfg_seen.have_pass);
     }
     printf("0xc029: %s\n", g_apply ? "applied to UCI" : "log/dump only");
     fflush(stdout);

@@ -8,12 +8,12 @@ static void put64(uint8_t *p, uint64_t v)
 }
 
 struct st_prev { int used; uint8_t mac[6]; uint64_t rx, tx; time_t t; };
-static struct st_prev g_stprev[32];
+static struct st_prev g_stprev[128];
 
 static struct st_prev *st_prev_slot(const uint8_t *mac)
 {
     int free_i = -1;
-    for (int i = 0; i < 32; i++) {
+    for (int i = 0; i < 128; i++) {
         if (g_stprev[i].used && !memcmp(g_stprev[i].mac, mac, 6))
             return &g_stprev[i];
         if (!g_stprev[i].used && free_i < 0) free_i = i;
@@ -109,7 +109,7 @@ static void emit_station(mbedtls_ssl_context *ssl, int phy, int vap,
     n += put_el(b + n, 0x1a, v4, 4);
     send_msg(ssl, 0x200e, port, b, (uint16_t)n);
     static time_t last_dbg;
-    if (time(NULL) != last_dbg) {
+    if (getenv("CAPAGENT_DEBUG") && time(NULL) != last_dbg) {
         last_dbg = time(NULL);
         printf("stats tx %02x:%02x:%02x:%02x:%02x:%02x phy=%d vap=%d "
                "sig=%d freq=%u txr=%u rxr=%u rx=%llu tx=%llu rxp=%llu txp=%llu\n",
@@ -153,7 +153,7 @@ static void emit_station(mbedtls_ssl_context *ssl, int phy, int vap,
 static void send_station_stats(mbedtls_ssl_context *ssl, const struct cfg *c)
 {
     for (int phy = 0; phy < c->nradios; phy++) {
-        for (int vap = 0; vap < 8; vap++) {
+        for (int vap = 0; vap < 16; vap++) {
             char ifn[32], cmd[96], line[256];
             unsigned freq = 0, width = 0;
             uint32_t tx_kbps = 0, rx_kbps = 0, v;

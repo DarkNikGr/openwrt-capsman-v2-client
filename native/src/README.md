@@ -28,3 +28,9 @@ MBEDTLS=/path/to/mbedtls-3.6.2 \
 
 The lab build adds `-DCAPAGENT_LAB` (hwsim AP, mgmt relay, synthetic
 `--inject-assoc`); the production build leaves those out.
+
+## Debug
+
+Set `CAPAGENT_DEBUG=1` to enable the verbose per-second station log and the
+`/tmp/capagent-*.bin` / `/tmp/capagent-msgs.log` dumps (mode 0600).
+Production runs without it: no traffic/key dumps and no per-station log spam.

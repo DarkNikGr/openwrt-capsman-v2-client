@@ -185,12 +185,12 @@ struct port_map {
     int ifindex;
     uint8_t mac[6];
 };
-static struct port_map g_pmap[16];
+static struct port_map g_pmap[128];
 
 static void pmap_set(int port, int ifindex, const uint8_t mac[6])
 {
     int slot = -1;
-    for (int i = 0; i < 16; i++) {
+    for (int i = 0; i < 128; i++) {
         if (g_pmap[i].used && g_pmap[i].port == port) { slot = i; break; }
         if (!g_pmap[i].used && slot < 0) slot = i;
     }
@@ -203,7 +203,7 @@ static void pmap_set(int port, int ifindex, const uint8_t mac[6])
 
 static int pmap_get(int port, int *ifindex, uint8_t mac[6])
 {
-    for (int i = 0; i < 16; i++)
+    for (int i = 0; i < 128; i++)
         if (g_pmap[i].used && g_pmap[i].port == port) {
             if (ifindex) *ifindex = g_pmap[i].ifindex;
             if (mac) memcpy(mac, g_pmap[i].mac, 6);
@@ -343,6 +343,7 @@ static int tlv_next(struct tlv_it *it, uint16_t *tag,
 static void dump_raw(const char *tag, uint16_t type, uint16_t port,
                      const uint8_t *b, size_t n)
 {
+    if (!getenv("CAPAGENT_DEBUG")) return;
     int fd = open("/tmp/capagent-msgs.log",
                   O_CREAT | O_WRONLY | O_APPEND, 0600);
     if (fd < 0) return;

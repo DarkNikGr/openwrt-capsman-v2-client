@@ -65,7 +65,9 @@ static const char *choose_manager(struct cfg *c, char *buf, size_t n)
             }
             return buf;
         }
-        snprintf(buf, n, "10.0.0.1");
+        fprintf(stderr, "capagent: no manager discovered on %s; "
+                "set MANAGER or use --manager\n", c->discovery_if);
+        buf[0] = 0;
         return buf;
     }
     snprintf(buf, n, "%s", c->manager);
@@ -221,8 +223,18 @@ static void parse_ifnames(struct cfg *c, const char *s)
     char *save = NULL, *tok = strtok_r(buf, ",", &save);
     int i = 0;
     while (tok && i < MAX_RADIOS) {
-        snprintf(c->ifnames[i], sizeof(c->ifnames[i]), "%s", tok);
-        i++;
+        int ok = 1;
+        for (const char *q = tok; *q; q++)
+            if (!isalnum((unsigned char)*q) && *q != '-' &&
+                *q != '_' && *q != '.')
+                ok = 0;
+        if (ok) {
+            snprintf(c->ifnames[i], sizeof(c->ifnames[i]), "%s", tok);
+            i++;
+        } else {
+            fprintf(stderr, "capagent: ignoring invalid interface name '%s'\n",
+                    tok);
+        }
         tok = strtok_r(NULL, ",", &save);
     }
 }

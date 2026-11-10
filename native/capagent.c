@@ -100,7 +100,7 @@
 #define DC_PFX_FRAG        0x01     /* fragmented: 4 more header bytes      */
 #define DC_PFX_KEEPALIVE   0x02     /* cookie keepalive, no cdh, no crypto  */
 
-#define MAX_RADIOS 4
+#define MAX_RADIOS   8
 #define BODY_MAX   4096
 
 struct cfg {

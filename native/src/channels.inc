@@ -141,13 +141,15 @@ static void createvap_response(mbedtls_ssl_context *ssl, const uint8_t hdr[10],
         n += put_el(body + n, 0xb7, list, (uint16_t)(pb.nfreq * 4));
     }
 
-    printf("d00b build base=%zu chan=%zu(delta=%zu) c61=%zu b7=%zu\n",
-           nb, nc, nc - nb, n61, n);
+    if (getenv("CAPAGENT_DEBUG"))
+        printf("d00b build base=%zu chan=%zu(delta=%zu) c61=%zu b7=%zu\n",
+               nb, nc, nc - nb, n61, n);
 
     {   /* dump the exact reply body for offline verification */
         char dp[64];
         snprintf(dp, sizeof(dp), "/tmp/capagent-d00b-%d.bin", phy);
-        int dfd = open(dp, O_CREAT | O_WRONLY | O_TRUNC, 0600);
+        int dfd = getenv("CAPAGENT_DEBUG")
+                  ? open(dp, O_CREAT | O_WRONLY | O_TRUNC, 0600) : -1;
         FILE *df = dfd >= 0 ? fdopen(dfd, "wb") : NULL;
         if (df) { fwrite(body, 1, n, df); fclose(df); }
     }
