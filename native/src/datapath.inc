@@ -33,6 +33,11 @@ struct vap {
     int mode;                   /* 0 = ACCESS, 1 = TAG */
     int l2fd;                   /* AF_PACKET RX on the VAP */
     int extfd;                  /* hostapd external-RSN dgram */
+    /* W46: per-VAP RSN policy.  mfp = the manager's RSN caps advertise
+       MFPC/MFPR; external_auth = SAE/OWE (the manager owns the 802.11 Auth
+       exchange, so 0x2019 Auth frames must go through this BSS's hostapd). */
+    int mfp;
+    int external_auth;
     /* W33 ownership bookkeeping.  Only a netdev we created may ever be
        deleted, and only a hostapd we started may ever be stopped. */
     int we_created;

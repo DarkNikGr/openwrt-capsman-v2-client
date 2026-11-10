@@ -259,18 +259,55 @@ static int mlme_answer_auth(struct mlme_vap *m, const uint8_t *req, size_t len)
     return mlme_tx_mgmt(m->ifindex, out, n);
 }
 
-/* Manager AssocResp (0x6019) is a template: CAP owns capab/status/AID and
- * must add Supported Rates or mac80211 drops the frame (W13 §3.1). */
+/* Complete a manager AssocResp template for the in-CAP MLME: CAP owns
+ * capab/status/AID and must add Supported Rates, or mac80211 drops the frame
+ * (W13 §3.1).  RouterOS sends the template with RSN + OWE-DH + RRM only.
+ * If a future manager already includes the rate IEs, keep its copy and never
+ * emit a duplicate element.  Manager IEs are copied verbatim: the OWE DH
+ * public value is bound to the PMK the manager uses in the 4-way. */
+static int mlme_complete_assoc(const uint8_t *fr, size_t fl, uint8_t *out,
+                               size_t cap)
+{
+    size_t n = 30, p = 30;
+    int have_rates = 0, have_xrates = 0;
+    uint16_t aid;
+
+    if (!fr || !out || fl < 30 || fl > cap - 16) return -EINVAL;
+    while (p + 2 <= fl) {
+        uint8_t id = fr[p], l = fr[p + 1];
+        if (p + 2 + l > fl) break;
+        if (id == 1) have_rates = 1;
+        if (id == 50) have_xrates = 1;
+        p += 2 + l;
+    }
+
+    memcpy(out, fr, 30);
+    out[24] = 0x31; out[25] = 0x04;            /* capab: ESS|Priv|Short* */
+    out[26] = 0x00; out[27] = 0x00;            /* status: success */
+    aid = mlme_aid_for(fr + 4);
+    out[28] = (uint8_t)(0xc0 | (aid >> 8));
+    out[29] = (uint8_t)(aid & 0xff);
+    if (!have_rates) {
+        out[n++] = 1; out[n++] = 8;
+        memcpy(out + n, mlme_rates2, 8); n += 8;
+    }
+    if (!have_xrates) {
+        out[n++] = 50; out[n++] = 4;
+        memcpy(out + n, mlme_xrates, 4); n += 4;
+    }
+    memcpy(out + n, fr + 30, fl - 30); n += fl - 30;
+    return (int)n;
+}
+
 static int mlme_handle_assoc_resp(mbedtls_ssl_context *ssl, int port,
                                   const uint8_t *body, size_t len,
                                   const struct cfg *c)
 {
     const uint8_t *fr = NULL;
     uint16_t fl = 0;
-    int ifindex, st;
+    int ifindex, st, n;
     struct mlme_vap *m;
     uint8_t out[MLME_MAX_FRAME];
-    size_t n = 30;
     (void)ssl; (void)c;
 
     if (!g_mlme_on) return 0;
@@ -280,25 +317,12 @@ static int mlme_handle_assoc_resp(mbedtls_ssl_context *ssl, int port,
     ifindex = vap_ifindex(port, NULL);
     m = mlme_by_ifindex(ifindex);
     if (!m) return 0;
-    if (fl > sizeof(out) - 16) return -EINVAL;
+    n = mlme_complete_assoc(fr, fl, out, sizeof(out));
+    if (n < 0) return n;
 
-    memcpy(out, fr, 30);
-    out[24] = 0x31; out[25] = 0x04;            /* capab: ESS|Priv|Short* */
-    out[26] = 0x00; out[27] = 0x00;            /* status: success */
-    {
-        uint16_t aid = mlme_aid_for(fr + 4);
-        out[28] = (uint8_t)(0xc0 | (aid >> 8));
-        out[29] = (uint8_t)(aid & 0xff);
-    }
-    out[n++] = 1; out[n++] = 8;
-    memcpy(out + n, mlme_rates2, 8); n += 8;
-    out[n++] = 50; out[n++] = 4;
-    memcpy(out + n, mlme_xrates, 4); n += 4;
-    memcpy(out + n, fr + 30, (size_t)fl - 30); n += (size_t)fl - 30;
-
-    int r = mlme_tx_mgmt(m->ifindex, out, n);
+    int r = mlme_tx_mgmt(m->ifindex, out, (size_t)n);
     printf("mlme: 0x6019 %s len=%zu -> TX %zu ret=%d (%s)\n",
-           st == 1 ? "assoc-resp" : "reassoc-resp", (size_t)fl, n, r,
+           st == 1 ? "assoc-resp" : "reassoc-resp", (size_t)fl, (size_t)n, r,
            r ? strerror(-r) : "ok");
     fflush(stdout);
     return 1;

@@ -97,6 +97,9 @@ struct extmux_cb {
     int  (*on_direct_tx)(void *ctx, const struct extmux_vap *v,
                          const uint8_t mac[6], const uint8_t *eapol,
                          size_t len);
+    /* Raw 802.11 Auth/AssocReq from hostapd -> manager 0x2018. */
+    void (*on_mgmt)(void *ctx, const struct extmux_vap *v,
+                    const uint8_t *fr, size_t len);
     /* Session reached AUTHORIZED (after hostapd replied OK). */
     void (*on_authorized)(void *ctx, const struct extmux_vap *v,
                           const uint8_t mac[6]);

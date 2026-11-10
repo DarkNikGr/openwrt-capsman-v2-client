@@ -16,6 +16,7 @@ static int  cap_hostapd_ctrl(const struct cfg *c, const char *ifname,
                              const char *cmd, char *reply, size_t rlen);
 /* Defined with the VAP lifecycle in vap.inc (W33). */
 static int  vap_refresh_ifindex(int port, uint8_t mac[6], int *changed);
+static int  hostapd_has_mgmt_tx(void);
 
 /* W36: in-CAP MLME hooks (definitions in mlme.inc, included after this). */
 static int mlme_owns_ifindex(int ifindex);
@@ -25,6 +26,8 @@ static int mlme_on_control_port(mbedtls_ssl_context *ssl, struct dc_ctx *dc,
                                 const struct cfg *c, struct nlattr *at,
                                 int alen);
 static int mlme_tx_mgmt(int ifindex, const uint8_t *fr, size_t len);
+static int mlme_complete_assoc(const uint8_t *fr, size_t fl, uint8_t *out,
+                               size_t cap);
 
 static void eapol_strip(const uint8_t **fr, size_t *len)
 {
@@ -620,7 +623,25 @@ static void mgmt_monitor_service(mbedtls_ssl_context *ssl)
             int st = (fr[0] >> 4) & 0xf;
             if (st != 0 && st != 2 && st != 11) continue;
             if (st == 11) {
-                if (len < 30 || fr[26] != 1 || fr[27] != 0) continue;
+                /* W46: SAE is two Authentication transactions.  For the
+                 * CAPsMAN manager the commit (txn 1) and the confirm
+                 * (txn 2) both have to be relayed; the old fixed txn==1
+                 * filter silently dropped the confirm and SAE stalled after
+                 * the commit.  Other algorithms still send only txn 1. */
+                if (len < 30) continue;
+                {
+                    uint16_t alg = (uint16_t)(fr[24] | (fr[25] << 8));
+                    uint16_t txn = (uint16_t)(fr[26] | (fr[27] << 8));
+                    if (!(txn == 1 || (alg == 3 && txn == 2))) {
+                        if (getenv("CAPAGENT_DEBUG"))
+                            printf("0x2018 monitor: drop auth alg=%u txn=%u "
+                                   "len=%zu\n", alg, txn, len);
+                        continue;
+                    }
+                    if (getenv("CAPAGENT_DEBUG"))
+                        printf("0x2018 monitor: relay auth alg=%u txn=%u "
+                               "len=%zu\n", alg, txn, len);
+                }
             }
             /* addr1 == addr3 == BSSID, addr2 != BSSID. */
             if (memcmp(fr + 4, fr + 16, 6) != 0 ||
@@ -914,6 +935,29 @@ static void ext_auth_authorize(const struct cfg *c, int ifindex,
     fflush(stdout);
 }
 
+/* W46: transmit a manager management frame through the hostapd BSS that
+ * owns the CAPsMAN port.  Raw nl80211 TX picks the wrong vif when several
+ * BSSes share a wiphy (and a foreign phy0-ap0 can hijack it); hostapd's
+ * EXT_AUTH_MGMT_TX uses this BSS's own_addr/seq/ACK bookkeeping. */
+static int ext_auth_mgmt_tx(const struct cfg *c, int ifindex,
+                            const uint8_t *fr, size_t len)
+{
+    struct vap *v = vap_by_ifindex(ifindex);
+    char cmd[4200];
+    int n, r;
+
+    if (!c->ext_auth_dir || !v || !v->ifname[0]) return -1;
+    if (!fr || len < 24 || len > 1800) return -EINVAL;
+    n = snprintf(cmd, sizeof(cmd), "EXT_AUTH_MGMT_TX ");
+    for (size_t i = 0; i < len; i++)
+        n += snprintf(cmd + n, sizeof(cmd) - n, "%02x", fr[i]);
+    r = hostapd_ctrl(c->ext_auth_dir, v->ifname, cmd);
+    printf("EXT-AUTH: mgmt TX %zuB subtype=%d via hostapd %s ret=%d\n",
+           len, (fr[0] >> 4) & 0xf, v->ifname, r);
+    fflush(stdout);
+    return r;
+}
+
 /* ---- 0x201F: key install + authorize (T4 exact spec) --------------- */
 
 struct key_desc {
@@ -1029,52 +1073,74 @@ static void handle_201f(mbedtls_ssl_context *ssl, int port,
         return;
     }
 
-    for (int i = 0; i < nkd; i++) {
-        struct key_desc *d = &kd[i];
-        if (!d->key || !d->klen) {
-            printf("0x201f: descriptor %d has no key bytes\n", i);
-            continue;
-        }
-        const uint8_t *smac = d->maclen == 6 ? d->mac : top_mac;
-        int ck = dkind[i], ci = didx[i];
-        int pairwise = (smac && ck == 0);
-        int is_igtk = (ck == 2);
-        int idx = d->idx;
-        if (ck && ci >= 0) idx = ci;
-        uint32_t cipher = d->cipher;
-        if (is_igtk && cipher == 0x000fac04u)
-            cipher = 0x000fac06u;      /* BIP-CMAC-128 (T4 §3.4) */
+    struct vap *kvp = vap_by_ifindex(ifindex);
+    int want_mfp = kvp && kvp->mfp;
+    /* W46: manager order is group keys first (GTK idx1 default-multicast,
+     * then IGTK idx4 default-mgmt), then the pairwise PTK.  Do not depend on
+     * the wire order of the 0x50 descriptors: install in three explicit
+     * passes so the defaults are right even if the manager reorders them. */
+    for (int pass = 0; pass < 3; pass++) {
+        for (int i = 0; i < nkd; i++) {
+            struct key_desc *d = &kd[i];
+            const uint8_t *smac = d->maclen == 6 ? d->mac : top_mac;
+            int ck = dkind[i], ci = didx[i];
+            int pairwise = (smac && ck == 0);
+            int is_igtk = (ck == 2);
+            int this_pass = pairwise ? 2 : (is_igtk ? 1 : 0);
 
-        int r = nl_install_key(ifindex, pairwise ? smac : NULL, idx, cipher,
-                               d->key, d->klen, d->seq, d->slen,
-                               pairwise ? 0 : 1);
-        printf("0x201f: NEW_KEY %s idx=%d cipher=%06x len=%zu ifindex=%d "
-               "ret=%d (%s)\n", pairwise ? "PAIRWISE" :
-               (is_igtk ? "IGTK/BIGTK" : "GROUP"), idx, cipher, d->klen,
-               ifindex, r, r ? strerror(-r) : "ok");
-        if (!pairwise) {
-            int r2 = nl_set_default(ifindex, idx, 1, is_igtk);
-            printf("0x201f: SET_KEY default idx=%d %s ret=%d (%s)\n", idx,
-                   is_igtk ? (idx >= 6 ? "beacon" : "mgmt") : "group",
-                   r2, r2 ? strerror(-r2) : "ok");
-        } else if (r == 0 || r == -EEXIST) {
-            if (g_extmux) {
-                /* extmux sends EXT_AUTH_AUTHORIZE, checks the reply, retries,
-                 * and drives the CAP-side 4-way timeout on failure. */
-                uint16_t xp = xm_canon_port(port);
-                printf("0x201f: PTK installed, authorize via extmux "
-                       "port=0x%04x\n", xp);
-                extmux_ptk_installed(g_extmux, xp, smac);
-            } else {
-                int ra = nl_sta_authorize(ifindex, smac);
-                printf("0x201f: SET_STATION AUTHORIZED %02x:%02x:%02x:%02x:%02x:%02x "
-                       "ret=%d (%s)\n", smac[0], smac[1], smac[2], smac[3],
-                       smac[4], smac[5], ra, ra ? strerror(-ra) : "ok");
-                if (ra == 0 || ra == -EEXIST)
-                    ext_auth_authorize(c, ifindex, smac);
+            if (pass != this_pass) continue;
+            if (!d->key || !d->klen) {
+                printf("0x201f: descriptor %d has no key bytes\n", i);
+                continue;
             }
-        } else {
-            printf("0x201f: PTK install failed, station not authorized\n");
+            int idx = d->idx;
+            if (ck && ci >= 0) idx = ci;
+            uint32_t cipher = d->cipher;
+            if (is_igtk && cipher == 0x000fac04u)
+                cipher = 0x000fac06u;      /* BIP-CMAC-128 (T4 §3.4) */
+
+            int r = nl_install_key(ifindex, pairwise ? smac : NULL, idx,
+                                   cipher, d->key, d->klen, d->seq, d->slen,
+                                   pairwise ? 0 : 1);
+            printf("0x201f: NEW_KEY %s idx=%d cipher=%06x len=%zu ifindex=%d "
+                   "ret=%d (%s)\n", pairwise ? "PAIRWISE" :
+                   (is_igtk ? "IGTK/BIGTK" : "GROUP"), idx, cipher, d->klen,
+                   ifindex, r, r ? strerror(-r) : "ok");
+            if (!pairwise) {
+                int r2 = nl_set_default(ifindex, idx, 1, is_igtk);
+                printf("0x201f: SET_KEY default idx=%d %s ret=%d (%s)\n", idx,
+                       is_igtk ? (idx >= 6 ? "beacon" : "mgmt") : "group",
+                       r2, r2 ? strerror(-r2) : "ok");
+            } else if (r == 0 || r == -EEXIST) {
+                /* W46: external-SAE VAPs never run hostapd's local RSN state
+                 * machine, so hostapd cannot set the kernel MFP flag.  The
+                 * manager's RSN caps are authoritative; set it before
+                 * AUTHORIZED. */
+                if (want_mfp) {
+                    int rm = nl_sta_mfp(ifindex, smac);
+                    printf("0x201f: SET_STATION MFP %02x:%02x:%02x:%02x:%02x:%02x "
+                           "ret=%d (%s)\n", smac[0], smac[1], smac[2],
+                           smac[3], smac[4], smac[5], rm,
+                           rm ? strerror(-rm) : "ok");
+                }
+                if (g_extmux) {
+                    /* extmux sends EXT_AUTH_AUTHORIZE, checks the reply, retries,
+                     * and drives the CAP-side 4-way timeout on failure. */
+                    uint16_t xp = xm_canon_port(port);
+                    printf("0x201f: PTK installed, authorize via extmux "
+                           "port=0x%04x\n", xp);
+                    extmux_ptk_installed(g_extmux, xp, smac);
+                } else {
+                    int ra = nl_sta_authorize(ifindex, smac);
+                    printf("0x201f: SET_STATION AUTHORIZED %02x:%02x:%02x:%02x:%02x:%02x "
+                           "ret=%d (%s)\n", smac[0], smac[1], smac[2], smac[3],
+                           smac[4], smac[5], ra, ra ? strerror(-ra) : "ok");
+                    if (ra == 0 || ra == -EEXIST)
+                        ext_auth_authorize(c, ifindex, smac);
+                }
+            } else {
+                printf("0x201f: PTK install failed, station not authorized\n");
+            }
         }
     }
     fflush(stdout);
@@ -1122,10 +1188,16 @@ static void handle_2019(mbedtls_ssl_context *ssl, int port,
         return;
     }
     /* W36: when the CAP owns this BSS's MLME, the manager's frame is the
-     * only response on air (there is no hostapd).  Transmit it on the AP
-     * vif without WIPHY_FREQ (W5). */
+     * only response on air (there is no hostapd).  W46: when the manager
+     * owns SAE/OWE on this VAP, the manager's Auth response is also the only
+     * one on air (hostapd suppresses local SAE), so transmit it through that
+     * BSS's hostapd instead of a raw nl80211 vif. */
     int mlme_owned = mlme_owns_ifindex(ifindex);
-    if (st == 11 && !mlme_owned) {
+    struct vap *hvp = vap_by_ifindex(ifindex);
+    int ext_tx = !mlme_owned && c->ext_auth_dir && hvp &&
+                 hvp->ifname[0] && hvp->external_auth &&
+                 hostapd_has_mgmt_tx();
+    if (st == 11 && !mlme_owned && !ext_tx) {
         printf("0x2019 auth-resp: discarded (hostapd answered on air)\n");
         fflush(stdout);
         return;
@@ -1138,17 +1210,52 @@ static void handle_2019(mbedtls_ssl_context *ssl, int port,
         return;
     }
     if (st != 11 && st != 12 && st != 13) {
-        printf("0x2019 subtype %d: not transmitted (unsupported)\n", st);
+        /* W46: in external-SAE mode the manager also sends the
+         * Association Response (subtype 1; and Reassoc variants) as a
+         * 0x2019 management frame.  A CAP that drops it leaves the
+         * station retrying forever, so forward assoc mgmt through the
+         * owning hostapd BSS as well. */
+        if (!((ext_tx && (st == 0 || st == 1 || st == 2 || st == 3)) ||
+              (mlme_owned && (st == 1 || st == 3)))) {
+            printf("0x2019 subtype %d: not transmitted (unsupported)\n", st);
+            fflush(stdout);
+            return;
+        }
+    }
+    const uint8_t *sta = fr + 4;                 /* addr1 */
+    int r;
+    if (mlme_owned && (st == 1 || st == 3)) {
+        /* W58: RouterOS 7.25.1 may deliver the manager's Association
+         * Response as 0x2019 subtype 1 as well as 0x6019.  It is the same
+         * template (no Supported Rates element), and mac80211 drops it
+         * before wpa_supplicant can read the OWE DH element.  Apply the
+         * W13 completion here too: rates/capab/AID + manager IEs verbatim. */
+        uint8_t out[2048];
+        int cn = mlme_complete_assoc(fr, fl, out, sizeof(out));
+        if (cn < 0) {
+            printf("0x2019 %s: bad template len=%u (%s)\n",
+                   st == 1 ? "assoc-resp" : "reassoc-resp", fl,
+                   strerror(-cn));
+            fflush(stdout);
+            return;
+        }
+        r = mlme_tx_mgmt(ifindex, out, (size_t)cn);
+        printf("0x2019 %s completed len=%u -> TX %d ifindex=%d ret=%d (%s)\n",
+               st == 1 ? "assoc-resp" : "reassoc-resp", fl, cn, ifindex, r,
+               r ? strerror(-r) : "ok");
         fflush(stdout);
         return;
     }
-    const uint8_t *sta = fr + 4;                 /* addr1 */
-    int r = mlme_owned ? mlme_tx_mgmt(ifindex, fr, fl)
-                       : (nl_cmd_open() == 0 ?
-                          nl_mgmt_tx(ifindex, freq, fr, fl) : -1);
+    if (mlme_owned)
+        r = mlme_tx_mgmt(ifindex, fr, fl);
+    else if (ext_tx)
+        r = ext_auth_mgmt_tx(c, ifindex, fr, fl);
+    else
+        r = (nl_cmd_open() == 0) ? nl_mgmt_tx(ifindex, freq, fr, fl) : -1;
     printf("0x2019 %s -> %02x:%02x:%02x:%02x:%02x:%02x port=0x%04x "
            "ifindex=%d freq=%u len=%u ret=%d (%s)\n",
-           st == 11 ? "auth-resp" : (st == 12 ? "deauth" : "action"),
+           st == 11 ? "auth-resp" : (st == 12 ? "deauth" :
+           (st == 1 ? "assoc-resp" : "action")),
            sta[0], sta[1], sta[2], sta[3], sta[4], sta[5], xp, ifindex,
            freq, fl, r, r ? strerror(-r) : "ok");
     if (st == 12) {
@@ -1244,6 +1351,29 @@ static int xm_on_eapol(void *ctx, const struct extmux_vap *v,
     eapol_relay(x->ssl, x->dc, x->c, v->port, mac, eapol, len);
     (void)encrypted;
     return 0;
+}
+
+/* W12/W46: hostapd relays the raw Auth (SAE commit/confirm) and AssocReq
+ * over the per-VAP socket; forward them to the manager as 0x2018. */
+static void xm_on_mgmt(void *ctx, const struct extmux_vap *v,
+                       const uint8_t *fr, size_t len)
+{
+    struct xm_ctx *x = ctx;
+    uint32_t freq = 0;
+    uint8_t width = 1, band = 0;
+
+    if (!x || !v || !fr || len < 24) return;
+    if (!vchan_get(v->port, &freq, &width, &band) || !freq) {
+        struct vap *vp = vap_by_ifindex(v->ifindex);
+        if (vp && vp->freq) freq = vp->freq;
+    }
+    if (!freq) return;
+    if (!band) band = band_code_for_freq(freq);
+    printf("EXTMUX: 0x2018 %s port=0x%04x len=%zu freq=%u\n",
+           ((fr[0] >> 4) & 0xf) == 11 ? "auth" : "assocreq",
+           v->port, len, freq);
+    fflush(stdout);
+    mgmt_send_2018(x->ssl, v->port, fr, len, freq, width, band, 0, "ext");
 }
 
 static int xm_on_delsta(void *ctx, const struct extmux_vap *v,
@@ -1413,6 +1543,7 @@ static void cap_extmux_start(struct cfg *c, mbedtls_ssl_context *ssl,
         .on_deauth = xm_on_deauth,
         .on_direct_tx = xm_on_direct,
         .on_authorized = xm_on_authorized,
+        .on_mgmt = xm_on_mgmt,
     };
     struct extmux_stats st;
 
