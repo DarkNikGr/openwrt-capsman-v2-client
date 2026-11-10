@@ -573,20 +573,25 @@ static void dc_handle_create(struct dc_ctx *d, const struct cfg *c,
             }
             if (wid < 0)
                 wid = vapid_for(rid, m);
-            vrid = rid;
-            vwid = wid;
-            struct dc_keyent *e = &g_dckey[rid % MAX_RADIOS][wid & 0x0f];
-            e->used = 1;
-            memcpy(e->key, key, key_len);
-            e->key_len = key_len;
-            if (cookie && cookie_len) {
-                memcpy(e->cookie, cookie, cookie_len);
-                e->cookie_len = cookie_len;
+            if (wid < 0) {
+                fprintf(stderr, "datachan: no free vapid for rid=%d, key "
+                        "not installed\n", rid);
+            } else {
+                vrid = rid;
+                vwid = wid;
+                struct dc_keyent *e = &g_dckey[rid % MAX_RADIOS][wid & 0x0f];
+                e->used = 1;
+                memcpy(e->key, key, key_len);
+                e->key_len = key_len;
+                if (cookie && cookie_len) {
+                    memcpy(e->cookie, cookie, cookie_len);
+                    e->cookie_len = cookie_len;
+                }
+                /* P1: the data path uses the VAP registry copy. */
+                vap_set_key(rid, wid, key, key_len, keyidx);
+                printf("datachan: key rid=%d wid=%d vlan=%u keyidx=%u "
+                       "cookie=%zuB\n", rid, wid, vlan, keyidx, cookie_len);
             }
-            /* P1: the data path uses the VAP registry copy. */
-            vap_set_key(rid, wid, key, key_len, keyidx);
-            printf("datachan: key rid=%d wid=%d vlan=%u keyidx=%u "
-                   "cookie=%zuB\n", rid, wid, vlan, keyidx, cookie_len);
         }
     }
 
@@ -613,6 +618,14 @@ static void dc_handle_create(struct dc_ctx *d, const struct cfg *c,
     printf("datachan: listening on UDP %u, id %u rid %u wid %u keyidx %u\n",
            port, id, d->rid, d->wid, d->keyidx);
     fflush(stdout);
+}
+
+/* W25: forget a VAP's datachan key/cookie when the manager destroys it.
+   Otherwise a recreated VAP with the same id could inherit the old key. */
+static void dc_forget_vap(int rid, int wid)
+{
+    if (rid < 0 || rid >= MAX_RADIOS || wid < 0 || wid > 15) return;
+    memset(&g_dckey[rid][wid], 0, sizeof(g_dckey[rid][wid]));
 }
 
 /* Known-answer tests for the datachan crypto (--crypto-selftest). */
