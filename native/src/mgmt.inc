@@ -15,6 +15,15 @@ static uint16_t xm_canon_port(int port);
 static int  cap_hostapd_ctrl(const struct cfg *c, const char *ifname,
                              const char *cmd, char *reply, size_t rlen);
 
+/* W36: in-CAP MLME hooks (definitions in mlme.inc, included after this). */
+static int mlme_owns_ifindex(int ifindex);
+static int mlme_on_mgmt(mbedtls_ssl_context *ssl, struct nlattr *at, int alen,
+                        int ifindex, const struct cfg *c);
+static int mlme_on_control_port(mbedtls_ssl_context *ssl, struct dc_ctx *dc,
+                                const struct cfg *c, struct nlattr *at,
+                                int alen);
+static int mlme_tx_mgmt(int ifindex, const uint8_t *fr, size_t len);
+
 static void eapol_strip(const uint8_t **fr, size_t *len)
 {
     const uint8_t *p = *fr;
@@ -637,7 +646,8 @@ static int mgmt_open(void)
 }
 
 /* Production nl80211 event service. */
-static void mgmt_service_nl(mbedtls_ssl_context *ssl)
+static void mgmt_service_nl(mbedtls_ssl_context *ssl, struct dc_ctx *dc,
+                            const struct cfg *c)
 {
     uint8_t buf[NL_MAX_MSG];
     if (g_nl_evt_fd < 0) return;
@@ -655,9 +665,11 @@ static void mgmt_service_nl(mbedtls_ssl_context *ssl)
             struct nlattr *at = (struct nlattr *)((uint8_t *)NLMSG_DATA(nlh) +
                                                   GENL_HDRLEN);
             if (g->cmd == NL80211_CMD_FRAME) {
-                mgmt_handle_frame(ssl, at, alen, 1,
-                                  mgmt_event_ifindex(at, alen));
+                int ifindex = mgmt_event_ifindex(at, alen);
+                if (mlme_on_mgmt(ssl, at, alen, ifindex, c)) continue;
+                mgmt_handle_frame(ssl, at, alen, 1, ifindex);
             } else if (g->cmd == NL80211_CMD_CONTROL_PORT_FRAME) {
+                if (mlme_on_control_port(ssl, dc, c, at, alen)) continue;
                 printf("mgmt: control-port frame (hostapd owns RX)\n");
             }
         }
@@ -976,17 +988,6 @@ static void handle_2019(mbedtls_ssl_context *ssl, int port,
         return;
     }
     int st = (fr[0] >> 4) & 0xf;
-    if (st == 11) {
-        printf("0x2019 auth-resp: discarded (hostapd answered on air)\n");
-        fflush(stdout);
-        return;
-    }
-    if (st != 12 && st != 13) {
-        printf("0x2019 subtype %d: not transmitted (unsupported)\n", st);
-        fflush(stdout);
-        return;
-    }
-
     uint16_t xp = xm_canon_port(port);
     uint8_t bssid[6] = {0};
     int ifindex = vap_ifindex(xp, bssid);
@@ -1001,13 +1002,29 @@ static void handle_2019(mbedtls_ssl_context *ssl, int port,
         fflush(stdout);
         return;
     }
+    /* W36: when the CAP owns this BSS's MLME, the manager's frame is the
+     * only response on air (there is no hostapd).  Transmit it on the AP
+     * vif without WIPHY_FREQ (W5). */
+    int mlme_owned = mlme_owns_ifindex(ifindex);
+    if (st == 11 && !mlme_owned) {
+        printf("0x2019 auth-resp: discarded (hostapd answered on air)\n");
+        fflush(stdout);
+        return;
+    }
+    if (st != 11 && st != 12 && st != 13) {
+        printf("0x2019 subtype %d: not transmitted (unsupported)\n", st);
+        fflush(stdout);
+        return;
+    }
     const uint8_t *sta = fr + 4;                 /* addr1 */
-    int r = nl_cmd_open() == 0 ? nl_mgmt_tx(ifindex, freq, fr, fl) : -1;
+    int r = mlme_owned ? mlme_tx_mgmt(ifindex, fr, fl)
+                       : (nl_cmd_open() == 0 ?
+                          nl_mgmt_tx(ifindex, freq, fr, fl) : -1);
     printf("0x2019 %s -> %02x:%02x:%02x:%02x:%02x:%02x port=0x%04x "
            "ifindex=%d freq=%u len=%u ret=%d (%s)\n",
-           st == 12 ? "deauth" : "action", sta[0], sta[1], sta[2], sta[3],
-           sta[4], sta[5], xp, ifindex, freq, fl, r,
-           r ? strerror(-r) : "ok");
+           st == 11 ? "auth-resp" : (st == 12 ? "deauth" : "action"),
+           sta[0], sta[1], sta[2], sta[3], sta[4], sta[5], xp, ifindex,
+           freq, fl, r, r ? strerror(-r) : "ok");
     if (st == 12) {
         /* The manager has already removed the peer; drop local state too.
          * Do not send 0x201a back for a manager-initiated deauth. */

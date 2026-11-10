@@ -174,6 +174,9 @@ struct cfg {
     const char *lab_iface;
     const char *lab_ssid;
     int lab_chan;
+    /* W36: in-CAP MLME for one manager-provisioned VAP (no hostapd). */
+    int mlme;
+    int mlme_port;
 };
 
 static mbedtls_x509_crt g_ca;
@@ -191,6 +194,7 @@ static void put32(uint8_t *p, uint32_t v) { p[0]=v>>24; p[1]=v>>16; p[2]=v>>8; p
 #include "src/datachan.inc"   /* c2 datachan: AES-CCM/plain, keepalive, per-VAP keys */
 #include "src/channels.inc"   /* 0x000a channels, 0x00b7 set, vapid allocation */
 #include "src/mgmt.inc"   /* EAPOL/key descriptors, 0x200e/0x2015/0x2018 helpers */
+#include "src/mlme.inc"   /* W36: in-CAP MLME for one VAP (no hostapd) */
 #include "src/vap.inc"    /* manager-driven VAP creation + hostapd (0x500b/0x6016) */
 #include "src/discovery.inc"   /* manager discovery and MAC/ifname resolution */
 #include "src/stats.inc"   /* 0x200e signal + 0x2015 counters/rates */

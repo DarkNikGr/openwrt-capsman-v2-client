@@ -105,8 +105,18 @@ static void createvap_response(mbedtls_ssl_context *ssl, const uint8_t hdr[10],
     } else if (macname[0]) {
         snprintf(ifname, sizeof(ifname), "%s", macname);
     }
-    /* U3: hostapd may own an interface with a different name; the -i
-       mapping is authoritative when the conventional name does not exist. */
+    /* U3/W36: an explicit -i name for the master is authoritative.  This is
+       also how a CAP avoids colliding with another radio's phyX-apY netdev
+       name (device names are global). */
+    if (vapid == 0 && phy < MAX_RADIOS && c->ifnames[phy][0]) {
+        char conventional[32];
+        snprintf(conventional, sizeof(conventional), "phy%d-ap%d", phy, vapid);
+        if (strcmp(c->ifnames[phy], conventional) != 0) {
+            snprintf(ifname, sizeof(ifname), "%s", c->ifnames[phy]);
+            ifindex = read_sysfs_int(ifname, "ifindex");
+            if (ifindex > 0) snprintf(macname, sizeof(macname), "%s", ifname);
+        }
+    }
     if (ifindex <= 0 && vapid == 0 && phy < MAX_RADIOS && c->ifnames[phy][0]) {
         snprintf(ifname, sizeof(ifname), "%s", c->ifnames[phy]);
         ifindex = read_sysfs_int(ifname, "ifindex");

@@ -57,6 +57,7 @@ static int run_once(struct cfg *c)
     g_vap_mtu = c->vap_mtu;
     g_bcast_flood = c->bcast_flood;
     g_msrc_cfg = c->mgmt_source;
+    mlme_init(c);
 
     /* W14: discover on every attempt.  At boot S95 runs ~130 s before the
      * WAN lease, so a single discovery can only cache an empty address. */
@@ -183,7 +184,7 @@ static int run_once(struct cfg *c)
             if (c->lab_iface) lab_service_nl(&ssl, &dc, c);
             else
 #endif
-            if (g_msrc != MSRC_MONITOR) mgmt_service_nl(&ssl);
+            if (g_msrc != MSRC_MONITOR) mgmt_service_nl(&ssl, &dc, c);
         }
         {
             int mon_hit = 0;
@@ -320,12 +321,14 @@ static int run_once(struct cfg *c)
             handle_2019(&ssl, port, body, len, c);
             send_hdr_msg(&ssl, TYPE_MGMT_TX_RESP, hdr + 2, NULL, 0);
         } else if (type == TYPE_ASSOC_RESP) {   /* 0x6019 assoc-resp template */
-            /* The template has capab 0 / AID 0 / no RSN IE and must never be
-             * sent verbatim; hostapd answered the real AssocResp on air. */
+            /* With hostapd the template is discarded; for an MLME-owned BSS
+             * the CAP completes it (rates/capab/AID) and sends it on air. */
             dump_raw("assocresp", type, port, body, len);
-            printf("0x6019 from manager (template discarded, hostapd answered "
-                   "on air)\n");
-            fflush(stdout);
+            if (!mlme_handle_assoc_resp(&ssl, port, body, len, c)) {
+                printf("0x6019 from manager (template discarded, hostapd "
+                       "answered on air)\n");
+                fflush(stdout);
+            }
             send_hdr_msg(&ssl, TYPE_MGMT_TX_RESP, hdr + 2, NULL, 0);
         } else if (type == TYPE_DEL_STA) {
             const uint8_t *dm = NULL; uint16_t dl = 0;
@@ -438,13 +441,16 @@ static void usage(const char *p)
         "                               Auth/AssocReq source (auto: nl80211 when we\n"
         "                               own the AP, monitor when hostapd owns it)\n"
         "  --ext-auth-dir DIR           hostapd external-RSN dgram dir (P5)\n"
+        "  --country CC                 hostapd country_code (e.g. GR)\n"
         "  --ext-ctrl-dir DIR           hostapd ctrl_interface dir (default: dir above)\n"
         "  --state-file FILE            key-free extmux restart journal\n"
         "  --fourway-timeout MS         CAP-side 4-way deadline (default 10000)\n"
         "  --m1-retry MS                M1 retransmit interval (default 3000)\n"
         "  --lab-ap IFACE               lab only: bring up a minimal AP on IFACE\n"
         "  --lab-ssid SSID              lab SSID (default T14-CAP)\n"
-        "  --lab-chan N                 lab channel (default 1)\n",
+        "  --lab-chan N                 lab channel (default 1)\n"
+        "  --mlme                       in-CAP MLME for one VAP (no hostapd)\n"
+        "  --mlme-port PORT             VAP port, default 0x0000 (2.4 master)\n",
         p);
 }
 
@@ -467,6 +473,7 @@ int main(int argc, char **argv)
     c.dc_id = DC_ID_DEFAULT;
     c.fourway_ms = 10000;
     c.m1_retry_ms = 3000;
+    c.mlme_port = 0x0000;       /* 2.4 GHz master by default */
     parse_ifnames(&c, "phy0-ap0,phy1-ap0");
     parse_macs(&c, "auto");
 
@@ -476,8 +483,9 @@ int main(int argc, char **argv)
            OPT_DC_COOKIE, OPT_DC_ID, OPT_DC_PEER, OPT_APPLY, OPT_NOACK,
            OPT_EAPOL_LEG, OPT_LAB_AP, OPT_LAB_SSID, OPT_LAB_CHAN, OPT_INJECT,
            OPT_PHYS, OPT_DP_BRIDGE, OPT_VAP_MTU, OPT_BCAST, OPT_MGMT_RELAY,
-           OPT_MGMT_SOURCE, OPT_EXTAUTH, OPT_VAPAUTO, OPT_NOVAPAUTO,
-           OPT_EXTCTRL, OPT_STATE, OPT_FOURWAY, OPT_M1RETRY };
+           OPT_MGMT_SOURCE, OPT_EXTAUTH, OPT_COUNTRY, OPT_VAPAUTO, OPT_NOVAPAUTO,
+           OPT_EXTCTRL, OPT_STATE, OPT_FOURWAY, OPT_M1RETRY,
+           OPT_MLME, OPT_MLME_PORT };
     static struct option opts[] = {
         {"manager", required_argument, 0, 'm'},
         {"port", required_argument, 0, 'p'},
@@ -514,6 +522,7 @@ int main(int argc, char **argv)
         {"mgmt-relay", no_argument, 0, OPT_MGMT_RELAY},
         {"mgmt-source", required_argument, 0, OPT_MGMT_SOURCE},
         {"ext-auth-dir", required_argument, 0, OPT_EXTAUTH},
+        {"country", required_argument, 0, OPT_COUNTRY},
         {"ext-ctrl-dir", required_argument, 0, OPT_EXTCTRL},
         {"state-file", required_argument, 0, OPT_STATE},
         {"fourway-timeout", required_argument, 0, OPT_FOURWAY},
@@ -523,6 +532,8 @@ int main(int argc, char **argv)
         {"lab-ap", required_argument, 0, OPT_LAB_AP},
         {"lab-ssid", required_argument, 0, OPT_LAB_SSID},
         {"lab-chan", required_argument, 0, OPT_LAB_CHAN},
+        {"mlme", no_argument, 0, OPT_MLME},
+        {"mlme-port", required_argument, 0, OPT_MLME_PORT},
         {"help", no_argument, 0, 'h'},
         {0,0,0,0}
     };
@@ -559,6 +570,7 @@ int main(int argc, char **argv)
         case OPT_DC_ID: c.dc_id = (uint16_t)atoi(optarg); break;
         case OPT_DC_PEER: c.dc_peer_port = (uint16_t)atoi(optarg); break;
         case OPT_APPLY: g_apply = 1; break;
+        case OPT_COUNTRY: g_vap_country = optarg; break;
         case OPT_VAPAUTO: c.vap_auto = 1; break;
         case OPT_NOVAPAUTO: c.vap_auto = 0; break;
         case OPT_NOACK: c.no_ack = 1; break;
@@ -579,6 +591,10 @@ int main(int argc, char **argv)
         case OPT_STATE: c.state_file = optarg; break;
         case OPT_FOURWAY: c.fourway_ms = atoi(optarg); break;
         case OPT_M1RETRY: c.m1_retry_ms = atoi(optarg); break;
+        case OPT_MLME: c.mlme = 1; break;
+        case OPT_MLME_PORT:
+            c.mlme_port = (int)strtol(optarg, NULL, 0);
+            break;
         case OPT_PHYS: {
             char *tmp = strdup(optarg), *save = NULL, *tok;
             int i = 0;

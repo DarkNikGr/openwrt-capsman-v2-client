@@ -25,6 +25,17 @@
 
 #define VAP_CONF_DIR "/tmp"
 
+/* Regulatory country for hostapd.  CAPsMAN v2 does not deliver it in 0x500b or
+ * 0x6016, so it is a CAP setting (--country / COUNTRY= in the config).  Empty
+ * means "do not program a country": 5 GHz will then only come up if something
+ * else already set the regdomain. */
+static const char *g_vap_country;
+
+/* One hostapd per (phy, vapid).  A pid file is not enough: hostapd -B detaches
+ * before it writes one, so two creates arriving back to back both see "not
+ * running" and spawn a second instance that then fights for the netdev. */
+static int g_vap_started[MAX_RADIOS][16];
+
 /* Parse the RSN IE (element 48) out of the manager's IE blob. */
 struct rsn_info {
     int valid;
@@ -117,6 +128,81 @@ static int wireless_has_bss(void)
     return found;
 }
 
+/* 0x0c width code from the manager: 1=20, 2=40, 3=80, 4=160. */
+static int vap_mgr_width(const uint8_t *chv, uint16_t cl)
+{
+    size_t p = 0;
+    while (p + 4 <= cl) {
+        uint16_t t = rd16(chv + p), l = rd16(chv + p + 2);
+        p += 4;
+        if (p + l > cl) break;
+        if (t == 0x0c && l == 1) return chv[p];
+        p += l;
+    }
+    return 0;
+}
+
+static int vap_is_5g(uint32_t f) { return f >= 4900 && f <= 5925; }
+
+/* DFS channels in the ETSI/GR regulatory domain. */
+static int vap_is_dfs_chan(int chan)
+{
+    return (chan >= 52 && chan <= 64) || (chan >= 100 && chan <= 144);
+}
+
+/* HT40 secondary-channel direction for a 5 GHz primary channel. */
+static int vap_ht40_sign5(uint32_t freq)
+{
+    int chan = (int)(freq / 5 - 1000);
+    if (chan >= 165) return 0;
+    if (chan >= 149) return (chan % 8 == 5) ? 1 : -1;
+    return (chan % 8 == 4) ? 1 : -1;
+}
+
+/* hostapd channel lines for one VAP.  wcode is the manager's 0x0c width code.
+ * A VHT80 BSS needs both vht_oper_chwidth and the centre-frequency index,
+ * otherwise hostapd's DFS start-channel computation fails even on ch36. */
+static void vap_write_channel(FILE *f, uint32_t freq, int wcode)
+{
+    if (!vap_is_5g(freq)) {
+        int chan = (int)((freq - 2407) / 5);
+        if (chan < 1 || chan > 14) chan = 6;
+        int width = (wcode == 2 || wcode == 3) ? 40 : 20;
+        fprintf(f, "hw_mode=g\nchannel=%d\nieee80211n=1\n", chan);
+        if (width == 40)
+            fprintf(f, "ht_capab=[HT40%c]\n", chan <= 7 ? '+' : '-');
+        return;
+    }
+
+    int chan = (int)(freq / 5 - 1000);
+    int width;
+    switch (wcode) {
+    case 1:  width = 20; break;
+    case 2:  width = 40; break;
+    case 3:  width = 80; break;
+    default: width = 80; break;
+    }
+
+    fprintf(f, "hw_mode=a\nchannel=%d\n", chan);
+    if (g_vap_country && g_vap_country[0])
+        fprintf(f, "country_code=%s\nieee80211d=1\n%s\n", g_vap_country,
+                vap_is_dfs_chan(chan) ? "ieee80211h=1" : "");
+    fprintf(f, "ieee80211n=1\nieee80211ac=1\n");
+
+    if (width >= 40) {
+        int sign = vap_ht40_sign5(freq);
+        if (!sign) width = 20;
+        else fprintf(f, "ht_capab=[HT40%c]\n", sign > 0 ? '+' : '-');
+    }
+    if (width >= 80) {
+        fprintf(f, "vht_oper_chwidth=1\n");
+        fprintf(f, "vht_oper_centr_freq_seg0_idx=%u\n",
+                ccfi80(freq) / 5 - 1000);
+    } else {
+        fprintf(f, "vht_oper_chwidth=0\n");
+    }
+}
+
 /* Create an AP netdev on the wiphy.  Returns the ifindex or <= 0. */
 static int vap_netdev_create(int phy, const char *ifname, const uint8_t mac[6])
 {
@@ -206,18 +292,7 @@ static int vap_hostapd_start(int port, const char *ifname, int phy, int vapid,
                 vp->bssid[4], vp->bssid[5]);
     }
     if (bridge[0]) fprintf(f, "bridge=%s\n", bridge);
-    if (freq < 3000) fprintf(f, "hw_mode=g\n");
-    else fprintf(f, "hw_mode=a\n");
-    if (freq < 3000) {
-        int chan = (int)((freq - 2407) / 5);
-        if (chan < 1 || chan > 14) chan = 6;
-        fprintf(f, "channel=%d\n", chan);
-        fprintf(f, "ieee80211n=1\n");
-    } else {
-        fprintf(f, "channel=%u\n", freq / 5 - 1000);
-        fprintf(f, "ieee80211n=1\nieee80211ac=1\n");
-        fprintf(f, "vht_oper_chwidth=1\n");
-    }
+    vap_write_channel(f, freq, vap_mgr_width(chv, cl));
 
     if (ri.valid && (ri.akm_psk || ri.akm_psk256)) {
         fprintf(f, "wpa=2\n");
@@ -298,7 +373,18 @@ static void vap_provision(int port, const uint8_t *body, uint16_t len,
     char ifname[32];
     snprintf(ifname, sizeof(ifname), "phy%d-ap%d", phy, vapid);
     int created = 0;
-    int ifindex = if_nametoindex(ifname);
+    /* createvap_response() may have created a differently named netdev (the
+     * -i mapping) and stored it on the VAP; prefer that binding. */
+    int ifindex = 0;
+    {
+        char chk[IF_NAMESIZE];
+        if (vp->ifindex > 0 && vp->ifname[0] &&
+            if_indextoname((unsigned)vp->ifindex, chk)) {
+            ifindex = vp->ifindex;
+            snprintf(ifname, sizeof(ifname), "%s", vp->ifname);
+        }
+    }
+    if (ifindex <= 0) ifindex = if_nametoindex(ifname);
     if (ifindex <= 0) {
         ifindex = vap_netdev_create(phy, ifname, vp->bssid);
         if (ifindex <= 0) return;
@@ -310,6 +396,14 @@ static void vap_provision(int port, const uint8_t *body, uint16_t len,
     /* Bind (or re-bind) the per-BSS ext-auth relay socket before hostapd
      * starts accepting clients.  Also seeds the port/channel map. */
     cap_vap_ready(phy, vapid, ifindex, ifname, vp->bssid, c);
+
+    /* W36: this VAP runs its MLME in-process; never spawn hostapd for it. */
+    if (mlme_owns_port(port)) {
+        int mr = mlme_vap_start(phy, vapid, ifindex, ifname, body, len, c);
+        if (mr < 0)
+            fprintf(stderr, "vap: %s in-CAP MLME failed (%d)\n", ifname, mr);
+        return;
+    }
 
     if (!c->vap_auto) return;
 
@@ -324,5 +418,6 @@ static void vap_provision(int port, const uint8_t *body, uint16_t len,
         fflush(stdout);
         return;
     }
+    g_vap_started[phy % MAX_RADIOS][vapid & 0x0f] = 1;
     vap_hostapd_start(port, ifname, phy, vapid, body, len, vp, c);
 }
