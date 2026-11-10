@@ -32,8 +32,9 @@ Current reality: control plane joins, but the BSSes come from a local
    cipher. Needs a forced RSN IE in the generated hostapd config (W21/W24).
 2. **5 GHz hostapd start fails** on the MT7612E (DFS/regulatory/centre-freq);
    the driver refuses the AP. 2.4 GHz is up.
-3. **VAP lifecycle** — `0x600c` never stops hostapd/deletes the netdev/releases
-   the id, so a second create cycle wedges (W25/W28).
+3. ~~**VAP lifecycle**~~ — solved in W38: `0x600c` stops hostapd, drops the
+   ext-auth socket, deletes the netdev, then releases the id; a watchdog reaps
+   anything left behind. See `docs/W38-LIFECYCLE.md` and the W38 live test.
 4. **Zero-touch boot** — client + certificate + hostapd must live in ROM
    (custom image), otherwise a factory reset removes them.
 5. **No manual fallback allowed** — no SSH-driven bootstrap, no local
