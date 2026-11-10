@@ -7,8 +7,10 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <ctype.h>
 #include <stdint.h>
 #include <unistd.h>
+#include <sys/wait.h>
 #include <errno.h>
 #include <time.h>
 #include <getopt.h>
@@ -16,9 +18,21 @@
 #include <sys/time.h>
 #include <poll.h>
 #include <fcntl.h>
+#include <signal.h>
 #include <arpa/inet.h>
 #include <net/if.h>
+#include <netinet/in.h>
 #include <sys/ioctl.h>
+#include <linux/netlink.h>
+#include <linux/genetlink.h>
+#include <linux/nl80211.h>
+#include <linux/if_ether.h>
+#ifndef NLA_F_NESTED
+#define NLA_F_NESTED (1 << 15)
+#endif
+#ifndef NLA_TYPE_MASK
+#define NLA_TYPE_MASK (~(NLA_F_NESTED | NLA_F_NET_BYTEORDER))
+#endif
 
 #include "mbedtls/net_sockets.h"
 #include "mbedtls/ssl.h"
@@ -46,6 +60,27 @@
 #define TYPE_DESTROY           0x600C
 #define TYPE_DESTROY_RESP      0xE00C
 #define TYPE_DISCONNECT        0x002A
+
+/* CAPsMAN v2 station/RSN messages (T4/T5):
+   0x2018 CAP->MGR  {3E = raw 802.11 assoc/reassoc request, 3F = freq u32}
+   0x201B CAP->MGR  {08 = STA MAC, 3E = EAPOL frame}      (STA -> authenticator)
+   0x201C MGR->CAP  {08 = STA MAC, 3E = EAPOL frame}      (authenticator -> STA)
+   0x201F MGR->CAP  key descriptors (0050/005A/005B)      (PTK/GTK/IGTK)
+   0x201A MGR->CAP  {08 = STA MAC}                        (DELSTA)
+   Acks 0xE01C / 0xE01F. */
+#define TYPE_ASSOC_FRAME       0x2018
+#define TYPE_EAPOL_RX          0x201B
+#define TYPE_EAPOL_TX          0x201C
+#define TYPE_KEY_INSTALL       0x201F
+#define TYPE_DEL_STA           0x201A
+#define TYPE_EAPOL_TX_RESP     0xE01C
+#define TYPE_KEY_RESP          0xE01F
+#define TYPE_START             0x6016
+#define TYPE_START_RESP        0xE016
+#define TYPE_POLL              0x6027
+
+#define ETH_P_EAPOL            0x888E
+#define NL_MAX_MSG             8192
 
 /* CAPsMAN v2 data channel (optional, UDP). The manager hands the id, port,
    cookie and AES-256 key to the CAP in the 0x500b create. */
@@ -92,12 +127,20 @@ struct cfg {
     int datachan;
     int apply;
     int no_ack;
+    int inject_assoc;
     uint16_t dc_port;
     uint16_t dc_id;
     uint8_t dc_key[DC_KEY_MAX];
     size_t dc_key_len;
     uint8_t dc_cookie[DC_COOKIE_MAX];
     size_t dc_cookie_len;
+    /* EAPOL relay leg: 0 = control channel 0x201B, 1 = c2 datachan,
+       2 = both.  See REPORT.md §3. */
+    int eapol_leg;
+    /* Lab/hwsim harness: bring up a minimal AP and drive the MLME locally. */
+    const char *lab_iface;
+    const char *lab_ssid;
+    int lab_chan;
 };
 
 static mbedtls_x509_crt g_ca;
@@ -403,11 +446,353 @@ static int find_el(const uint8_t *b, size_t n, uint16_t id,
     return 0;
 }
 
+/* ======================================================================
+ * nl80211: 0x201C control-port injection, 0x201F key install, authorize.
+ * T4's constants: NEW_KEY=11 SET_KEY=10 SET_STATION=18; ATTR_KEY=80,
+ * KEY_DATA=1, KEY_IDX=2, KEY_CIPHER=3, KEY_SEQ=4, KEY_DEFAULT=5,
+ * KEY_DEFAULT_MGMT=6, KEY_TYPE=7, KEY_DEFAULT_TYPES=8,
+ * KEY_DEFAULT_TYPE_MULTICAST=2, STA_FLAGS2=67, AUTHORIZED=BIT(1).
+ * ==================================================================== */
+
+static int g_nl_family = -1;
+static int g_nl_cmd_fd = -1;       /* synchronous commands            */
+#ifdef CAPAGENT_LAB
+static int g_nl_evt_fd = -1;       /* lab: mgmt + control-port events */
+#endif
+static uint32_t g_nl_seq;
+
+struct nl_buf { struct nlmsghdr *nlh; uint8_t buf[NL_MAX_MSG]; };
+
+static void nlb_init(struct nl_buf *m, uint16_t cmd, uint16_t flags)
+{
+    memset(m, 0, sizeof(*m));
+    m->nlh = (struct nlmsghdr *)m->buf;
+    m->nlh->nlmsg_len = NLMSG_LENGTH(GENL_HDRLEN);
+    m->nlh->nlmsg_type = (uint16_t)g_nl_family;
+    m->nlh->nlmsg_flags = NLM_F_REQUEST | flags;
+    m->nlh->nlmsg_seq = ++g_nl_seq;
+    struct genlmsghdr *g = (struct genlmsghdr *)NLMSG_DATA(m->nlh);
+    g->cmd = cmd;
+    g->version = 1;
+}
+
+static struct nlattr *nlb_put(struct nl_buf *m, uint16_t type,
+                              const void *data, size_t len)
+{
+    size_t off = NLMSG_ALIGN(m->nlh->nlmsg_len);
+    size_t alen = NLA_HDRLEN + len;
+    if (off + NLA_ALIGN(alen) > sizeof(m->buf)) {
+        fprintf(stderr, "nl80211: message overflow\n");
+        return NULL;
+    }
+    struct nlattr *a = (struct nlattr *)(m->buf + off);
+    a->nla_type = type;
+    a->nla_len = (uint16_t)alen;
+    if (len && data) memcpy((uint8_t *)a + NLA_HDRLEN, data, len);
+    memset((uint8_t *)a + alen, 0, NLA_ALIGN(alen) - alen);
+    m->nlh->nlmsg_len = off + NLA_ALIGN(alen);
+    return a;
+}
+static void nlb_u8 (struct nl_buf *m, uint16_t t, uint8_t v)  { nlb_put(m,t,&v,1); }
+static void nlb_u16(struct nl_buf *m, uint16_t t, uint16_t v) { nlb_put(m,t,&v,2); }
+static void nlb_u32(struct nl_buf *m, uint16_t t, uint32_t v) { nlb_put(m,t,&v,4); }
+static void nlb_flag(struct nl_buf *m, uint16_t t)            { nlb_put(m,t,NULL,0); }
+static struct nlattr *nlb_nest(struct nl_buf *m, uint16_t t)
+{
+    return nlb_put(m, (uint16_t)(t | NLA_F_NESTED), NULL, 0);
+}
+static void nlb_nest_end(struct nl_buf *m, struct nlattr *a)
+{
+    a->nla_len = (uint16_t)((uint8_t *)m->buf + m->nlh->nlmsg_len -
+                            (uint8_t *)a);
+}
+
+static int nl_send_ack(int fd, struct nl_buf *m)
+{
+    struct sockaddr_nl sa;
+    memset(&sa, 0, sizeof(sa));
+    sa.nl_family = AF_NETLINK;
+    if (sendto(fd, m->buf, m->nlh->nlmsg_len, 0,
+               (struct sockaddr *)&sa, sizeof(sa)) < 0)
+        return -errno;
+
+    uint8_t rbuf[NL_MAX_MSG];
+    for (;;) {
+        struct pollfd pfd = { .fd = fd, .events = POLLIN, .revents = 0 };
+        int pr = poll(&pfd, 1, 2000);
+        if (pr == 0) return -ETIMEDOUT;
+        if (pr < 0) {
+            if (errno == EINTR) continue;
+            return -errno;
+        }
+        int n = recv(fd, rbuf, sizeof(rbuf), 0);
+        if (n < 0) {
+            if (errno == EINTR) continue;
+            return -errno;
+        }
+        for (struct nlmsghdr *nlh = (struct nlmsghdr *)rbuf; NLMSG_OK(nlh, n);
+             nlh = NLMSG_NEXT(nlh, n)) {
+            if (nlh->nlmsg_seq != m->nlh->nlmsg_seq) continue;
+            if (nlh->nlmsg_type == NLMSG_ERROR) {
+                struct nlmsgerr *e = (struct nlmsgerr *)NLMSG_DATA(nlh);
+                return e->error;              /* 0 = ack */
+            }
+            if (nlh->nlmsg_type == NLMSG_DONE) return 0;
+        }
+    }
+}
+
+static int nl_open_socket(void)
+{
+    int fd = socket(AF_NETLINK, SOCK_RAW, NETLINK_GENERIC);
+    if (fd < 0) return -1;
+    struct sockaddr_nl sa;
+    memset(&sa, 0, sizeof(sa));
+    sa.nl_family = AF_NETLINK;
+    if (bind(fd, (struct sockaddr *)&sa, sizeof(sa)) < 0) {
+        close(fd);
+        return -1;
+    }
+    return fd;
+}
+
+static int nl_resolve_family(int fd)
+{
+    struct {
+        struct nlmsghdr n;
+        struct genlmsghdr g;
+        uint8_t buf[64];
+    } req;
+    memset(&req, 0, sizeof(req));
+    req.n.nlmsg_len = NLMSG_LENGTH(GENL_HDRLEN);
+    req.n.nlmsg_type = GENL_ID_CTRL;
+    req.n.nlmsg_flags = NLM_F_REQUEST;
+    req.n.nlmsg_seq = 0x5443;
+    req.g.cmd = CTRL_CMD_GETFAMILY;
+    req.g.version = 1;
+    struct nlattr *a = (struct nlattr *)((uint8_t *)&req +
+                                         NLMSG_ALIGN(req.n.nlmsg_len));
+    a->nla_type = CTRL_ATTR_FAMILY_NAME;
+    a->nla_len = NLA_HDRLEN + 8;
+    memcpy((uint8_t *)a + NLA_HDRLEN, "nl80211", 8);
+    req.n.nlmsg_len = NLMSG_ALIGN(req.n.nlmsg_len) + NLA_ALIGN(a->nla_len);
+
+    struct sockaddr_nl sa;
+    memset(&sa, 0, sizeof(sa));
+    sa.nl_family = AF_NETLINK;
+    if (sendto(fd, &req, req.n.nlmsg_len, 0,
+               (struct sockaddr *)&sa, sizeof(sa)) < 0)
+        return -1;
+
+    uint8_t rbuf[4096];
+    int n = recv(fd, rbuf, sizeof(rbuf), 0);
+    if (n <= 0) return -1;
+    for (struct nlmsghdr *nlh = (struct nlmsghdr *)rbuf; NLMSG_OK(nlh, n);
+         nlh = NLMSG_NEXT(nlh, n)) {
+        if (nlh->nlmsg_type == NLMSG_ERROR) return -1;
+        int alen = nlh->nlmsg_len - NLMSG_LENGTH(GENL_HDRLEN);
+        struct nlattr *at = (struct nlattr *)((uint8_t *)NLMSG_DATA(nlh) +
+                                              GENL_HDRLEN);
+        for (struct nlattr *x = at; alen >= (int)NLA_HDRLEN &&
+             x->nla_len >= NLA_HDRLEN && x->nla_len <= alen;
+             alen -= NLA_ALIGN(x->nla_len),
+             x = (struct nlattr *)((uint8_t *)x + NLA_ALIGN(x->nla_len))) {
+            if ((x->nla_type & NLA_TYPE_MASK) == CTRL_ATTR_FAMILY_ID)
+                return *(uint16_t *)((uint8_t *)x + NLA_HDRLEN);
+        }
+    }
+    return -1;
+}
+
+static int nl_cmd_open(void)
+{
+    if (g_nl_cmd_fd >= 0) return 0;
+    g_nl_family = -1;
+    int fd = nl_open_socket();
+    if (fd < 0) return -1;
+    int fam = nl_resolve_family(fd);
+    if (fam < 0) {
+        close(fd);
+        return -1;
+    }
+    g_nl_family = fam;
+    g_nl_cmd_fd = fd;
+    printf("nl80211: family=%d cmd-socket=%d\n", fam, fd);
+    fflush(stdout);
+    return 0;
+}
+
+/* port -> netdev.  The manager addresses a VAP as (phy<<8)|vapid; the
+   interface created for it is phy<N>-ap<M> (see createvap_response). */
+struct port_map {
+    int used;
+    int port;
+    int ifindex;
+    uint8_t mac[6];
+};
+static struct port_map g_pmap[16];
+
+static void pmap_set(int port, int ifindex, const uint8_t mac[6])
+{
+    int slot = -1;
+    for (int i = 0; i < 16; i++) {
+        if (g_pmap[i].used && g_pmap[i].port == port) { slot = i; break; }
+        if (!g_pmap[i].used && slot < 0) slot = i;
+    }
+    if (slot < 0) return;
+    g_pmap[slot].used = 1;
+    g_pmap[slot].port = port;
+    g_pmap[slot].ifindex = ifindex;
+    if (mac) memcpy(g_pmap[slot].mac, mac, 6);
+}
+
+static int pmap_get(int port, int *ifindex, uint8_t mac[6])
+{
+    for (int i = 0; i < 16; i++)
+        if (g_pmap[i].used && g_pmap[i].port == port) {
+            if (ifindex) *ifindex = g_pmap[i].ifindex;
+            if (mac) memcpy(mac, g_pmap[i].mac, 6);
+            return 1;
+        }
+    return 0;
+}
+
+/* Resolve (phy<<8)|vap to an ifindex, falling back to sysfs. */
+static int vap_ifindex(int port, uint8_t mac[6])
+{
+    int ifindex = 0;
+    if (pmap_get(port, &ifindex, mac) && ifindex > 0)
+        return ifindex;
+    char ifname[32];
+    snprintf(ifname, sizeof(ifname), "phy%d-ap%d", port >> 8, port & 0xff);
+    ifindex = read_sysfs_int(ifname, "ifindex");
+    if (ifindex <= 0) {
+        char alt[32];
+        snprintf(alt, sizeof(alt), "wlan%d", (port >> 8) * 2 + (port & 1));
+        ifindex = read_sysfs_int(alt, "ifindex");
+        if (ifindex > 0) snprintf(ifname, sizeof(ifname), "%s", alt);
+    }
+    if (ifindex > 0) {
+        if (mac) read_sysfs_mac(ifname, mac);
+        pmap_set(port, ifindex, mac);
+    }
+    return ifindex;
+}
+
+/* One key.  group=0 -> PAIRWISE with ATTR_MAC; group=1 -> GTK/IGTK. */
+static int nl_install_key(int ifindex, const uint8_t *mac, int idx,
+                          uint32_t cipher, const uint8_t *key, size_t klen,
+                          const uint8_t *seq, size_t slen, int group)
+{
+    if (ifindex <= 0 || !key || !klen) return -EINVAL;
+    struct nl_buf m;
+    nlb_init(&m, NL80211_CMD_NEW_KEY, NLM_F_ACK);
+    nlb_u32(&m, NL80211_ATTR_IFINDEX, (uint32_t)ifindex);
+    if (mac && !group) nlb_put(&m, NL80211_ATTR_MAC, mac, 6);
+
+    struct nlattr *k = nlb_nest(&m, NL80211_ATTR_KEY);
+    nlb_put(&m, NL80211_KEY_DATA, key, klen);
+    nlb_u32(&m, NL80211_KEY_CIPHER, cipher);
+    nlb_u8(&m, NL80211_KEY_IDX, (uint8_t)idx);
+    if (seq && slen) nlb_put(&m, NL80211_KEY_SEQ, seq, slen);
+    nlb_u32(&m, NL80211_KEY_TYPE,
+            group ? NL80211_KEYTYPE_GROUP : NL80211_KEYTYPE_PAIRWISE);
+    nlb_nest_end(&m, k);
+    return nl_send_ack(g_nl_cmd_fd, &m);
+}
+
+/* Make idx the default RX key.  GTK -> DEFAULT(+MULTICAST), IGTK ->
+   DEFAULT_MGMT, BIGTK -> DEFAULT_BEACON (T4 §3.2). */
+static int nl_set_default(int ifindex, int idx, int group, int is_igtk)
+{
+    if (ifindex <= 0) return -EINVAL;
+    struct nl_buf m;
+    nlb_init(&m, NL80211_CMD_SET_KEY, NLM_F_ACK);
+    nlb_u32(&m, NL80211_ATTR_IFINDEX, (uint32_t)ifindex);
+    struct nlattr *k = nlb_nest(&m, NL80211_ATTR_KEY);
+    nlb_u8(&m, NL80211_KEY_IDX, (uint8_t)idx);
+    if (is_igtk && idx >= 4 && idx <= 5) {
+        nlb_flag(&m, NL80211_KEY_DEFAULT_MGMT);
+    } else if (is_igtk) {
+        nlb_flag(&m, NL80211_KEY_DEFAULT_BEACON);
+    } else {
+        nlb_flag(&m, NL80211_KEY_DEFAULT);
+        if (group) {
+            struct nlattr *t = nlb_nest(&m, NL80211_KEY_DEFAULT_TYPES);
+            nlb_flag(&m, NL80211_KEY_DEFAULT_TYPE_MULTICAST);
+            nlb_nest_end(&m, t);
+        }
+    }
+    nlb_nest_end(&m, k);
+    int r = nl_send_ack(g_nl_cmd_fd, &m);
+    if (r == -EINVAL && !is_igtk) {
+        /* Older kernels take the plain flag only. */
+        nlb_init(&m, NL80211_CMD_SET_KEY, NLM_F_ACK);
+        nlb_u32(&m, NL80211_ATTR_IFINDEX, (uint32_t)ifindex);
+        k = nlb_nest(&m, NL80211_ATTR_KEY);
+        nlb_u8(&m, NL80211_KEY_IDX, (uint8_t)idx);
+        nlb_flag(&m, NL80211_KEY_DEFAULT);
+        nlb_nest_end(&m, k);
+        r = nl_send_ack(g_nl_cmd_fd, &m);
+    }
+    return r;
+}
+
+/* 4-way complete: exactly hostapd's SET_STATION STA_FLAGS2 AUTHORIZED. */
+static int nl_sta_authorize(int ifindex, const uint8_t mac[6])
+{
+    if (ifindex <= 0) return -EINVAL;
+    struct nl_buf m;
+    struct nl80211_sta_flag_update upd;
+    memset(&upd, 0, sizeof(upd));
+    upd.mask = 1u << NL80211_STA_FLAG_AUTHORIZED;
+    upd.set  = 1u << NL80211_STA_FLAG_AUTHORIZED;
+    nlb_init(&m, NL80211_CMD_SET_STATION, NLM_F_ACK);
+    nlb_u32(&m, NL80211_ATTR_IFINDEX, (uint32_t)ifindex);
+    nlb_put(&m, NL80211_ATTR_MAC, mac, 6);
+    nlb_put(&m, NL80211_ATTR_STA_FLAGS2, &upd, sizeof(upd));
+    return nl_send_ack(g_nl_cmd_fd, &m);
+}
+
+/* Inject a bare EAPOL frame (EAPOL header first) to one station. */
+static int nl_control_port_tx(int ifindex, const uint8_t mac[6],
+                              const uint8_t *eapol, size_t len)
+{
+    if (ifindex <= 0 || !mac || !eapol || len < 4) return -EINVAL;
+    struct nl_buf m;
+    nlb_init(&m, NL80211_CMD_CONTROL_PORT_FRAME, NLM_F_ACK);
+    nlb_u32(&m, NL80211_ATTR_IFINDEX, (uint32_t)ifindex);
+    nlb_u16(&m, NL80211_ATTR_CONTROL_PORT_ETHERTYPE, ETH_P_EAPOL);
+    nlb_put(&m, NL80211_ATTR_MAC, mac, 6);
+    nlb_put(&m, NL80211_ATTR_FRAME, eapol, len);
+    nlb_flag(&m, NL80211_ATTR_CONTROL_PORT_NO_ENCRYPT);
+    return nl_send_ack(g_nl_cmd_fd, &m);
+}
+
+/* ---------------- TLV iterator (u16 tag | u16 len | value) ------------- */
+struct tlv_it { const uint8_t *p; size_t len; };
+static int tlv_next(struct tlv_it *it, uint16_t *tag,
+                    const uint8_t **val, size_t *vlen)
+{
+    if (it->len < 4) return 0;
+    uint16_t t = rd16(it->p), l = rd16(it->p + 2);
+    if ((size_t)l > it->len - 4) return 0;
+    *tag = t;
+    *val = it->p + 4;
+    *vlen = l;
+    it->p += 4 + l;
+    it->len -= 4 + l;
+    return 1;
+}
+
 static void dump_raw(const char *tag, uint16_t type, uint16_t port,
                      const uint8_t *b, size_t n)
 {
-    FILE *f = fopen("/tmp/capagent-msgs.log", "a");
-    if (!f) return;
+    int fd = open("/tmp/capagent-msgs.log",
+                  O_CREAT | O_WRONLY | O_APPEND, 0600);
+    if (fd < 0) return;
+    FILE *f = fdopen(fd, "a");
+    if (!f) { close(fd); return; }
     fprintf(f, "%ld %s type=0x%04x port=0x%04x len=%zu ",
             (long)time(NULL), tag, type, port, n);
     for (size_t i = 0; i < n; i++) fprintf(f, "%02x", b[i]);
@@ -637,40 +1022,94 @@ static int parse_m2(const uint8_t *b, size_t n)
     return g_nvap;
 }
 
+static int run_argv(char *const av[])
+{
+    pid_t pid = fork();
+    if (pid == 0) {
+        execvp(av[0], av);
+        _exit(127);
+    }
+    if (pid < 0) return -1;
+    int st = 0;
+    while (waitpid(pid, &st, 0) < 0) {
+        if (errno != EINTR) return -1;
+    }
+    return WIFEXITED(st) ? WEXITSTATUS(st) : -1;
+}
+
+/* Set a UCI option without a shell: the value is passed as a single argv
+   element, so quotes/semicolons in an SSID or passphrase cannot inject. */
+static void uci_set_opt(const char *sec, const char *opt, const char *val)
+{
+    char kv[512];
+    snprintf(kv, sizeof(kv), "wireless.%s.%s=%s", sec, opt, val);
+    char *av[] = { "uci", "-q", "set", kv, NULL };
+    if (run_argv(av) != 0)
+        printf("apply: uci set wireless.%s.%s failed\n", sec, opt);
+}
+
 static void apply_vaps(void)
 {
     if (!g_apply || g_nvap <= 0)
         return;
-    FILE *f = fopen("/tmp/capapply.sh", "w");
-    if (!f) {
-        printf("apply: cannot create /tmp/capapply.sh\n");
+
+    FILE *p = popen("uci -q show wireless", "r");
+    if (!p) {
+        printf("apply: cannot read wireless config\n");
         return;
     }
-    fprintf(f, "#!/bin/sh\n");
-    fprintf(f, "uci -q delete wireless.capdyn_20; "
-               "uci -q delete wireless.capdyn_30\n");
-    for (int i = 0; i < g_nvap; i++) {
-        struct vapcfg *v = &g_vaps[i];
-        if (!v->have_ssid || !v->have_pass)
-            continue;
-        unsigned vlan = v->have_vlan && v->vlan ? v->vlan : 1;
-        const char *sec = (v->have_auth && v->auth == 2) ? "sae" : "psk2";
-        fprintf(f, "for s in $(uci -q show wireless | "
-                   "grep \"network='wifi%u'\" | cut -d. -f2 | sort -u); do\n",
-                vlan);
-        fprintf(f, "  uci -q set wireless.$s.ssid='%s'\n", v->ssid);
-        fprintf(f, "  uci -q set wireless.$s.encryption='%s'\n", sec);
-        fprintf(f, "  uci -q set wireless.$s.key='%s'\n", v->pass);
-        fprintf(f, "done\n");
-        printf("apply: vlan=%u ssid=%s sec=%s key=%s\n",
-               vlan, v->ssid, sec, v->pass);
+    char line[512];
+    while (fgets(line, sizeof(line), p)) {
+        /* wireless.<sec>.network='wifi<vlan>' */
+        char *d1 = strchr(line, '.');
+        if (!d1) continue;
+        char *d2 = strchr(d1 + 1, '.');
+        if (!d2) continue;
+        char *eq = strchr(d2, '=');
+        if (!eq) continue;
+        char *val = eq + 1;
+        while (*val == '\'' || *val == '"') val++;
+        if (strncmp(val, "wifi", 4) != 0) continue;
+        unsigned vlan = (unsigned)atoi(val + 4);
+        char sec[64];
+        size_t sl = (size_t)(d2 - d1 - 1);
+        if (sl == 0 || sl >= sizeof(sec)) continue;
+        memcpy(sec, d1 + 1, sl);
+        sec[sl] = 0;
+        int ok = 1;
+        for (size_t k = 0; k < sl; k++)
+            if (!isalnum((unsigned char)sec[k]) && sec[k] != '_') ok = 0;
+        if (!ok) continue;
+
+        for (int i = 0; i < g_nvap; i++) {
+            struct vapcfg *v = &g_vaps[i];
+            if (!v->have_ssid || !v->have_pass) continue;
+            unsigned vv = v->have_vlan && v->vlan ? v->vlan : 1;
+            if (vv != vlan) continue;
+            const char *sec_type =
+                (v->have_auth && v->auth == 2) ? "sae" : "psk2";
+            uci_set_opt(sec, "ssid", v->ssid);
+            uci_set_opt(sec, "encryption", sec_type);
+            uci_set_opt(sec, "key", v->pass);
+            printf("apply: vlan=%u ssid=%s sec=%s (key not logged)\n",
+                   vlan, v->ssid, sec_type);
+        }
     }
-    fprintf(f, "uci -q commit wireless\n");
-    fprintf(f, "ubus call network.wireless reconf '{\"device\":\"radio0\"}'\n");
-    fprintf(f, "ubus call network.wireless reconf '{\"device\":\"radio1\"}'\n");
-    fclose(f);
-    system("sh /tmp/capapply.sh");
-    printf("apply: existing wifi-iface sections updated, reconf done\n");
+    pclose(p);
+
+    char *del1[] = { "uci", "-q", "delete", "wireless.capdyn_20", NULL };
+    char *del2[] = { "uci", "-q", "delete", "wireless.capdyn_30", NULL };
+    run_argv(del1);
+    run_argv(del2);
+    char *commit[] = { "uci", "-q", "commit", "wireless", NULL };
+    run_argv(commit);
+    char *r0[] = { "ubus", "call", "network.wireless", "reconf",
+                   "{\"device\":\"radio0\"}", NULL };
+    char *r1[] = { "ubus", "call", "network.wireless", "reconf",
+                   "{\"device\":\"radio1\"}", NULL };
+    run_argv(r0);
+    run_argv(r1);
+    printf("apply: wifi-iface sections updated (argv, no shell)\n");
 }
 
 static void handle_c029(const uint8_t *body, uint16_t len)
@@ -691,7 +1130,9 @@ static void handle_c029(const uint8_t *body, uint16_t len)
     }
 
     dump_raw("cfg77", TYPE_JOIN_RESP, 0, tree, tlen);
-    FILE *f = fopen("/tmp/capagent-cfg77.bin", "wb");
+    int cfd = open("/tmp/capagent-cfg77.bin",
+                   O_CREAT | O_WRONLY | O_TRUNC, 0600);
+    FILE *f = cfd >= 0 ? fdopen(cfd, "wb") : NULL;
     if (f) { fwrite(tree, 1, tlen, f); fclose(f); }
     printf("0xc029: 0x77 payload len=%u -> /tmp/capagent-cfg77.bin\n",
            tlen);
@@ -1060,13 +1501,8 @@ static void dc_service(struct dc_ctx *d)
                    (unsigned long long)seq);
             continue;
         }
-        char path[64];
-        snprintf(path, sizeof(path), "/tmp/capagent-dc-%llu.bin",
-                 (unsigned long long)seq);
-        FILE *f = fopen(path, "wb");
-        if (f) { fwrite(pt, 1, ct_len, f); fclose(f); }
-        printf("datachan rid=%u wid=%u seq=%llu payload=%zu -> %s\n",
-               rid, wid, (unsigned long long)seq, ct_len, path);
+        printf("datachan rid=%u wid=%u seq=%llu payload=%zu\n",
+               rid, wid, (unsigned long long)seq, ct_len);
         fflush(stdout);
     }
 }
@@ -1358,12 +1794,15 @@ static void createvap_response(mbedtls_ssl_context *ssl, const uint8_t hdr[10],
     if (c->no_ack) {
         /* A genuine CAP sends nothing when the data channel is created OK;
            0xD00B is only the failure path. */
+        int ni = read_sysfs_int(ifname, "ifindex");
+        if (ni > 0) pmap_set(phy << 8 | vap, ni, mac);
         printf("0xd00b phy=%d ifname=%s (no-ack: success reply suppressed)\n",
                phy, ifname);
         fflush(stdout);
         return;
     }
     int ifindex = read_sysfs_int(ifname, "ifindex");
+    if (ifindex > 0) pmap_set(phy << 8 | vap, ifindex, mac);
 
     n += put_el(body+n, 0x08, mac, 6);
     put32(v, (uint32_t)vapid);
@@ -1411,7 +1850,8 @@ static void createvap_response(mbedtls_ssl_context *ssl, const uint8_t hdr[10],
     {   /* dump the exact reply body for offline verification */
         char dp[64];
         snprintf(dp, sizeof(dp), "/tmp/capagent-d00b-%d.bin", phy);
-        FILE *df = fopen(dp, "wb");
+        int dfd = open(dp, O_CREAT | O_WRONLY | O_TRUNC, 0600);
+        FILE *df = dfd >= 0 ? fdopen(dfd, "wb") : NULL;
         if (df) { fwrite(body, 1, n, df); fclose(df); }
     }
 
@@ -1454,6 +1894,239 @@ static void send_hdr_msg(mbedtls_ssl_context *ssl, uint16_t type,
         if (r <= 0) break;
         off += r;
     }
+}
+
+/* ---- 0x201C / 0x201B: EAPOL relay ------------------------------- */
+
+/* The control port ABI wants a bare EAPOL frame (EAPOL header first).
+   Some builds/drivers hand us 802.3 or 802.11 framing; strip it. */
+static void eapol_strip(const uint8_t **fr, size_t *len)
+{
+    const uint8_t *p = *fr;
+    size_t n = *len;
+    int looks_eapol = n >= 4 && (p[0] == 1 || p[0] == 2) && p[1] <= 3;
+    if (looks_eapol) return;
+    if (n > 14 && p[12] == 0x88 && p[13] == 0x8e) {
+        p += 14; n -= 14;                 /* 802.3 */
+    } else if (n > 26 && (p[0] & 0x0c) == 0x08 && p[24] == 0x88 &&
+               p[25] == 0x8e) {
+        p += 26; n -= 26;                 /* 802.11 data + LLC/SNAP */
+    }
+    *fr = p; *len = n;
+}
+
+static void eapol_log(const char *dir, const uint8_t mac[6],
+                      const uint8_t *e, size_t n)
+{
+    const char *kind = "other";
+    int msg = -1;
+    if (n >= 2) {
+        if (e[1] == 0) kind = "EAPOL-Start";
+        else if (e[1] == 1) kind = "EAPOL-Logoff";
+        else if (e[1] == 3) {
+            kind = "EAPOL-Key";
+            if (n >= 7) msg = (e[6] >> 3) & 0x3f;   /* key info bits */
+        }
+    }
+    printf("[EAPOL %s] %02x:%02x:%02x:%02x:%02x:%02x len=%zu %s%s%02x%02x\n",
+           dir, mac[0], mac[1], mac[2], mac[3], mac[4], mac[5], n, kind,
+           msg >= 0 ? " info=" : "", msg >= 0 ? (unsigned)(e[5]) : 0,
+           msg >= 0 ? (unsigned)(e[6]) : 0);
+    fflush(stdout);
+}
+
+/* TX leg: manager -> CAP (0x201C) -> STA.  Body: {08=STA MAC, 3E=EAPOL}. */
+static void handle_201c(mbedtls_ssl_context *ssl, int port,
+                        const uint8_t *body, size_t len)
+{
+    (void)ssl;
+    struct tlv_it it = { body, len };
+    uint16_t tag;
+    const uint8_t *v, *mac = NULL, *eapol = NULL;
+    size_t vl, elen = 0;
+
+    while (tlv_next(&it, &tag, &v, &vl)) {
+        if (tag == 0x0008 && vl == 6) mac = v;
+        else if (tag == 0x003e) { eapol = v; elen = vl; }
+    }
+    if (!mac || !eapol || !elen) {
+        printf("0x201c: missing %s TLV (len=%zu)\n",
+               !mac ? "STA-MAC" : "EAPOL", len);
+        fflush(stdout);
+        return;
+    }
+    eapol_strip(&eapol, &elen);
+    eapol_log("TX", mac, eapol, elen);
+
+    uint8_t bssid[6] = {0};
+    int ifindex = vap_ifindex(port, bssid);
+    if (ifindex <= 0 || nl_cmd_open() != 0) {
+        printf("0x201c: no ifindex/nl80211 for port 0x%04x\n", port);
+        fflush(stdout);
+        return;
+    }
+    int r = nl_control_port_tx(ifindex, mac, eapol, elen);
+    printf("0x201c: inject -> %02x:%02x:%02x:%02x:%02x:%02x ifindex=%d "
+           "len=%zu ret=%d (%s)\n", mac[0], mac[1], mac[2], mac[3], mac[4],
+           mac[5], ifindex, elen, r, r ? strerror(-r) : "ok");
+    fflush(stdout);
+}
+
+/* RX leg: STA -> CAP (control port) -> manager.  leg 1 = TLS 0x201B,
+   leg 2 = c2 datachan Ethernet frame (S4 model), 3 = both. */
+__attribute__((unused))
+static void eapol_relay(mbedtls_ssl_context *ssl, struct dc_ctx *dc,
+                        const struct cfg *c, int port, const uint8_t mac[6],
+                        const uint8_t *eapol, size_t len)
+{
+    eapol_log("RX", mac, eapol, len);
+    if (c->eapol_leg & 1) {
+        uint8_t b[BODY_MAX];
+        size_t n = 0;
+        n += put_el(b + n, 0x08, mac, 6);
+        n += put_el(b + n, 0x3e, eapol, (uint16_t)len);
+        if (send_msg(ssl, TYPE_EAPOL_RX, (uint16_t)port, b, (uint16_t)n) == 0)
+            printf("0x201b: EAPOL %zuB -> manager (control) port=0x%04x\n",
+                   len, port);
+        else
+            printf("0x201b: control send failed\n");
+    }
+    if ((c->eapol_leg & 2) && dc && dc->fd >= 0) {
+        uint8_t fr[14 + 1600];
+        uint8_t bssid[6] = {0};
+        if (len > 1600) return;
+        pmap_get(port, NULL, bssid);
+        memcpy(fr, bssid, 6);
+        memcpy(fr + 6, mac, 6);
+        fr[12] = 0x88; fr[13] = 0x8e;
+        memcpy(fr + 14, eapol, len);
+        int r = dc_send_frame(dc, fr, 14 + len);
+        printf("0x201b: EAPOL %zuB -> manager (datachan) ret=%d\n", len, r);
+    }
+    fflush(stdout);
+}
+
+/* ---- 0x201F: key install + authorize (T4 exact spec) --------------- */
+
+struct key_desc {
+    int present;
+    const uint8_t *key, *seq, *mac;
+    size_t klen, slen, maclen;
+    int idx;
+    uint32_t cipher;
+};
+
+static void parse_key_desc(const uint8_t *v, size_t n, struct key_desc *d)
+{
+    struct tlv_it it = { v, n };
+    uint16_t tag;
+    const uint8_t *x;
+    size_t xl;
+    memset(d, 0, sizeof(*d));
+    d->present = 1;
+    d->cipher = 0x000fac04u;
+    while (tlv_next(&it, &tag, &x, &xl)) {
+        switch (tag) {
+        case 0x0008: if (xl == 6) { d->mac = x; d->maclen = 6; } break;
+        case 0x0053: if (xl >= 1) d->idx = x[0]; break;
+        case 0x0054:
+            if (xl == 4) d->cipher = ((uint32_t)x[0] << 24) |
+                                     ((uint32_t)x[1] << 16) |
+                                     ((uint32_t)x[2] << 8) | x[3];
+            break;
+        case 0x0051: d->key = x; d->klen = xl; break;
+        case 0x0052: d->seq = x; d->slen = xl; break;
+        default: break;
+        }
+    }
+}
+
+static int class_idx_from(const uint8_t *v, size_t n)
+{
+    struct tlv_it it = { v, n };
+    uint16_t tag;
+    const uint8_t *x;
+    size_t xl;
+    while (tlv_next(&it, &tag, &x, &xl))
+        if (tag == 0x0053 && xl >= 1) return x[0];
+    return -1;
+}
+
+static void handle_201f(mbedtls_ssl_context *ssl, int port,
+                        const uint8_t *body, size_t len)
+{
+    (void)ssl;
+    struct key_desc kd[8];
+    int nkd = 0, class_kind = 0, class_idx = -1;
+    const uint8_t *top_mac = NULL;
+
+    struct tlv_it it = { body, len };
+    uint16_t tag;
+    const uint8_t *v;
+    size_t vl;
+    while (tlv_next(&it, &tag, &v, &vl)) {
+        if (tag == 0x0050) {
+            if (nkd < (int)(sizeof(kd)/sizeof(kd[0])))
+                parse_key_desc(v, vl, &kd[nkd++]);
+        } else if (tag == 0x005a || tag == 0x005b) {
+            class_kind = (tag == 0x005b) ? 2 : 1;
+            int ci = class_idx_from(v, vl);
+            if (ci >= 0) class_idx = ci;
+        } else if (tag == 0x0008 && vl == 6) {
+            top_mac = v;
+        }
+    }
+    if (!nkd) {
+        printf("0x201f: no 0x50 key descriptor (len=%zu)\n", len);
+        fflush(stdout);
+        return;
+    }
+
+    uint8_t mac[6] = {0};
+    int ifindex = vap_ifindex(port, mac);
+    if (ifindex <= 0 || nl_cmd_open() != 0) {
+        printf("0x201f: no ifindex/nl80211 for port 0x%04x\n", port);
+        fflush(stdout);
+        return;
+    }
+
+    for (int i = 0; i < nkd; i++) {
+        struct key_desc *d = &kd[i];
+        if (!d->key || !d->klen) {
+            printf("0x201f: descriptor %d has no key bytes\n", i);
+            continue;
+        }
+        const uint8_t *smac = d->maclen == 6 ? d->mac : top_mac;
+        int pairwise = (smac && class_kind == 0);
+        int is_igtk = (class_kind == 2);
+        int idx = d->idx;
+        if (class_kind && class_idx >= 0) idx = class_idx;
+        uint32_t cipher = d->cipher;
+        if (is_igtk && cipher == 0x000fac04u)
+            cipher = 0x000fac06u;      /* BIP-CMAC-128 (T4 §3.4) */
+
+        int r = nl_install_key(ifindex, pairwise ? smac : NULL, idx, cipher,
+                               d->key, d->klen, d->seq, d->slen,
+                               pairwise ? 0 : 1);
+        printf("0x201f: NEW_KEY %s idx=%d cipher=%06x len=%zu ifindex=%d "
+               "ret=%d (%s)\n", pairwise ? "PAIRWISE" :
+               (is_igtk ? "IGTK/BIGTK" : "GROUP"), idx, cipher, d->klen,
+               ifindex, r, r ? strerror(-r) : "ok");
+        if (!pairwise) {
+            int r2 = nl_set_default(ifindex, idx, 1, is_igtk);
+            printf("0x201f: SET_KEY default idx=%d %s ret=%d (%s)\n", idx,
+                   is_igtk ? (idx >= 6 ? "beacon" : "mgmt") : "group",
+                   r2, r2 ? strerror(-r2) : "ok");
+        } else if (r == 0 || r == -EEXIST) {
+            int ra = nl_sta_authorize(ifindex, smac);
+            printf("0x201f: SET_STATION AUTHORIZED %02x:%02x:%02x:%02x:%02x:%02x "
+                   "ret=%d (%s)\n", smac[0], smac[1], smac[2], smac[3],
+                   smac[4], smac[5], ra, ra ? strerror(-ra) : "ok");
+        } else {
+            printf("0x201f: PTK install failed, station not authorized\n");
+        }
+    }
+    fflush(stdout);
 }
 
 static int discover_manager(const char *iface, int port, char *out, size_t outlen)
@@ -1709,24 +2382,70 @@ static struct st_prev *st_prev_slot(const uint8_t *mac)
     return NULL;
 }
 
+/* RouterOS 0x200e width code from the channel width in MHz. */
+static unsigned chan_width_code(unsigned mhz)
+{
+    if (mhz >= 160) return 4;
+    if (mhz >= 80)  return 3;
+    if (mhz >= 40)  return 2;
+    return 1;                           /* 20 MHz (also 5/10 MHz) */
+}
+
+/* Operating channel of an AP interface, from `iw dev <if> info`:
+ *   channel 6 (2437 MHz), width: 20 MHz, center1: 2437 MHz
+ * Leaves *freq / *width at 0 when the interface is down or absent. */
+static void iface_chan(const char *ifn, unsigned *freq, unsigned *width)
+{
+    char cmd[96], line[256];
+    *freq = 0;
+    *width = 0;
+    snprintf(cmd, sizeof(cmd), "/usr/sbin/iw dev %s info 2>/dev/null", ifn);
+    FILE *fp = popen(cmd, "r");
+    if (!fp) return;
+    while (fgets(line, sizeof(line), fp)) {
+        char *p = strstr(line, "channel ");
+        if (p) sscanf(p, "channel %*d (%u MHz)", freq);
+        p = strstr(line, "width: ");
+        if (p) sscanf(p, "width: %u MHz", width);
+    }
+    pclose(fp);
+}
+
+/* "tx bitrate:\t866.7 MBit/s ..." -> kbit/s; the manager multiplies the
+ * wire value by 1000 (work-T7 §4).  0 when absent or the rate is 0. */
+static uint32_t iw_bitrate_kbps(const char *line, const char *tag)
+{
+    const char *p = strstr(line, tag);
+    double v;
+    if (!p || sscanf(p + strlen(tag), " %lf", &v) != 1 || v <= 0.0)
+        return 0;
+    if (strstr(p + strlen(tag), "GBit/s"))
+        return (uint32_t)(v * 1000000.0 + 0.5);
+    return (uint32_t)(v * 1000.0 + 0.5);
+}
+
 static void emit_station(mbedtls_ssl_context *ssl, int phy, int vap,
                          const uint8_t *mac, int sig,
                          uint64_t rx, uint64_t tx, uint64_t rxp, uint64_t txp,
+                         unsigned freq, unsigned width,
+                         uint32_t tx_kbps, uint32_t rx_kbps,
                          unsigned long inact_ms, unsigned long conn_s)
 {
     uint8_t b[BODY_MAX], v2[2], v4[4], ch[40], st[44], rt[8], w;
     size_t n = 0, cn = 0;
     uint16_t port = (uint16_t)((phy << 8) | vap);
-    uint16_t freq = (phy & 1) ? 5180 : 2437;
     time_t now = time(NULL);
+
+    if (!freq) freq = (phy & 1) ? 5180 : 2437;          /* fallback */
+    if (!width) width = (freq < 3000) ? 20 : 80;        /* fallback */
 
     /* 0x200E: station appeared/updated; this is the signal source. */
     n += put_el(b + n, 0x07, mac, 6);
-    put16(v2, freq);
+    put16(v2, (uint16_t)freq);
     cn += put_el(ch + cn, 0x0b, v2, 2);
-    w = (phy & 1) ? 3 : 1;
+    w = (uint8_t)chan_width_code(width);
     cn += put_el(ch + cn, 0x0c, &w, 1);
-    w = (phy & 1) ? 0x03 : 0x81;
+    w = (freq < 3000) ? 0x81 : 0x03;
     cn += put_el(ch + cn, 0x10, &w, 1);
     n += put_el(b + n, 0x0a, ch, (uint16_t)cn);
     {   /* opaque station-info blob (24 dwords) copied into sta+0x18 */
@@ -1748,34 +2467,42 @@ static void emit_station(mbedtls_ssl_context *ssl, int phy, int vap,
     if (time(NULL) != last_dbg) {
         last_dbg = time(NULL);
         printf("stats tx %02x:%02x:%02x:%02x:%02x:%02x phy=%d vap=%d "
-               "sig=%d rx=%llu tx=%llu rxp=%llu txp=%llu\n",
+               "sig=%d freq=%u txr=%u rxr=%u rx=%llu tx=%llu rxp=%llu txp=%llu\n",
                mac[0], mac[1], mac[2], mac[3], mac[4], mac[5],
-               phy, vap, sig, rx, tx, rxp, txp);
+               phy, vap, sig, freq, tx_kbps, rx_kbps, rx, tx, rxp, txp);
         fflush(stdout);
     }
 
-    /* 0x2015: PEERSTATSRESULT: BASIC (3x u32 + 4x u64) + LIVERATE. */
+    /* 0x2015 PEERSTATSRESULT, corrected layout (work-T7/T15):
+     *   0x3d +0x00 u32 freq (MHz)       +0x04 u32 tx PHY rate (kbit/s)
+     *        +0x08 u32 rx PHY rate       +0x0c u64 tx-packets
+     *        +0x14 u64 rx-packets        +0x1c u64 tx-bytes
+     *        +0x24 u64 rx-bytes
+     *   0x40 +0x00 u32 tx bytes/s       +0x04 u32 rx bytes/s
+     * Uptime/last-activity are manager-local and are not sent. */
     n = 0;
     n += put_el(b + n, 0x08, mac, 6);
     struct st_prev *p = st_prev_slot(mac);
-    uint32_t ra = 0, rb = 0;
+    uint32_t ta = 0, ra = 0;
     if (p && p->t && now > p->t) {
-        ra = (uint32_t)((rx - p->rx) / (uint64_t)(now - p->t));
-        rb = (uint32_t)((tx - p->tx) / (uint64_t)(now - p->t));
+        uint32_t dt = (uint32_t)(now - p->t);
+        if (tx >= p->tx) ta = (uint32_t)((tx - p->tx) / dt);
+        if (rx >= p->rx) ra = (uint32_t)((rx - p->rx) / dt);
     }
     if (p) { p->rx = rx; p->tx = tx; p->t = now; }
-    put32(st + 0, (uint32_t)now);
-    put32(st + 4, (uint32_t)conn_s);
-    put32(st + 8, (uint32_t)(now - (time_t)(inact_ms / 1000)));
-    put64(st + 12, rx);
-    put64(st + 20, tx);
-    put64(st + 28, rxp);
-    put64(st + 36, txp);
+    put32(st + 0, freq);
+    put32(st + 4, tx_kbps);
+    put32(st + 8, rx_kbps);
+    put64(st + 12, txp);
+    put64(st + 20, rxp);
+    put64(st + 28, tx);
+    put64(st + 36, rx);
     n += put_el(b + n, 0x3d, st, 44);
-    put32(rt, ra);
-    put32(rt + 4, rb);
+    put32(rt, ta);
+    put32(rt + 4, ra);
     n += put_el(b + n, 0x40, rt, 8);
     send_msg(ssl, 0x2015, port, b, (uint16_t)n);
+    (void)conn_s;                       /* manager derives uptime itself */
 }
 
 static void send_station_stats(mbedtls_ssl_context *ssl, const struct cfg *c)
@@ -1783,7 +2510,14 @@ static void send_station_stats(mbedtls_ssl_context *ssl, const struct cfg *c)
     for (int phy = 0; phy < c->nradios; phy++) {
         for (int vap = 0; vap < 8; vap++) {
             char ifn[32], cmd[96], line[256];
-            snprintf(ifn, sizeof(ifn), "phy%d-ap%d", phy, vap);
+            unsigned freq = 0, width = 0;
+            uint32_t tx_kbps = 0, rx_kbps = 0, v;
+            /* Production: phyN-apM.  Lab builds may pass the real netdev. */
+            if (vap == 0 && phy < MAX_RADIOS && c->ifnames[phy][0])
+                snprintf(ifn, sizeof(ifn), "%s", c->ifnames[phy]);
+            else
+                snprintf(ifn, sizeof(ifn), "phy%d-ap%d", phy, vap);
+            iface_chan(ifn, &freq, &width);
             snprintf(cmd, sizeof(cmd),
                      "/usr/sbin/iw dev %s station dump 2>/dev/null", ifn);
             FILE *fp = popen(cmd, "r");
@@ -1797,10 +2531,12 @@ static void send_station_stats(mbedtls_ssl_context *ssl, const struct cfg *c)
                            &m[0], &m[1], &m[2], &m[3], &m[4], &m[5]) == 6) {
                     if (have)
                         emit_station(ssl, phy, vap, mac, sig, rx, tx, rxp,
-                                     txp, inact, conn);
+                                     txp, freq, width, tx_kbps, rx_kbps,
+                                     inact, conn);
                     for (int k = 0; k < 6; k++) mac[k] = (uint8_t)m[k];
                     have = 1; sig = 0;
                     rx = tx = rxp = txp = 0; inact = conn = 0;
+                    tx_kbps = rx_kbps = 0;
                 } else if (sscanf(line, " signal: %d", &sig) == 1) {
                 } else if (sscanf(line, " rx bytes: %llu", &rx) == 1) {
                 } else if (sscanf(line, " tx bytes: %llu", &tx) == 1) {
@@ -1808,12 +2544,460 @@ static void send_station_stats(mbedtls_ssl_context *ssl, const struct cfg *c)
                 } else if (sscanf(line, " tx packets: %llu", &txp) == 1) {
                 } else if (sscanf(line, " inactive time: %lu", &inact) == 1) {
                 } else if (sscanf(line, " connected time: %lu", &conn) == 1) {
+                } else if ((v = iw_bitrate_kbps(line, "tx bitrate:")) != 0) {
+                    tx_kbps = v;
+                } else if ((v = iw_bitrate_kbps(line, "rx bitrate:")) != 0) {
+                    rx_kbps = v;
                 }
             }
             if (have)
                 emit_station(ssl, phy, vap, mac, sig, rx, tx, rxp, txp,
-                             inact, conn);
+                             freq, width, tx_kbps, rx_kbps, inact, conn);
             pclose(fp);
+        }
+    }
+}
+
+/* ======================================================================
+ * Lab harness (compile with -DCAPAGENT_LAB): a minimal in-process AP so
+ * the full chain can be exercised on mac80211_hwsim without hostapd.
+ * Production builds leave this out; hostapd owns the AP then.
+ * ==================================================================== */
+#ifdef CAPAGENT_LAB
+static int g_lab_ifindex;
+static uint8_t g_lab_bssid[6];
+static char g_lab_ifname[32];
+
+static int lab_ack(struct nl_buf *m)
+{
+    if (g_nl_evt_fd < 0) return -ENODEV;
+    return nl_send_ack(g_nl_evt_fd, m);
+}
+
+static int lab_set_iftype_ap(int ifindex)
+{
+    struct nl_buf m;
+    nlb_init(&m, NL80211_CMD_SET_INTERFACE, NLM_F_ACK);
+    nlb_u32(&m, NL80211_ATTR_IFINDEX, (uint32_t)ifindex);
+    nlb_u32(&m, NL80211_ATTR_IFTYPE, NL80211_IFTYPE_AP);
+    return lab_ack(&m);
+}
+
+static int lab_stop_ap(int ifindex)
+{
+    struct nl_buf m;
+    nlb_init(&m, NL80211_CMD_STOP_AP, NLM_F_ACK);
+    nlb_u32(&m, NL80211_ATTR_IFINDEX, (uint32_t)ifindex);
+    return lab_ack(&m);
+}
+
+static const uint8_t lab_rates[8] =
+    { 0x82,0x84,0x8b,0x96,0x0c,0x12,0x18,0x24 };
+static const uint8_t lab_xrates[4] = { 0x30,0x48,0x60,0x6c };
+
+static void lab_beacon(const char *ssid, int chan, uint8_t *head,
+                       uint8_t *tail, int *hl, int *tl)
+{
+    static const uint8_t bcast[6] = { 0xff,0xff,0xff,0xff,0xff,0xff };
+    uint8_t *p = head;
+    int sl = (int)strlen(ssid);
+    *p++ = 0x80; *p++ = 0x00; *p++ = 0x00; *p++ = 0x00;
+    memcpy(p, bcast, 6); p += 6;
+    memcpy(p, g_lab_bssid, 6); p += 6;
+    memcpy(p, g_lab_bssid, 6); p += 6;
+    *p++ = 0x00; *p++ = 0x00;
+    memset(p, 0, 8); p += 8;
+    *p++ = 0x00; *p++ = 0x64;
+    *p++ = 0x31; *p++ = 0x04;                 /* ESS|Privacy|ShortPreamble|ShortSlot */
+    *p++ = 0; *p++ = (uint8_t)sl;
+    memcpy(p, ssid, sl); p += sl;
+    *p++ = 1; *p++ = 8; memcpy(p, lab_rates, 8); p += 8;
+    *p++ = 3; *p++ = 1; *p++ = (uint8_t)chan;
+    *p++ = 5; *p++ = 4; *p++ = 0; *p++ = 2; *p++ = 0; *p++ = 0;
+    *hl = (int)(p - head);
+
+    p = tail;
+    *p++ = 42; *p++ = 1; *p++ = 0x00;
+    *p++ = 50; *p++ = 4; memcpy(p, lab_xrates, 4); p += 4;
+    *p++ = 48; *p++ = 20;
+    *p++ = 0x01; *p++ = 0x00;
+    *p++ = 0x00; *p++ = 0x0f; *p++ = 0xac; *p++ = 0x04;
+    *p++ = 0x01; *p++ = 0x00;
+    *p++ = 0x00; *p++ = 0x0f; *p++ = 0xac; *p++ = 0x04;
+    *p++ = 0x01; *p++ = 0x00;
+    *p++ = 0x00; *p++ = 0x0f; *p++ = 0xac; *p++ = 0x02;
+    *p++ = 0x00; *p++ = 0x00;
+    *tl = (int)(p - tail);
+}
+
+static int lab_start_ap(int ifindex, const char *ssid, int chan)
+{
+    struct nl_buf m;
+    uint8_t head[512], tail[256];
+    int hl, tl;
+    uint32_t ciphers[1] = { 0x000fac04 };
+    uint32_t akm[1] = { 0x000fac02 };
+    lab_beacon(ssid, chan, head, tail, &hl, &tl);
+    nlb_init(&m, NL80211_CMD_START_AP, NLM_F_ACK);
+    nlb_u32(&m, NL80211_ATTR_IFINDEX, (uint32_t)ifindex);
+    nlb_put(&m, NL80211_ATTR_SSID, ssid, strlen(ssid));
+    nlb_u32(&m, NL80211_ATTR_BEACON_INTERVAL, 100);
+    nlb_u32(&m, NL80211_ATTR_DTIM_PERIOD, 2);
+    nlb_put(&m, NL80211_ATTR_BEACON_HEAD, head, (size_t)hl);
+    nlb_put(&m, NL80211_ATTR_BEACON_TAIL, tail, (size_t)tl);
+    nlb_u32(&m, NL80211_ATTR_HIDDEN_SSID, NL80211_HIDDEN_SSID_NOT_IN_USE);
+    nlb_u32(&m, NL80211_ATTR_AUTH_TYPE, NL80211_AUTHTYPE_OPEN_SYSTEM);
+    nlb_flag(&m, NL80211_ATTR_PRIVACY);
+    nlb_u32(&m, NL80211_ATTR_WIPHY_FREQ, (uint32_t)(2407 + chan * 5));
+    nlb_u32(&m, NL80211_ATTR_CHANNEL_WIDTH, NL80211_CHAN_WIDTH_20_NOHT);
+    nlb_flag(&m, NL80211_ATTR_CONTROL_PORT);
+    nlb_u16(&m, NL80211_ATTR_CONTROL_PORT_ETHERTYPE, ETH_P_EAPOL);
+    /* These two make cfg80211 unicast control-port frames to this socket. */
+    nlb_flag(&m, NL80211_ATTR_CONTROL_PORT_OVER_NL80211);
+    nlb_flag(&m, NL80211_ATTR_CONTROL_PORT_NO_ENCRYPT);
+    nlb_flag(&m, NL80211_ATTR_SOCKET_OWNER);
+    nlb_put(&m, NL80211_ATTR_CIPHER_SUITES_PAIRWISE, ciphers, 4);
+    nlb_u32(&m, NL80211_ATTR_CIPHER_SUITE_GROUP, 0x000fac04);
+    nlb_u32(&m, NL80211_ATTR_WPA_VERSIONS, 2);
+    nlb_put(&m, NL80211_ATTR_AKM_SUITES, akm, 4);
+    return lab_ack(&m);
+}
+
+static int lab_register_mgmt(int ifindex, uint16_t fc)
+{
+    struct nl_buf m;
+    nlb_init(&m, NL80211_CMD_REGISTER_FRAME, NLM_F_ACK);
+    nlb_u32(&m, NL80211_ATTR_IFINDEX, (uint32_t)ifindex);
+    nlb_u16(&m, NL80211_ATTR_FRAME_TYPE, fc);
+    nlb_put(&m, NL80211_ATTR_FRAME_MATCH, NULL, 0);
+    return lab_ack(&m);
+}
+
+static int lab_send_mgmt(int ifindex, const uint8_t *fr, size_t len, int freq)
+{
+    struct nl_buf m;
+    nlb_init(&m, NL80211_CMD_FRAME, NLM_F_ACK);
+    nlb_u32(&m, NL80211_ATTR_IFINDEX, (uint32_t)ifindex);
+    nlb_u32(&m, NL80211_ATTR_WIPHY_FREQ, (uint32_t)freq);
+    nlb_put(&m, NL80211_ATTR_FRAME, fr, len);
+    return lab_ack(&m);
+}
+
+static int lab_add_station(int ifindex, const uint8_t mac[6], uint16_t capab,
+                           const uint8_t *rates, int rl)
+{
+    struct nl_buf m;
+    nlb_init(&m, NL80211_CMD_NEW_STATION, NLM_F_ACK);
+    nlb_u32(&m, NL80211_ATTR_IFINDEX, (uint32_t)ifindex);
+    nlb_put(&m, NL80211_ATTR_MAC, mac, 6);
+    nlb_u16(&m, NL80211_ATTR_STA_AID, 1);
+    nlb_u16(&m, NL80211_ATTR_STA_LISTEN_INTERVAL, 1);
+    nlb_u16(&m, NL80211_ATTR_STA_CAPABILITY, capab);
+    nlb_put(&m, NL80211_ATTR_STA_SUPPORTED_RATES, rates, (size_t)rl);
+    return lab_ack(&m);
+}
+
+static int lab_ap_setup(const struct cfg *c)
+{
+    if (!c->lab_iface) return -1;
+    snprintf(g_lab_ifname, sizeof(g_lab_ifname), "%s", c->lab_iface);
+    g_lab_ifindex = if_nametoindex(g_lab_ifname);
+    if (g_lab_ifindex <= 0) {
+        fprintf(stderr, "lab: no interface %s\n", g_lab_ifname);
+        return -1;
+    }
+    if (nl_cmd_open() != 0) return -1;
+    g_nl_evt_fd = nl_open_socket();
+    if (g_nl_evt_fd < 0) return -1;
+
+    read_sysfs_mac(g_lab_ifname, g_lab_bssid);
+    int r = lab_set_iftype_ap(g_lab_ifindex);
+    printf("lab: SET_INTERFACE AP ret=%d\n", r);
+    lab_stop_ap(g_lab_ifindex);
+    read_sysfs_mac(g_lab_ifname, g_lab_bssid);
+    r = lab_start_ap(g_lab_ifindex, c->lab_ssid, c->lab_chan);
+    printf("lab: START_AP %s chan=%d bssid=%02x:%02x:%02x:%02x:%02x:%02x "
+           "ret=%d\n", c->lab_ssid, c->lab_chan, g_lab_bssid[0],
+           g_lab_bssid[1], g_lab_bssid[2], g_lab_bssid[3], g_lab_bssid[4],
+           g_lab_bssid[5], r);
+    if (r) return r;
+    r = lab_register_mgmt(g_lab_ifindex, (11 << 4));      /* auth       */
+    printf("lab: REGISTER_FRAME auth ret=%d\n", r);
+    r = lab_register_mgmt(g_lab_ifindex, (0 << 4));       /* assoc req  */
+    printf("lab: REGISTER_FRAME assoc ret=%d\n", r);
+    /* The lab manager sends port 0x0000; map it to this interface. */
+    pmap_set(0, g_lab_ifindex, g_lab_bssid);
+    fflush(stdout);
+    return 0;
+}
+
+static void lab_assoc_event(mbedtls_ssl_context *ssl, const uint8_t *fr,
+                            size_t len)
+{
+    uint8_t b[BODY_MAX];
+    size_t n = 0;
+    uint8_t freq[4];
+    put32(freq, 2412u);
+    n += put_el(b + n, 0x3e, fr, (uint16_t)len);
+    n += put_el(b + n, 0x3f, freq, 4);
+    if (send_msg(ssl, TYPE_ASSOC_FRAME, 0, b, (uint16_t)n) == 0)
+        printf("0x2018: assoc frame %zuB -> manager\n", len);
+    else
+        printf("0x2018: send failed\n");
+    fflush(stdout);
+}
+
+static void lab_handle_mgmt(mbedtls_ssl_context *ssl, const uint8_t *f,
+                            size_t len)
+{
+    if (len < 24) return;
+    uint16_t fc = (uint16_t)(f[0] | (f[1] << 8));
+    int stype = (fc >> 4) & 0xf;
+    const uint8_t *sta = f + 10;
+    uint8_t out[256];
+    int n = 0;
+
+    if (stype == 11) {                       /* authentication */
+        if (len < 30) return;
+        uint16_t alg = (uint16_t)(f[24] | (f[25] << 8));
+        uint16_t tr = (uint16_t)(f[26] | (f[27] << 8));
+        if (alg != 0 || tr != 1) return;
+        out[n++] = 0xb0; out[n++] = 0x00; out[n++] = 0; out[n++] = 0;
+        memcpy(out + n, sta, 6); n += 6;
+        memcpy(out + n, g_lab_bssid, 6); n += 6;
+        memcpy(out + n, g_lab_bssid, 6); n += 6;
+        out[n++] = 0; out[n++] = 0;
+        out[n++] = 0; out[n++] = 0;
+        out[n++] = 2; out[n++] = 0;
+        out[n++] = 0; out[n++] = 0;
+        lab_send_mgmt(g_lab_ifindex, out, (size_t)n, 2412);
+    } else if (stype == 0) {                 /* association request */
+        if (len < 28) return;
+        uint16_t capab = (uint16_t)(f[24] | (f[25] << 8));
+        uint8_t rates[16];
+        int rl = 0;
+        for (size_t i = 28; i + 1 < len; i += 2 + f[i + 1]) {
+            if (i + 2 + f[i + 1] > len) break;
+            if (f[i] == 1 && rl == 0) {
+                rl = f[i + 1] < sizeof(rates) ? f[i + 1] : (int)sizeof(rates);
+                memcpy(rates, f + i + 2, (size_t)rl);
+            }
+        }
+        printf("lab: ASSOC-REQ %02x:%02x:%02x:%02x:%02x:%02x\n",
+               sta[0], sta[1], sta[2], sta[3], sta[4], sta[5]);
+        out[n++] = 0x10; out[n++] = 0x00; out[n++] = 0; out[n++] = 0;
+        memcpy(out + n, sta, 6); n += 6;
+        memcpy(out + n, g_lab_bssid, 6); n += 6;
+        memcpy(out + n, g_lab_bssid, 6); n += 6;
+        out[n++] = 0; out[n++] = 0;
+        out[n++] = 0x31; out[n++] = 0x04;
+        out[n++] = 0; out[n++] = 0;
+        out[n++] = 0x01; out[n++] = 0xc0;
+        out[n++] = 1; out[n++] = 8; memcpy(out + n, lab_rates, 8); n += 8;
+        out[n++] = 50; out[n++] = 4; memcpy(out + n, lab_xrates, 4); n += 4;
+        out[n++] = 48; out[n++] = 20;
+        out[n++] = 0x01; out[n++] = 0x00;
+        out[n++] = 0x00; out[n++] = 0x0f; out[n++] = 0xac; out[n++] = 0x04;
+        out[n++] = 0x01; out[n++] = 0x00;
+        out[n++] = 0x00; out[n++] = 0x0f; out[n++] = 0xac; out[n++] = 0x04;
+        out[n++] = 0x01; out[n++] = 0x00;
+        out[n++] = 0x00; out[n++] = 0x0f; out[n++] = 0xac; out[n++] = 0x02;
+        out[n++] = 0x00; out[n++] = 0x00;
+        lab_send_mgmt(g_lab_ifindex, out, (size_t)n, 2412);
+        int r = lab_add_station(g_lab_ifindex, sta, capab,
+                                rl ? rates : lab_rates, rl ? rl : 8);
+        printf("lab: NEW_STATION ret=%d (%s)\n", r, r ? strerror(-r) : "ok");
+        lab_assoc_event(ssl, f, len);
+    }
+    fflush(stdout);
+}
+
+static struct nlattr *lab_attr(struct nlattr *head, int len, int type)
+{
+    for (struct nlattr *a = head;
+         len >= (int)sizeof(struct nlattr) && a->nla_len >= sizeof(struct nlattr) &&
+         a->nla_len <= len;
+         len -= NLA_ALIGN(a->nla_len),
+         a = (struct nlattr *)((uint8_t *)a + NLA_ALIGN(a->nla_len))) {
+        if ((a->nla_type & NLA_TYPE_MASK) == type) return a;
+    }
+    return NULL;
+}
+
+static void lab_service_nl(mbedtls_ssl_context *ssl, struct dc_ctx *dc,
+                           const struct cfg *c)
+{
+    uint8_t buf[NL_MAX_MSG];
+    for (;;) {
+        int n = (int)recv(g_nl_evt_fd, buf, sizeof(buf), MSG_DONTWAIT);
+        if (n <= 0) {
+            if (n < 0 && errno == EINTR) continue;
+            return;
+        }
+        for (struct nlmsghdr *nlh = (struct nlmsghdr *)buf; NLMSG_OK(nlh, n);
+             nlh = NLMSG_NEXT(nlh, n)) {
+            if (nlh->nlmsg_type != (uint32_t)g_nl_family) continue;
+            struct genlmsghdr *g = (struct genlmsghdr *)NLMSG_DATA(nlh);
+            int alen = (int)nlh->nlmsg_len - NLMSG_LENGTH(GENL_HDRLEN);
+            struct nlattr *at = (struct nlattr *)((uint8_t *)NLMSG_DATA(nlh) +
+                                                  GENL_HDRLEN);
+            if (g->cmd == NL80211_CMD_FRAME) {
+                struct nlattr *fa = lab_attr(at, alen, NL80211_ATTR_FRAME);
+                if (fa)
+                    lab_handle_mgmt(ssl, (uint8_t *)fa + NLA_HDRLEN,
+                                    fa->nla_len - NLA_HDRLEN);
+            } else if (g->cmd == NL80211_CMD_CONTROL_PORT_FRAME) {
+                struct nlattr *ma = lab_attr(at, alen, NL80211_ATTR_MAC);
+                struct nlattr *fa = lab_attr(at, alen, NL80211_ATTR_FRAME);
+                struct nlattr *ea = lab_attr(at, alen,
+                                             NL80211_ATTR_CONTROL_PORT_ETHERTYPE);
+                uint16_t et = ETH_P_EAPOL;
+                if (ea) et = *(uint16_t *)((uint8_t *)ea + NLA_HDRLEN);
+                if (!ma || !fa || et != ETH_P_EAPOL) continue;
+                const uint8_t *sta = (uint8_t *)ma + NLA_HDRLEN;
+                const uint8_t *fr = (uint8_t *)fa + NLA_HDRLEN;
+                size_t fl = fa->nla_len - NLA_HDRLEN;
+                eapol_strip(&fr, &fl);
+                eapol_relay(ssl, dc, c, 0, sta, fr, fl);
+            }
+        }
+    }
+}
+
+static void lab_shutdown(void)
+{
+    if (g_nl_evt_fd >= 0 && g_lab_ifindex > 0)
+        lab_stop_ap(g_lab_ifindex);
+}
+#endif /* CAPAGENT_LAB */
+
+/* ---- lab/test: inject 802.11 Auth+AssocReq as 0x2018 ------------------ */
+static void put16le(uint8_t *p, uint16_t v) { p[0] = v & 0xff; p[1] = v >> 8; }
+
+static size_t mkinfo_ie(uint8_t *p, uint8_t id, const uint8_t *d, uint8_t n)
+{
+    p[0] = id; p[1] = n;
+    if (n) memcpy(p + 2, d, n);
+    return 2 + n;
+}
+
+static size_t mkauth(uint8_t *f, const uint8_t *bssid, const uint8_t *sta)
+{
+    uint8_t *p = f;
+    put16le(p, 0x00b0); p += 2;          /* mgmt, subtype 11 (Auth) */
+    put16le(p, 0); p += 2;
+    memcpy(p, bssid, 6); p += 6;
+    memcpy(p, sta, 6); p += 6;
+    memcpy(p, bssid, 6); p += 6;
+    put16le(p, 0); p += 2;               /* seq */
+    put16le(p, 0); p += 2;               /* alg open */
+    put16le(p, 1); p += 2;               /* seq 1 */
+    put16le(p, 0); p += 2;               /* status */
+    return (size_t)(p - f);
+}
+
+static size_t mkassoc(uint8_t *f, const uint8_t *bssid, const uint8_t *sta,
+                      const char *ssid)
+{
+    static const uint8_t rates[4] = { 0x82, 0x84, 0x8b, 0x96 };
+    static const uint8_t extcap[4] = { 0x00, 0x00, 0x40, 0x00 };
+    static const uint8_t rsn[20] = {
+        0x01, 0x00, 0x00, 0x0f, 0xac, 0x04, 0x01, 0x00, 0x00, 0x0f,
+        0xac, 0x04, 0x01, 0x00, 0x00, 0x0f, 0xac, 0x02, 0x00, 0x00
+    };
+    uint8_t *p = f;
+    put16le(p, 0x0000); p += 2;          /* mgmt, subtype 0 (AssocReq) */
+    put16le(p, 0); p += 2;
+    memcpy(p, bssid, 6); p += 6;
+    memcpy(p, sta, 6); p += 6;
+    memcpy(p, bssid, 6); p += 6;
+    put16le(p, 0); p += 2;
+    put16le(p, 0x0431); p += 2;          /* capab */
+    put16le(p, 10); p += 2;              /* listen */
+    p += mkinfo_ie(p, 0, (const uint8_t *)ssid, (uint8_t)strlen(ssid));
+    p += mkinfo_ie(p, 1, rates, sizeof(rates));
+    p += mkinfo_ie(p, 0x30, rsn, sizeof(rsn));
+    p += mkinfo_ie(p, 0x7f, extcap, sizeof(extcap));
+    return (size_t)(p - f);
+}
+
+static void send_2018(mbedtls_ssl_context *ssl, int phy, int vap,
+                      const uint8_t *bssid, const uint8_t *sta,
+                      int freq, const char *ssid)
+{
+    uint8_t fr[256], b[BODY_MAX], ch[32];
+    size_t fl, n = 0, cn = 0;
+    uint8_t w = (phy & 1) ? 3 : 1, band = (phy & 1) ? 0x03 : 0x81;
+    fl = mkauth(fr, bssid, sta);
+    uint8_t cf[4];
+    cf[0] = freq >> 24; cf[1] = freq >> 16; cf[2] = freq >> 8; cf[3] = freq;
+    cn += put_el(ch + cn, 0x0b, cf, 4);
+    cn += put_el(ch + cn, 0x0c, &w, 1);
+    cn += put_el(ch + cn, 0x10, &band, 1);
+    n += put_el(b + n, 0x3e, fr, (uint16_t)fl);
+    uint8_t sig[4] = { 0xff, 0xff, 0xff, 0xce };   /* -50 dBm */
+    n += put_el(b + n, 0x0a, ch, (uint16_t)cn);
+    n += put_el(b + n, 0x3f, sig, 4);
+    send_msg(ssl, 0x2018, (uint16_t)((phy << 8) | vap), b, (uint16_t)n);
+    fl = mkassoc(fr, bssid, sta, ssid);
+    n = 0;
+    n += put_el(b + n, 0x3e, fr, (uint16_t)fl);
+    n += put_el(b + n, 0x0a, ch, (uint16_t)cn);
+    n += put_el(b + n, 0x3f, sig, 4);
+    send_msg(ssl, 0x2018, (uint16_t)((phy << 8) | vap), b, (uint16_t)n);
+    printf("inject: phy=%d vap=%d sta=%02x:%02x:%02x:%02x:%02x:%02x "
+           "bssid=%02x:%02x:%02x:%02x:%02x:%02x freq=%d\n",
+           phy, vap, sta[0], sta[1], sta[2], sta[3], sta[4], sta[5],
+           bssid[0], bssid[1], bssid[2], bssid[3], bssid[4], bssid[5], freq);
+    fflush(stdout);
+}
+
+static void maybe_inject_assoc(mbedtls_ssl_context *ssl, const struct cfg *c)
+{
+    static int done;
+    if (!c->inject_assoc || done) return;
+    done = 1;
+    for (int phy = 0; phy < c->nradios; phy++) {
+        for (int vap = 0; vap < 8; vap++) {
+            char ifn[32], cmd[96], line[256], ssid[33] = "test";
+            uint8_t bssid[6] = {0};
+            int freq = (phy & 1) ? 5180 : 2437, have_bssid = 0;
+            snprintf(ifn, sizeof(ifn), "phy%d-ap%d", phy, vap);
+            snprintf(cmd, sizeof(cmd), "/usr/sbin/iw dev %s info 2>/dev/null", ifn);
+            FILE *fp = popen(cmd, "r");
+            if (!fp) continue;
+            while (fgets(line, sizeof(line), fp)) {
+                unsigned int m[6]; int ch, f2;
+                if (sscanf(line, " addr %x:%x:%x:%x:%x:%x",
+                           &m[0],&m[1],&m[2],&m[3],&m[4],&m[5]) == 6) {
+                    for (int k = 0; k < 6; k++) bssid[k] = (uint8_t)m[k];
+                    have_bssid = 1;
+                } else if (sscanf(line, " channel %d (%d MHz)", &ch, &f2) == 2) {
+                    freq = f2;
+                }
+            }
+            pclose(fp);
+            if (!have_bssid) continue;
+            snprintf(cmd, sizeof(cmd), "/usr/sbin/iw dev %s station dump 2>/dev/null", ifn);
+            fp = popen(cmd, "r");
+            int sent_vap = 0;
+            if (fp) {
+                while (fgets(line, sizeof(line), fp)) {
+                    unsigned int m[6];
+                    if (sscanf(line, "Station %x:%x:%x:%x:%x:%x",
+                               &m[0],&m[1],&m[2],&m[3],&m[4],&m[5]) == 6) {
+                        uint8_t sta[6];
+                        for (int k = 0; k < 6; k++) sta[k] = (uint8_t)m[k];
+                        send_2018(ssl, phy, vap, bssid, sta, freq, ssid);
+                        sent_vap = 1;
+                    }
+                }
+                pclose(fp);
+            }
+            if (!sent_vap) {   /* lab: no local station, manager accepts synthetic */
+                uint8_t syn[6] = { 0x02, 0x00, 0x00, 0x00, 0x12, 0x34 };
+                send_2018(ssl, phy, vap, bssid, syn, freq, ssid);
+            }
         }
     }
 }
@@ -1872,22 +3056,60 @@ static int run_once(struct cfg *c)
 
     time_t last_echo = time(NULL);
     time_t last_dc_ka = 0;
+#ifdef CAPAGENT_LAB
+    if (c->lab_iface && lab_ap_setup(c) != 0) {
+        fprintf(stderr, "lab: AP setup failed\n");
+        goto out;
+    }
+#endif
     for (;;) {
-        int r = read_exact(&ssl, fd.fd, hdr, 14);
+        struct pollfd pfd[3];
+        int nfd = 0, tls_i, nl_i = -1, dci = -1;
+        int have_tls = mbedtls_ssl_get_bytes_avail(&ssl) > 0;
+
+        pfd[nfd].fd = fd.fd;
+        pfd[nfd].events = POLLIN;
+        pfd[nfd].revents = 0;
+        tls_i = nfd++;
+#ifdef CAPAGENT_LAB
+        if (g_nl_evt_fd >= 0) {
+            pfd[nfd].fd = g_nl_evt_fd;
+            pfd[nfd].events = POLLIN;
+            pfd[nfd].revents = 0;
+            nl_i = nfd++;
+        }
+#endif
         if (dc.fd >= 0) {
-            dc_service(&dc);
-            if (time(NULL) - last_dc_ka >= DC_KEEPALIVE_MS / 1000) {
-                dc_send_keepalive(&dc);
-                last_dc_ka = time(NULL);
-            }
+            pfd[nfd].fd = dc.fd;
+            pfd[nfd].events = POLLIN;
+            pfd[nfd].revents = 0;
+            dci = nfd++;
         }
-        if (r == 0) {
-            if (time(NULL) - last_echo > 5) {
-                send_msg(&ssl, TYPE_ECHO, 0, NULL, 0);
-                last_echo = time(NULL);
-            }
+        int pr = poll(pfd, (nfds_t)nfd, have_tls ? 0 : 200);
+        if (pr < 0) {
+            if (errno == EINTR) continue;
+            break;
+        }
+
+#ifdef CAPAGENT_LAB
+        if (nl_i >= 0 && (pfd[nl_i].revents & POLLIN))
+            lab_service_nl(&ssl, &dc, c);
+#endif
+        if (dci >= 0 && (pfd[dci].revents & POLLIN)) dc_service(&dc);
+        if (dc.fd >= 0 && time(NULL) - last_dc_ka >= DC_KEEPALIVE_MS / 1000) {
+            dc_send_keepalive(&dc);
+            last_dc_ka = time(NULL);
+        }
+        if (time(NULL) - last_echo > 5) {
+            send_msg(&ssl, TYPE_ECHO, 0, NULL, 0);
+            last_echo = time(NULL);
+        }
+        (void)nl_i;
+        if (!have_tls && !(pfd[tls_i].revents & (POLLIN | POLLHUP | POLLERR)))
             continue;
-        }
+
+        int r = read_exact(&ssl, fd.fd, hdr, 14);
+        if (r == 0) continue;
         if (r < 0) break;
 
         uint16_t type = rd16(hdr);
@@ -1914,7 +3136,7 @@ static int run_once(struct cfg *c)
         } else if (type == TYPE_JOIN_RESP) {
             dump_raw("joinresp", type, port, body, len);
             handle_c029(body, len);
-        } else if (type == 0x6027) {   /* periodic status poll */
+        } else if (type == TYPE_POLL) {   /* periodic status poll */
             static int n27;
             /* The genuine CAP answers with MAC/vapid/ifindex/ifname/current
                freq; the manager only reads 0x61. */
@@ -1939,22 +3161,37 @@ static int run_once(struct cfg *c)
                 last_stats = time(NULL);
                 send_station_stats(&ssl, c);
             }
+            maybe_inject_assoc(&ssl, c);
             if ((++n27 % 100) == 1) {
                 printf("RX 0x6027 poll (count=%d) -> 0xE027 len=%zu\n",
                        n27, z27);
                 fflush(stdout);
             }
-        } else if (type == 0x201f) {   /* security key material per VAP */
-            dump_raw("sec201f", type, port, body, len);
-            printf("RX 0x201f security port=0x%04x len=%u -> ack 0xE01F\n",
-                   port, len);
+        } else if (type == TYPE_EAPOL_TX) {   /* 0x201C manager -> STA */
+            dump_raw("eapol201c", type, port, body, len);
+            printf("RX 0x201c eapol-tx port=0x%04x len=%u\n", port, len);
             fflush(stdout);
-            send_hdr_msg(&ssl, 0xE01F, hdr + 2, NULL, 0);
-        } else if (type == 0x6016) {   /* ActAp start/config push (SSID/RSN/chan) */
+            handle_201c(&ssl, port, body, len);
+            send_hdr_msg(&ssl, TYPE_EAPOL_TX_RESP, hdr + 2, NULL, 0);
+        } else if (type == TYPE_KEY_INSTALL) { /* 0x201F PTK/GTK/IGTK */
+            dump_raw("sec201f", type, port, body, len);
+            printf("RX 0x201f key-install port=0x%04x len=%u\n", port, len);
+            fflush(stdout);
+            handle_201f(&ssl, port, body, len);
+            send_hdr_msg(&ssl, TYPE_KEY_RESP, hdr + 2, NULL, 0);
+        } else if (type == TYPE_ASSOC_FRAME) { /* 0x2018, manager side only */
+            dump_raw("assoc2018", type, port, body, len);
+            printf("RX 0x2018 from manager (ignored)\n");
+            fflush(stdout);
+        } else if (type == TYPE_EAPOL_RX) {    /* 0x201B, manager side only */
+            dump_raw("eapol201b", type, port, body, len);
+            printf("RX 0x201b from manager (ignored)\n");
+            fflush(stdout);
+        } else if (type == TYPE_START) {   /* ActAp start/config push (SSID/RSN/chan) */
             dump_raw("start", type, port, body, len);
             printf("RX 0x6016 start port=0x%04x len=%u -> ack 0xE016\n", port, len);
             fflush(stdout);
-            send_hdr_msg(&ssl, 0xE016, hdr + 2, NULL, 0);
+            send_hdr_msg(&ssl, TYPE_START_RESP, hdr + 2, NULL, 0);
         } else if (type == TYPE_ECHO) {
             if (len) {
                 const uint8_t *av = NULL; uint16_t al = 0;
@@ -1973,13 +3210,12 @@ static int run_once(struct cfg *c)
             printf("RX type=0x%04x len=%d\n", type, len);
             fflush(stdout);
         }
-        if (time(NULL) - last_echo > 5) {
-            send_msg(&ssl, TYPE_ECHO, 0, NULL, 0);
-            last_echo = time(NULL);
-        }
     }
 
 out:
+#ifdef CAPAGENT_LAB
+    lab_shutdown();
+#endif
     if (dc.fd >= 0) close(dc.fd);
     mbedtls_ssl_close_notify(&ssl);
     mbedtls_net_free(&fd);
@@ -2011,7 +3247,12 @@ static void usage(const char *p)
         "  --dc-key HEX                 16/32-byte datachan key (test override)\n"
         "  --dc-cookie HEX              <=16-byte datachan cookie (test override)\n"
         "  --dc-id N                    datachan id (default: 428)\n"
-        "  --apply                      write 0x77 SSID/VLAN/key to UCI (radio1)\n",
+        "  --apply                      write 0x77 SSID/VLAN/key to UCI (radio1)\n"
+        "  --eapol-leg tls|datachan|both\n"
+        "                               STA EAPOL -> manager leg (default tls = 0x201B)\n"
+        "  --lab-ap IFACE               lab only: bring up a minimal AP on IFACE\n"
+        "  --lab-ssid SSID              lab SSID (default T14-CAP)\n"
+        "  --lab-chan N                 lab channel (default 1)\n",
         p);
 }
 
@@ -2037,7 +3278,8 @@ int main(int argc, char **argv)
     enum { OPT_DISC = 1000, OPT_LOCK, OPT_CN, OPT_CA, OPT_NOVERIFY,
            OPT_SDP, OPT_SSTATIC, OPT_IDENTITY, OPT_SERIAL, OPT_A1, OPT_E70,
            OPT_SELFTEST, OPT_DATACHAN, OPT_DC_LISTEN, OPT_DC_KEY,
-           OPT_DC_COOKIE, OPT_DC_ID, OPT_APPLY, OPT_NOACK };
+           OPT_DC_COOKIE, OPT_DC_ID, OPT_APPLY, OPT_NOACK,
+           OPT_EAPOL_LEG, OPT_LAB_AP, OPT_LAB_SSID, OPT_LAB_CHAN, OPT_INJECT };
     static struct option opts[] = {
         {"manager", required_argument, 0, 'm'},
         {"port", required_argument, 0, 'p'},
@@ -2064,6 +3306,11 @@ int main(int argc, char **argv)
         {"dc-id", required_argument, 0, OPT_DC_ID},
         {"apply", no_argument, 0, OPT_APPLY},
         {"no-ack", no_argument, 0, OPT_NOACK},
+        {"inject-assoc", no_argument, 0, OPT_INJECT},
+        {"eapol-leg", required_argument, 0, OPT_EAPOL_LEG},
+        {"lab-ap", required_argument, 0, OPT_LAB_AP},
+        {"lab-ssid", required_argument, 0, OPT_LAB_SSID},
+        {"lab-chan", required_argument, 0, OPT_LAB_CHAN},
         {"help", no_argument, 0, 'h'},
         {0,0,0,0}
     };
@@ -2100,9 +3347,28 @@ int main(int argc, char **argv)
         case OPT_DC_ID: c.dc_id = (uint16_t)atoi(optarg); break;
         case OPT_APPLY: g_apply = 1; break;
         case OPT_NOACK: c.no_ack = 1; break;
+        case OPT_INJECT: c.inject_assoc = 1; break;
+        case OPT_EAPOL_LEG:
+            if (!strcmp(optarg, "tls")) c.eapol_leg = 1;
+            else if (!strcmp(optarg, "datachan")) c.eapol_leg = 2;
+            else if (!strcmp(optarg, "both")) c.eapol_leg = 3;
+            else { usage(argv[0]); return 1; }
+            break;
+        case OPT_LAB_AP: c.lab_iface = optarg; break;
+        case OPT_LAB_SSID: c.lab_ssid = optarg; break;
+        case OPT_LAB_CHAN: c.lab_chan = atoi(optarg); break;
         default: usage(argv[0]); return 1;
         }
     }
+#ifndef CAPAGENT_LAB
+    if (c.lab_iface) {
+        fprintf(stderr, "capagent: --lab-ap needs a -DCAPAGENT_LAB build\n");
+        return 1;
+    }
+#endif
+    if (!c.eapol_leg) c.eapol_leg = 1;
+    if (!c.lab_ssid) c.lab_ssid = "T14-CAP";
+    if (!c.lab_chan) c.lab_chan = 1;
     if (c.crypto_selftest) return dc_selftest();
     if (c.nradios == 0) resolve_phy_macs(&c);
     if (c.nradios == 0) {
