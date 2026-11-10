@@ -9,14 +9,49 @@ Reference hardware: **Xiaomi Mi Router 4A Gigabit Edition** (ramips/mt7621,
 OpenWrt 24.10, MediaTek MT7603E + MT7612E), managed by an
 **RB1100AHx4 / RouterOS 7.25.1**.
 
-> **Status:** the control plane is working end-to-end. The official manager
-> sees the CAP as `state="Ok"`, selects channels, creates and binds the master
-> and virtual interfaces, and pushes the SSID/RSN/channel (`0x6016`), VLAN
-> (`0x500b` `0x7d`) and group-key material (`0x201f`). The split-MAC data plane
-> is implemented in the client and proven at the codec/control level in the lab,
-> with one **manager-side gate** still under investigation on a radio-less
-> manager. The WPA passphrase is not part of CAPsMAN v2; where local forwarding
-> needs it, a boot-time configuration pull is the fallback.
+> ## ⚠️ STATUS: NOT SOLVED — do not treat the current setup as the goal
+>
+> **The goal is a CAP that behaves 100% like a genuine MikroTik CAP: the CAP
+> gets everything (SSID, security, VLAN, channel) from the official CAPsMAN v2
+> manager, with no local wireless configuration, no SSH, no second service and
+> no manual step — including after a factory reset.**
+>
+> **That has NOT been achieved yet.**
+>
+> What works today:
+>
+> * the CAP joins the official manager and stays `state="Ok"`;
+> * the manager sees the radios, their MACs and capabilities (`NEWPHY`);
+> * the manager selects channels and creates/binds its VAP objects
+>   (`0x500b`, `0xd00b`, `0x201f` group keys, `0x2016`/`0x6016` pushes);
+> * local forwarding (`on-cap`) and the manager-driven 4-way (`0x2018`
+>   Auth/Assoc relay, `0x201b`/`0x201c` EAPOL, `0x201f` PTK/GTK) are proven in
+>   the lab (hwsim) and partially on the real RB1100.
+>
+> What does **not** work yet:
+>
+> * **There is no configuration-push message in CAPsMAN v2.** `0x6016` carries
+>   only SSID + RSN/WPA IE + channel; `0xc029 0x77` is the CAP certificate, not
+>   a config tree. Verified across 7.20.2 / 7.24.3 / 7.25.1 / 7.26beta3, every
+>   datapath mode, and every message in `0x2000..0x2041`.
+> * The client therefore **cannot build its BSSes from the manager alone**: the
+>   SSIDs/keys that work today come from a **local `/etc/config/wireless`**
+>   (restored from a backup). That is **manual configuration** and is exactly
+>   what this project must eliminate.
+> * Virtual VAP creation is incomplete: the manager does not see the slave
+>   interfaces (`ifindex=0`, VAP-id mapping and `0xd00b` reply fidelity are
+>   open — see `docs/OPEN-PROBLEMS.md`).
+> * The PSK-free path (external RSN authenticator: manager does the 4-way, CAP
+>   relays EAPOL and installs the derived keys) is **built and lab-tested** but
+>   blocked on the live CAP: the manager never starts the pilot VAP, so no
+>   `0x6016`/`0x201c` ever arrives for it.
+> * A factory reset still wipes the client, certificate and configuration; a
+>   custom image with the client + certificate in ROM is required and does not
+>   exist yet.
+>
+> Until those items are closed, **any working WiFi here is local
+> configuration**, not CAPsMAN-provisioned. See
+> [`docs/OPEN-PROBLEMS.md`](docs/OPEN-PROBLEMS.md) for the tracked blockers.
 
 See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for the full chain and
 [`docs/FINDINGS.md`](docs/FINDINGS.md) for the message/TLV reference.
