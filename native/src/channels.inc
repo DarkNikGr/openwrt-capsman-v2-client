@@ -243,14 +243,19 @@ static void vap_bssid_alloc(int phy, const uint8_t want[6], uint8_t out[6])
         for (int i = 0; i < 8; i++) bss_addr_of_idx(base, i, legal[i]);
         nl = 8;
     }
-    int compatible = !memcmp(want + 1, base + 1, 5);
-    if (compatible) {
-        int idx = bss_idx_of(base, want);
-        if (!(g_bss_used[r] & (1u << idx))) {
-            g_bss_used[r] |= (uint8_t)(1u << idx);
-            return;                      /* manager plan is legal: keep it */
+    /* Use the manager's address unchanged only when the driver publishes
+     * exactly that address.  Matching bytes 1..5 is not enough: byte 0
+     * also selects the index, and an address outside the plan could make
+     * the driver reprogram the radio base MAC on index 0. */
+    for (int i = 0; i < nl; i++)
+        if (!memcmp(want, legal[i], 6)) {
+            int idx = bss_idx_of(base, want);
+            if (!(g_bss_used[r] & (1u << idx))) {
+                g_bss_used[r] |= (uint8_t)(1u << idx);
+                return;                  /* manager plan is legal: keep it */
+            }
+            break;              /* legal, but its index is already taken */
         }
-    }
     for (int i = 0; i < nl; i++) {
         int idx = bss_idx_of(base, legal[i]);
         if (g_bss_used[r] & (1u << idx)) continue;
@@ -279,7 +284,8 @@ static void vap_bssid_free(int phy, const uint8_t mac[6])
 
 /* First free legal address, for the mgmt monitor.  Returns 1 and marks the
  * index when it found one, 0 when the phy does not need the treatment, -1
- * when the phy is full. */
+ * when the phy is full.  W56: index 0 is the radio MAC and the VAP0 slot, so
+ * the monitor must never take it; start the search at legal index 1. */
 static int vap_bssid_pick_free(int phy, uint8_t out[6])
 {
     if (!phy_is_mt76x02(phy)) return 0;
@@ -292,8 +298,9 @@ static int vap_bssid_pick_free(int phy, uint8_t out[6])
         for (int i = 0; i < 8; i++) bss_addr_of_idx(base, i, legal[i]);
         nl = 8;
     }
-    for (int i = 0; i < nl; i++) {
+    for (int i = 1; i < nl; i++) {
         int idx = bss_idx_of(base, legal[i]);
+        if (idx == 0 || !memcmp(legal[i], base, 6)) continue;
         if (g_bss_used[r] & (1u << idx)) continue;
         g_bss_used[r] |= (uint8_t)(1u << idx);
         memcpy(out, legal[i], 6);
