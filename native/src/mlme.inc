@@ -36,7 +36,6 @@ struct mlme_vap {
 static struct mlme_vap g_mlme[MAX_RADIOS][16];
 static int g_mlme_on;
 static int g_mlme_port = -1;
-static uint32_t g_mlme_freq;
 
 static void mlme_init(const struct cfg *c)
 {
@@ -175,6 +174,8 @@ static int mlme_start_ap(struct mlme_vap *m)
 
     if (mlme_build_beacon(m, head, &hl, tail, &tl) != 0) return -EINVAL;
     if (nl_cmd_open() != 0) return -ENODEV;
+    if (g_nl_evt_fd < 0) g_nl_evt_fd = nl_open_socket();
+    if (g_nl_evt_fd < 0) return -ENODEV;
 
     nlb_init(&b, NL80211_CMD_START_AP, NLM_F_ACK);
     nlb_u32(&b, NL80211_ATTR_IFINDEX, (uint32_t)m->ifindex);
@@ -205,7 +206,10 @@ static int mlme_start_ap(struct mlme_vap *m)
             nlb_put(&b, NL80211_ATTR_AKM_SUITES, m->akm,
                     (size_t)m->nakm * 4);
     }
-    return nl_send_ack(g_nl_cmd_fd, &b);
+    /* START_AP must run on the event socket: with CONTROL_PORT_OVER_NL80211
+     * cfg80211 unicasts control-port frames to the owning nlportid, i.e. the
+     * socket that started the AP (W5 §3.2). */
+    return nl_send_ack(g_nl_evt_fd, &b);
 }
 
 /* CMD_FRAME on an AP vif: never pass WIPHY_FREQ (W5: off-channel -EBUSY). */
@@ -313,6 +317,7 @@ static int mlme_vap_start(int phy, int vapid, int ifindex, const char *ifname,
     uint8_t width = 1, band = 0;
     uint8_t mac[6];
     int r;
+    (void)c;
 
     if (!mlme_owns_port(port)) return 0;
     if (ifindex <= 0) return -EINVAL;
@@ -346,7 +351,15 @@ static int mlme_vap_start(int phy, int vapid, int ifindex, const char *ifname,
     if (!freq) freq = 2412;
     m->freq = freq;
     m->width = width ? width : 1;
-    g_mlme_freq = freq;
+    /* 0x2018 must carry the VAP's provisioned frequency: the manager drops
+     * an assoc report whose 0x0a/0x0b does not match its configuration. */
+    {
+        struct vap *vp = vap_get(phy, vapid);
+        if (vp) {
+            vp->freq = freq;
+            vchan_set(port, freq, m->width, band_code_for_freq(freq));
+        }
+    }
     if (read_sysfs_mac(ifname, mac) == 0) memcpy(m->bssid, mac, 6);
     else if (vap_get(phy, vapid)) memcpy(m->bssid, vap_get(phy, vapid)->bssid, 6);
     mlme_parse_rsn(m);
@@ -364,6 +377,9 @@ static int mlme_vap_start(int phy, int vapid, int ifindex, const char *ifname,
         return -ENODEV;
     }
     r = mlme_start_ap(m);
+    printf("mlme: START_AP ret=%d (%s) iftype=%d\n", r,
+           r ? strerror(-r) : "ok", nl_get_iftype(ifindex));
+    fflush(stdout);
     if (r == -EALREADY) r = 0;
     if (r) {
         fprintf(stderr, "mlme: START_AP %s ret=%d (%s)\n", ifname, r,
@@ -416,10 +432,13 @@ static int mlme_on_mgmt(mbedtls_ssl_context *ssl, struct nlattr *at, int alen,
         if (alg == 0 && seq == 1) {             /* open system */
             int r = mlme_answer_auth(m, fr, fl);
             printf("mlme: auth %02x:%02x:%02x:%02x:%02x:%02x -> local "
-                   "answer ret=%d (%s)\n", fr[10], fr[11], fr[12], fr[13],
-                   fr[14], fr[15], r, r ? strerror(-r) : "ok");
+                   "answer ret=%d (%s), relaying 0x2018\n", fr[10], fr[11],
+                   fr[12], fr[13], fr[14], fr[15], r,
+                   r ? strerror(-r) : "ok");
             fflush(stdout);
-            return 1;
+            /* The manager also needs to see the Auth frame to move its own
+             * peer FSM to authenticated; our local response is the air copy. */
+            return 0;
         }
         return 0;                              /* SAE etc.: manager answers */
     }

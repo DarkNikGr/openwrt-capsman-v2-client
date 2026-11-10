@@ -64,6 +64,9 @@ start_service() {
 	[ "${DATAPATH_BRIDGE:-no}" = yes ] && set -- "$@" --datapath-bridge
 	[ -n "${BCAST:-}" ] && set -- "$@" --bcast "${BCAST}"
 	[ -n "${VAP_MTU:-}" ] && set -- "$@" --vap-mtu "${VAP_MTU}"
+	# W36: in-CAP MLME (no hostapd) for one manager-provisioned VAP.
+	[ "${MLME:-no}" = yes ] && set -- "$@" --mlme
+	[ -n "${MLME_PORT:-}" ] && set -- "$@" --mlme-port "${MLME_PORT}"
 
 	procd_open_instance
 	# The preflight is a thin wait-and-exec wrapper.  It stays in the
