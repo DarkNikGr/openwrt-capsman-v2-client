@@ -1,0 +1,187 @@
+diff --git a/hostapd/config_file.c b/hostapd/config_file.c
+index 67dc4ff..a6cdfbb 100644
+--- a/hostapd/config_file.c
++++ b/hostapd/config_file.c
+@@ -3223,6 +3223,46 @@ static int hostapd_config_fill(struct hostapd_config *conf,
+ 	} else if (os_strcmp(buf, "ext_auth_socket") == 0) {
+ 		os_free(bss->ext_auth_socket);
+ 		bss->ext_auth_socket = os_strdup(pos);
++	} else if (os_strcmp(buf, "external_rsn_ie") == 0) {
++#ifdef CONFIG_EXTERNAL_RSN_AUTH
++		size_t len;
++
++		bss->external_rsn_ie_len = 0;
++		if (!pos || !pos[0]) {
++			wpa_printf(MSG_ERROR,
++				   "Line %d: empty external_rsn_ie", line);
++			return 1;
++		}
++		len = os_strlen(pos);
++		if ((len & 1) ||
++		    len / 2 > sizeof(bss->external_rsn_ie)) {
++			wpa_printf(MSG_ERROR,
++				   "Line %d: invalid external_rsn_ie hex length %lu",
++				   line, (unsigned long) len);
++			return 1;
++		}
++		len /= 2;
++		if (hexstr2bin(pos, bss->external_rsn_ie, len) < 0) {
++			wpa_printf(MSG_ERROR,
++				   "Line %d: invalid external_rsn_ie hex dump",
++				   line);
++			return 1;
++		}
++		if (len < 22 || bss->external_rsn_ie[0] != WLAN_EID_RSN ||
++		    bss->external_rsn_ie[1] != len - 2) {
++			wpa_printf(MSG_ERROR,
++				   "Line %d: external_rsn_ie is not a valid RSN element (id=%02x len=%u)",
++				   line, bss->external_rsn_ie[0],
++				   bss->external_rsn_ie[1]);
++			return 1;
++		}
++		bss->external_rsn_ie_len = len;
++#else /* CONFIG_EXTERNAL_RSN_AUTH */
++		wpa_printf(MSG_ERROR,
++			   "Line %d: external_rsn_ie requires a hostapd built with CONFIG_EXTERNAL_RSN_AUTH",
++			   line);
++		return 1;
++#endif /* CONFIG_EXTERNAL_RSN_AUTH */
+ 	} else if (os_strcmp(buf, "wpa_pairwise") == 0) {
+ 		bss->wpa_pairwise = hostapd_config_parse_cipher(line, pos);
+ 		if (bss->wpa_pairwise == -1 || bss->wpa_pairwise == 0)
+diff --git a/hostapd/hostapd.conf b/hostapd/hostapd.conf
+index 55657ae..fdc4828 100644
+--- a/hostapd/hostapd.conf
++++ b/hostapd/hostapd.conf
+@@ -1871,6 +1871,20 @@ own_ip_addr=127.0.0.1
+ # /var/run/hostapd/ext-auth-<ifname>.
+ #ext_auth_socket=/var/run/hostapd/ext-auth-wlan0
+ 
++# Exact RSN IE to advertise in Beacon, Probe Response and (Re)Association
++# Response frames.  The value is a hex dump of the complete RSN element,
++# including the element ID (0x30) and the length octet.  When set, hostapd
++# emits these bytes verbatim instead of generating an RSN IE from
++# wpa/rsn_pairwise/wpa_key_mgmt/ieee80211w, and it does not append an RSNXE.
++#
++# This is needed with an external RSN authenticator that lives in a CAPsMAN
++# manager: the station compares the RSN IE in the 3/4 message with the one in
++# Beacon/Probe Response and rejects M3 unless they are identical.  Use the RSN
++# IE from the manager's provisioning message (0x6016, element 0x04) here.
++# The string must be even-length; the element ID must be 0x30 and the length
++# octet must match the remaining size.  Example (28 bytes):
++#external_rsn_ie=301a0100000fac040100000fac040100000fac0280000000000fac06
++
+ # Set of accepted key management algorithms (WPA-PSK, WPA-EAP, or both). The
+ # entries are separated with a space. WPA-PSK-SHA256 and WPA-EAP-SHA256 can be
+ # added to enable SHA256-based stronger algorithms.
+diff --git a/src/ap/ap_config.h b/src/ap/ap_config.h
+index 367b939..77e1143 100644
+--- a/src/ap/ap_config.h
++++ b/src/ap/ap_config.h
+@@ -388,6 +388,15 @@ struct hostapd_bss_config {
+ 	 */
+ 	int external_rsn_auth;
+ 	char *ext_auth_socket; /* UNIX dgram path, default per-ifname */
++	/*
++	 * Exact RSN IE (element ID and length octets included) to advertise in
++	 * Beacon/Probe Response/(Re)Association Response frames instead of the
++	 * locally generated one.  Needed when the RSN authenticator runs in the
++	 * manager: the station compares the RSN IE from the 3/4 message with
++	 * the one from the Beacon/Probe Response and drops M3 on any mismatch.
++	 */
++	u8 external_rsn_ie[257]; /* max element size, cf. MAX_OWN_IE_OVERRIDE */
++	size_t external_rsn_ie_len;
+ 	int wpa_pairwise;
+ 	int group_cipher; /* wpa_group value override from configuation */
+ 	int wpa_group;
+diff --git a/src/ap/wpa_auth.h b/src/ap/wpa_auth.h
+index 82d09f0..4676b0e 100644
+--- a/src/ap/wpa_auth.h
++++ b/src/ap/wpa_auth.h
+@@ -201,6 +201,10 @@ struct wpa_auth_config {
+ 	int beacon_prot;
+ 	int group_mgmt_cipher;
+ 	int sae_require_mfp;
++	/* Exact RSN IE to advertise instead of the generated one; see
++	 * external_rsn_ie= in hostapd.conf. */
++	u8 external_rsn_ie[MAX_OWN_IE_OVERRIDE];
++	size_t external_rsn_ie_len;
+ #ifdef CONFIG_OCV
+ 	int ocv; /* Operating Channel Validation */
+ #endif /* CONFIG_OCV */
+diff --git a/src/ap/wpa_auth_glue.c b/src/ap/wpa_auth_glue.c
+index c8d01b8..a825561 100644
+--- a/src/ap/wpa_auth_glue.c
++++ b/src/ap/wpa_auth_glue.c
+@@ -79,6 +79,24 @@ static void hostapd_wpa_auth_conf(struct hostapd_bss_config *conf,
+ 	wconf->beacon_prot = conf->beacon_prot;
+ 	wconf->group_mgmt_cipher = conf->group_mgmt_cipher;
+ 	wconf->sae_require_mfp = conf->sae_require_mfp;
++#ifdef CONFIG_EXTERNAL_RSN_AUTH
++	if (conf->external_rsn_ie_len <= sizeof(wconf->external_rsn_ie)) {
++		os_memcpy(wconf->external_rsn_ie, conf->external_rsn_ie,
++			  conf->external_rsn_ie_len);
++		wconf->external_rsn_ie_len = conf->external_rsn_ie_len;
++		if (wconf->external_rsn_ie_len) {
++			char hex[2 * sizeof(wconf->external_rsn_ie) + 1];
++
++			wpa_snprintf_hex(hex, sizeof(hex),
++					 wconf->external_rsn_ie,
++					 wconf->external_rsn_ie_len);
++			wpa_printf(MSG_INFO,
++				   "EXT-AUTH: advertising external RSN IE (%lu bytes): %s",
++				   (unsigned long)
++				   wconf->external_rsn_ie_len, hex);
++		}
++	}
++#endif /* CONFIG_EXTERNAL_RSN_AUTH */
+ 	wconf->ssid_protection = conf->ssid_protection;
+ 	wconf->ssid_len = conf->ssid.ssid_len;
+ 	if (wconf->ssid_len > SSID_MAX_LEN)
+diff --git a/src/ap/wpa_auth_ie.c b/src/ap/wpa_auth_ie.c
+index 43d9c1d..42d1e2c 100644
+--- a/src/ap/wpa_auth_ie.c
++++ b/src/ap/wpa_auth_ie.c
+@@ -658,6 +658,32 @@ int wpa_auth_gen_wpa_ie(struct wpa_authenticator *wpa_auth)
+ 		pos = wpa_write_osen(&wpa_auth->conf, pos);
+ 	}
+ 	if (wpa_auth->conf.wpa & WPA_PROTO_RSN) {
++#ifdef CONFIG_EXTERNAL_RSN_AUTH
++		if (wpa_auth->conf.external_rsn_ie_len) {
++			/*
++			 * Use the RSN IE exactly as the external RSN
++			 * authenticator (the CAPsMAN manager) sent it.  The
++			 * station compares this element in the 3/4 message
++			 * against the one from Beacon/Probe Response, so both
++			 * must be the very same bytes, including capabilities
++			 * and any group management cipher suite.
++			 *
++			 * No RSNXE is appended in this mode: the manager's
++			 * element is emitted verbatim.
++			 */
++			wpa_hexdump(MSG_DEBUG,
++				    "RSN: Using external RSNE override",
++				    wpa_auth->conf.external_rsn_ie,
++				    wpa_auth->conf.external_rsn_ie_len);
++			if (sizeof(buf) - (pos - buf) <
++			    wpa_auth->conf.external_rsn_ie_len)
++				return -1;
++			os_memcpy(pos, wpa_auth->conf.external_rsn_ie,
++				  wpa_auth->conf.external_rsn_ie_len);
++			pos += wpa_auth->conf.external_rsn_ie_len;
++			goto rsn_ie_done;
++		}
++#endif /* CONFIG_EXTERNAL_RSN_AUTH */
+ #ifdef CONFIG_TESTING_OPTIONS
+ 		if (wpa_auth->conf.rsne_override_set) {
+ 			wpa_hexdump(MSG_DEBUG,
+@@ -703,6 +729,9 @@ int wpa_auth_gen_wpa_ie(struct wpa_authenticator *wpa_auth)
+ 			return res;
+ 		pos += res;
+ 	}
++#ifdef CONFIG_EXTERNAL_RSN_AUTH
++rsn_ie_done:
++#endif /* CONFIG_EXTERNAL_RSN_AUTH */
+ #ifdef CONFIG_TESTING_OPTIONS
+ fte:
+ #endif /* CONFIG_TESTING_OPTIONS */
