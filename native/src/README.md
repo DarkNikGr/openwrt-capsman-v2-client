@@ -15,6 +15,7 @@ mbedTLS and nl80211 so it can also be unit-tested on a host.
 | `datachan.inc` | c2 datachan: AES-CCM/plain (`a2`), keepalive, per-VAP keys, `0x402b` rekey |
 | `channels.inc` | `0x000a` channel descriptors, `0x00b7` set, vapid allocation |
 | `mgmt.inc` | EAPOL/key descriptors, `0x2018`/`0x2019` relay, monitor fallback, extmux glue |
+| `mlme.inc` | W36: in-CAP MLME for one VAP — local Auth, `START_AP` from the manager's SSID/IEs, `0x6019` AssocResp, control-port EAPOL, no hostapd |
 | `discovery.inc` | manager discovery, bounded TLS connect |
 | `stats.inc` | `0x200e` signal + `0x2015` counters/rates |
 | `vap.inc` | manager-driven BSS creation and hostapd start (`0x500b`/`0x6016`) |
@@ -44,6 +45,12 @@ The lab build adds `-DCAPAGENT_LAB` (hwsim AP, mgmt relay, synthetic
 Split-MAC options: `--datapath-bridge`, `--vap-mtu`, `--bcast`,
 `--mgmt-relay`, `--mgmt-source auto|nl80211|monitor|off`, `--ext-auth-dir`,
 `--ext-ctrl-dir`, `--state-file`, `--fourway-timeout`, `--m1-retry`.
+
+In-CAP MLME (W36): `--mlme --mlme-port 0x0000` replaces hostapd for that one
+VAP.  The CAP builds the beacon from `0x6016` (SSID + manager IE blob),
+answers open Auth itself, relays Auth/AssocReq as `0x2018`, transmits the
+manager's `0x6019`/`0x2019`, and relays EAPOL over the control port.  The
+manager remains the RSN authenticator and supplies `0x201f` keys.
 `--mgmt-source monitor` is the hostapd-coexistence path (U3): a passive
 monitor VIF relays the real Auth/AssocReq as `0x2018`, because cfg80211
 delivers each mgmt frame to only one `REGISTER_FRAME` owner.
