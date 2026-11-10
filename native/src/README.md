@@ -1,0 +1,30 @@
+# capagent source layout
+
+`native/capagent.c` is a small entry unit: constants, shared structs, then one
+`#include` per module. Everything is still compiled as a **single translation
+unit**, so the order below is the dependency order and no extra build flags are
+needed — `make` compiles `capagent.c` exactly as before.
+
+| Module | Contents |
+|---|---|
+| `util.inc` | TLV/hex helpers, sysfs readers, join (`0x4029`) and NEWPHY (`0x001d`) builders |
+| `nl80211.inc` | generic netlink: control-port EAPOL, `NEW_KEY`/`SET_KEY`, station authorize |
+| `apply.inc` | `0x77`/M2 config parse and UCI apply (argv, no shell) |
+| `datachan.inc` | c2 datachan: AES-CCM, keepalive, per-VAP keys, rekey |
+| `channels.inc` | `0x000a` channel descriptors, `0x00b7` set, vapid allocation |
+| `mgmt.inc` | EAPOL/key descriptors, `0x200e`/`0x2015`/`0x2018` helpers |
+| `discovery.inc` | manager discovery, MAC/interface resolution |
+| `stats.inc` | `0x200e` signal + `0x2015` counters/rates |
+| `lab.inc` | `CAPAGENT_LAB`: hwsim AP, mgmt relay, test injection |
+| `main.inc` | run loop, options, `main` |
+
+## Build
+
+```sh
+TOOLCHAIN=/path/to/toolchain-mipsel_24kc_gcc-13.3.0_musl/bin \
+MBEDTLS=/path/to/mbedtls-3.6.2 \
+../scripts/build-mipsel.sh
+```
+
+The lab build adds `-DCAPAGENT_LAB` (hwsim AP, mgmt relay, synthetic
+`--inject-assoc`); the production build leaves those out.

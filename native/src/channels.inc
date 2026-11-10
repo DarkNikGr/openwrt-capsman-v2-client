@@ -1,0 +1,202 @@
+/* channels.inc — 0x000a channels, 0x00b7 set, vapid allocation
+ * Part of capagent.c (single translation unit; included in order). */
+
+static uint32_t ccfi80(uint32_t f)
+{
+    if (f >= 5180 && f <= 5240) return 5210;
+    if (f >= 5260 && f <= 5320) return 5290;
+    if (f >= 5500 && f <= 5560) return 5530;
+    if (f >= 5580 && f <= 5640) return 5610;
+    if (f >= 5660 && f <= 5720) return 5690;
+    if (f >= 5745 && f <= 5805) return 5775;
+    if (f >= 5825 && f <= 5865) return 5855;
+    return f;
+}
+
+/* 0x000A channel-descriptor TLVs for the CREATEVAP-response (0xD00B) body.
+   The manager's ActManBase::updateHwChans() rebuilds phy+0x20 (+0x28 row ids)
+   from these.  2.4 GHz: 20 MHz, band 0x81 (2ghz-g).  5 GHz: 80 MHz (width 3)
+   with ccfi1, band 0x03 (5ghz-ac), because the 5 GHz configs use 20/40/80. */
+static size_t add_channel_tlvs(uint8_t *b, size_t n, int phy)
+{
+    const uint32_t *freqs = (phy & 1) ? freqs_5g : freqs_2g;
+    size_t nfreq = (phy & 1) ? sizeof(freqs_5g) / sizeof(freqs_5g[0])
+                             : sizeof(freqs_2g) / sizeof(freqs_2g[0]);
+    for (size_t i = 0; i < nfreq; i++) {
+        uint8_t sub[40], f[4], c[4];
+        size_t sn = 0;
+        uint8_t width = (phy & 1) ? 3 : 1;
+        uint8_t band = (phy & 1) ? 0x03 : 0x81;
+        put32(f, freqs[i]);
+        sn += put_el(sub + sn, 0x0b, f, 4);
+        sn += put_el(sub + sn, 0x0c, &width, 1);
+        if (phy & 1) {
+            put32(c, ccfi80(freqs[i]));
+            sn += put_el(sub + sn, 0x0d, c, 4);
+        }
+        sn += put_el(sub + sn, 0x10, &band, 1);
+        n += put_el(b + n, 0x0a, sub, (uint16_t)sn);
+    }
+    return n;
+}
+
+/* Per-radio vapid allocation: the manager never tells the CAP which vapid to
+   use, it only sends the (virtual) MAC in TLV 0x08.  We must return a unique
+   0..15 per interface and keep it stable for the same MAC, otherwise the
+   manager rejects the reply as a duplicate ("CREATEVAP bad response") and the
+   virtual user stays in CreatingVap forever. */
+static struct { int used; uint8_t mac[6]; } g_vmap[2][16];
+
+static int vapid_for(int phy, const uint8_t mac[6])
+{
+    int r = phy & 1;
+    for (int i = 0; i < 16; i++)
+        if (g_vmap[r][i].used && !memcmp(g_vmap[r][i].mac, mac, 6))
+            return i;
+    for (int i = 0; i < 16; i++)
+        if (!g_vmap[r][i].used) {
+            g_vmap[r][i].used = 1;
+            memcpy(g_vmap[r][i].mac, mac, 6);
+            return i;
+        }
+    return 0;
+}
+
+static void vapid_release(int phy, const uint8_t mac[6])
+{
+    int r = phy & 1;
+    for (int i = 0; i < 16; i++)
+        if (g_vmap[r][i].used && !memcmp(g_vmap[r][i].mac, mac, 6))
+            g_vmap[r][i].used = 0;
+}
+
+static void createvap_response(mbedtls_ssl_context *ssl, const uint8_t hdr[10],
+                               int phy, int vap, const struct cfg *c,
+                               const uint8_t *req, uint16_t reqlen)
+{
+    uint8_t body[BODY_MAX], v[4], mac[6] = {0};
+    char ifname[32];
+    size_t n = 0;
+    /* The manager identifies each interface only by the MAC in 0x08. */
+    const uint8_t *rm = NULL; uint16_t rml = 0;
+    int have_mac = find_el(req, reqlen, 0x08, &rm, &rml) && rml == 6;
+    if (have_mac)
+        memcpy(mac, rm, 6);
+    else if (phy < c->nradios)
+        memcpy(mac, c->macs[phy], 6);
+    int vapid = vapid_for(phy, mac);
+    {   /* remember which vapid owns this VLAN (needed for a2=1 keys) */
+        const uint8_t *vv = NULL; uint16_t vl = 0;
+        if (find_el(req, reqlen, 0x7d, &vv, &vl) && vl == 2)
+            vlan_wid_set(phy, rd16(vv), vapid);
+    }
+    snprintf(ifname, sizeof(ifname), "phy%d-ap%d", phy, vapid);
+    if (c->no_ack) {
+        /* A genuine CAP sends nothing when the data channel is created OK;
+           0xD00B is only the failure path. */
+        int ni = read_sysfs_int(ifname, "ifindex");
+        if (ni > 0) pmap_set(phy << 8 | vap, ni, mac);
+        printf("0xd00b phy=%d ifname=%s (no-ack: success reply suppressed)\n",
+               phy, ifname);
+        fflush(stdout);
+        return;
+    }
+    int ifindex = read_sysfs_int(ifname, "ifindex");
+    if (ifindex > 0) pmap_set(phy << 8 | vap, ifindex, mac);
+
+    n += put_el(body+n, 0x08, mac, 6);
+    put32(v, (uint32_t)vapid);
+    n += put_el(body+n, 0x47, v, 4);
+    put32(v, (uint32_t)ifindex);
+    n += put_el(body+n, 0x48, v, 4);
+    /* 0x49 is a nested submessage; the manager reads the interface name
+       from its 0x9e element and ignores a raw string here. */
+    uint8_t sub[64];
+    size_t sn = put_el(sub, 0x9e, ifname, (uint16_t)strlen(ifname));
+    n += put_el(body+n, 0x49, sub, (uint16_t)sn);
+
+    /* Advertise this radio's channels so the stock manager can run chansel. */
+    size_t nb = n;
+    n = add_channel_tlvs(body, n, phy);   /* returns the absolute offset */
+    size_t nc = n;
+
+    /* 0x0061 = current operating frequency (BE32).  The manager stores it in
+       phy+0x30 and sets "current freq known" (phy+0x34), which chansel uses. */
+    {
+        uint8_t cf[4];
+        put32(cf, (phy & 1) ? 5180u : 2437u);
+        n += put_el(body + n, 0x61, cf, 4);
+    }
+    size_t n61 = n;
+
+    /* 0x00B7 = u32 key set used by ActAp::chansel (actman+0x220).  Send the
+       same frequency list as BE32 values. */
+    {
+        const uint32_t *freqs = (phy & 1) ? freqs_5g : freqs_2g;
+        size_t nfreq = (phy & 1) ? sizeof(freqs_5g) / sizeof(freqs_5g[0])
+                                 : sizeof(freqs_2g) / sizeof(freqs_2g[0]);
+        uint8_t list[sizeof(freqs_5g)];
+        for (size_t i = 0; i < nfreq; i++) {
+            uint32_t ch = (phy & 1) ? (freqs[i] - 5000) / 5
+                                    : (freqs[i] - 2407) / 5;
+            put32(list + i * 4, ch);
+        }
+        n += put_el(body + n, 0xb7, list, (uint16_t)(nfreq * 4));
+    }
+
+    printf("d00b build base=%zu chan=%zu(delta=%zu) c61=%zu b7=%zu\n",
+           nb, nc, nc - nb, n61, n);
+
+    {   /* dump the exact reply body for offline verification */
+        char dp[64];
+        snprintf(dp, sizeof(dp), "/tmp/capagent-d00b-%d.bin", phy);
+        int dfd = open(dp, O_CREAT | O_WRONLY | O_TRUNC, 0600);
+        FILE *df = dfd >= 0 ? fdopen(dfd, "wb") : NULL;
+        if (df) { fwrite(body, 1, n, df); fclose(df); }
+    }
+
+    uint8_t pkt[BODY_MAX + 16];
+    size_t pn = put_msg(pkt, TYPE_CREATEVAP_RESP, 0, body, (uint16_t)n);
+    memcpy(pkt + 2, hdr, 10);   /* same 10-byte header/sequence */
+    (void)pn;
+    /* send manually with the custom header */
+    uint16_t len = (uint16_t)n;
+    uint8_t out[BODY_MAX + 16];
+    put16(out, TYPE_CREATEVAP_RESP);
+    memcpy(out + 2, hdr, 10);
+    put16(out + 12, len);
+    memcpy(out + 14, body, len);
+    size_t total = 14 + len, off = 0;
+    while (off < total) {
+        int r = mbedtls_ssl_write(ssl, out + off, total - off);
+        if (r == MBEDTLS_ERR_SSL_WANT_READ || r == MBEDTLS_ERR_SSL_WANT_WRITE)
+            continue;
+        if (r <= 0) break;
+        off += r;
+    }
+    printf("0xd00b phy=%d vapid=%d ifindex=%d ifname=%s\n", phy, vapid, ifindex, ifname);
+    fflush(stdout);
+}
+
+static void send_hdr_msg(mbedtls_ssl_context *ssl, uint16_t type,
+                         const uint8_t hdr[10], const uint8_t *body, uint16_t len)
+{
+    uint8_t out[BODY_MAX + 16];
+    put16(out, type);
+    memcpy(out + 2, hdr, 10);
+    put16(out + 12, len);
+    if (len && body) memcpy(out + 14, body, len);
+    size_t total = 14 + len, off = 0;
+    while (off < total) {
+        int r = mbedtls_ssl_write(ssl, out + off, total - off);
+        if (r == MBEDTLS_ERR_SSL_WANT_READ || r == MBEDTLS_ERR_SSL_WANT_WRITE)
+            continue;
+        if (r <= 0) break;
+        off += r;
+    }
+}
+
+/* ---- 0x201C / 0x201B: EAPOL relay ------------------------------- */
+
+/* The control port ABI wants a bare EAPOL frame (EAPOL header first).
+   Some builds/drivers hand us 802.3 or 802.11 framing; strip it. */

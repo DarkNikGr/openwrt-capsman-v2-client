@@ -386,7 +386,8 @@ cap-client/
 │   ├── FINDINGS.md           # control protocol / TLV reference
 │   └── ARCHITECTURE.md       # datapath modes and split-MAC chain
 ├── native/
-│   ├── capagent.c            # the CAP client
+│   ├── capagent.c            # entry unit (constants + module includes)
+│   ├── src/                  # protocol modules (util, nl80211, datachan, ...)
 │   ├── Makefile
 │   ├── enroll.py             # certificate enrollment helper
 │   └── deploy/               # OpenWrt init script, example conf, tools
