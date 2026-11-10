@@ -244,13 +244,46 @@ static int parse_sel(const char *p, uint8_t out[4])
 /* Ciphers, chain masks and AP-interface limit from `iw phy phyN info`. */
 static int nl_get_wiphy_ciphers(int phy, uint8_t *out, int outmax);
 
+/* W46: resolve a phy index to the name `iw phy <name>` accepts.  A wiphy can
+ * be renamed (mac80211_hwsim, consistent naming, udev); `iw phy phyN` then
+ * fails even though the index exists, so the CAP advertises no channels and
+ * the manager never selects a channel / sends 0x6016.  Resolve the index
+ * through /sys/class/ieee80211/<name>/index. */
+static void phy_iw_name(int phy, char *out, size_t n)
+{
+    DIR *d;
+    struct dirent *de;
+
+    snprintf(out, n, "phy%d", phy);
+    d = opendir("/sys/class/ieee80211");
+    if (!d) return;
+    while ((de = readdir(d)) != NULL) {
+        char p[300], b[32];
+        FILE *f;
+        if (de->d_name[0] == '.') continue;
+        snprintf(p, sizeof(p), "/sys/class/ieee80211/%.200s/index",
+                 de->d_name);
+        f = fopen(p, "r");
+        if (!f) continue;
+        if (fgets(b, sizeof(b), f) && atoi(b) == phy) {
+            fclose(f);
+            snprintf(out, n, "%.*s", (int)(n ? n - 1 : 0), de->d_name);
+            closedir(d);
+            return;
+        }
+        fclose(f);
+    }
+    closedir(d);
+}
+
 static void read_phy_caps(int phy, struct phy_caps *pc)
 {
     phy = real_phy(phy);
-    char cmd[128], line[256];
+    char cmd[160], line[256], pn[64];
     int in_ciph = 0;
     memset(pc, 0, sizeof(*pc));
-    snprintf(cmd, sizeof(cmd), "/usr/sbin/iw phy phy%d info 2>/dev/null", phy);
+    phy_iw_name(phy, pn, sizeof(pn));
+    snprintf(cmd, sizeof(cmd), "/usr/sbin/iw phy %s info 2>/dev/null", pn);
     FILE *fp = popen(cmd, "r");
     if (fp) {
         while (fgets(line, sizeof(line), fp)) {
@@ -320,10 +353,11 @@ static void iface_chan(const char *ifn, unsigned *freq, unsigned *width);
 static void read_phy_bands(int phy, struct phy_bands *pb)
 {
     phy = real_phy(phy);
-    char cmd[128], line[256];
+    char cmd[160], line[256], pn[64];
     int have2 = 0, have5 = 0, have6 = 0;
     memset(pb, 0, sizeof(*pb));
-    snprintf(cmd, sizeof(cmd), "/usr/sbin/iw phy phy%d info 2>/dev/null", phy);
+    phy_iw_name(phy, pn, sizeof(pn));
+    snprintf(cmd, sizeof(cmd), "/usr/sbin/iw phy %s info 2>/dev/null", pn);
     FILE *fp = popen(cmd, "r");
     if (fp) {
         while (fgets(line, sizeof(line), fp)) {

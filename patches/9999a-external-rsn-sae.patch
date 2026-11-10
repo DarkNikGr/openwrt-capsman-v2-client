@@ -1,0 +1,292 @@
+diff --git a/hostapd/config_file.c b/hostapd/config_file.c
+index a6cdfbb..a718882 100644
+--- a/hostapd/config_file.c
++++ b/hostapd/config_file.c
+@@ -3220,6 +3220,8 @@ static int hostapd_config_fill(struct hostapd_config *conf,
+ 		}
+ 	} else if (os_strcmp(buf, "external_rsn_auth") == 0) {
+ 		bss->external_rsn_auth = atoi(pos);
++	} else if (os_strcmp(buf, "external_rsn_sae") == 0) {
++		bss->external_rsn_sae = atoi(pos);
+ 	} else if (os_strcmp(buf, "ext_auth_socket") == 0) {
+ 		os_free(bss->ext_auth_socket);
+ 		bss->ext_auth_socket = os_strdup(pos);
+@@ -3249,13 +3251,41 @@ static int hostapd_config_fill(struct hostapd_config *conf,
+ 			return 1;
+ 		}
+ 		if (len < 22 || bss->external_rsn_ie[0] != WLAN_EID_RSN ||
+-		    bss->external_rsn_ie[1] != len - 2) {
++		    (size_t) bss->external_rsn_ie[1] + 2 > len) {
+ 			wpa_printf(MSG_ERROR,
+ 				   "Line %d: external_rsn_ie is not a valid RSN element (id=%02x len=%u)",
+ 				   line, bss->external_rsn_ie[0],
+ 				   bss->external_rsn_ie[1]);
+ 			return 1;
+ 		}
++		/*
++		 * The manager's security blob may also carry an RSNXE (EID
++		 * 244) after the RSN element.  A WPA3/SAE station compares
++		 * the RSNXE in Beacon/ProbeResp with the one in EAPOL-Key
++		 * msg 3/4, so keep the trailing elements byte for byte.
++		 * Validate that the elements are complete.
++		 */
++		{
++			size_t off = (size_t) bss->external_rsn_ie[1] + 2;
++
++			while (off + 2 <= len) {
++				size_t elen = bss->external_rsn_ie[off + 1];
++
++				if (off + 2 + elen > len) {
++					wpa_printf(MSG_ERROR,
++						   "Line %d: external_rsn_ie has a truncated trailing element",
++						   line);
++					return 1;
++				}
++				off += 2 + elen;
++			}
++			if (off != len) {
++				wpa_printf(MSG_ERROR,
++					   "Line %d: external_rsn_ie has a malformed trailing element",
++					   line);
++				return 1;
++			}
++		}
+ 		bss->external_rsn_ie_len = len;
+ #else /* CONFIG_EXTERNAL_RSN_AUTH */
+ 		wpa_printf(MSG_ERROR,
+diff --git a/hostapd/ctrl_iface.c b/hostapd/ctrl_iface.c
+index 2d4a472..2cc9565 100644
+--- a/hostapd/ctrl_iface.c
++++ b/hostapd/ctrl_iface.c
+@@ -4049,6 +4049,15 @@ static int hostapd_ctrl_iface_ext_auth_tx(struct hostapd_data *hapd, char *cmd)
+ 	size_t len;
+ 	int encrypt = 0;
+ 
++	/* cmd may still carry the client's trailing newline (extmux appends
++	 * one).  Without this trim the hex length becomes odd and every M1/M3
++	 * is rejected with -1, so the manager-side 4-way never reaches the
++	 * station. */
++	while (*cmd && (cmd[os_strlen(cmd) - 1] == '\n' ||
++			cmd[os_strlen(cmd) - 1] == '\r' ||
++			cmd[os_strlen(cmd) - 1] == ' '))
++		cmd[os_strlen(cmd) - 1] = '\0';
++
+ 	pos = cmd;
+ 	used = hwaddr_aton2(pos, dst);
+ 	if (used < 0)
+@@ -4085,6 +4094,65 @@ static int hostapd_ctrl_iface_ext_auth_tx(struct hostapd_data *hapd, char *cmd)
+ 
+ 	return ret;
+ }
++
++
++/*
++ * EXT_AUTH_MGMT_TX <mgmt-frame-hex>
++ *
++ * Transmit a management frame built by the external RSN authenticator (the
++ * CAPsMAN manager's 0x2019).  In a split-MAC CAP the manager is the SAE
++ * authenticator, so its Authentication responses (SAE commit/confirm) must
++ * go on air through hostapd's normal management TX path (driver sequence
++ * numbers, ACK/retry bookkeeping).  The frame already carries DA/SA/BSSID;
++ * the BSSID/SA are forced to the hostapd BSS address so a manager-side VAP
++ * MAC mismatch cannot send a frame with a foreign BSSID.
++ */
++static int hostapd_ctrl_iface_ext_auth_mgmt_tx(struct hostapd_data *hapd,
++					       char *cmd)
++{
++	u8 *buf;
++	size_t len;
++	int ret;
++
++	/* cmd may still carry the client's trailing newline */
++	while (*cmd && (cmd[os_strlen(cmd) - 1] == '\n' ||
++			cmd[os_strlen(cmd) - 1] == '\r' ||
++			cmd[os_strlen(cmd) - 1] == ' '))
++		cmd[os_strlen(cmd) - 1] = '\0';
++
++	len = os_strlen(cmd);
++	if (!len || (len & 1))
++		return -1;
++	len /= 2;
++	if (len < IEEE80211_HDRLEN || len > 4096)
++		return -1;
++
++	buf = os_malloc(len);
++	if (!buf)
++		return -1;
++	if (hexstr2bin(cmd, buf, len) < 0) {
++		os_free(buf);
++		return -1;
++	}
++
++	if (!ether_addr_equal(buf + 10, hapd->own_addr)) {
++		wpa_printf(MSG_DEBUG,
++			   "EXT-AUTH: mgmt TX rewriting addr2 " MACSTR
++			   " -> " MACSTR,
++			   MAC2STR(buf + 10), MAC2STR(hapd->own_addr));
++		os_memcpy(buf + 10, hapd->own_addr, ETH_ALEN);
++		if (len >= 24)
++			os_memcpy(buf + 16, hapd->own_addr, ETH_ALEN);
++	}
++
++	wpa_hexdump(MSG_DEBUG, "EXT-AUTH: mgmt TX", buf, len);
++	ret = hostapd_drv_send_mlme(hapd, buf, len, 0, NULL, 0, 0);
++	wpa_printf(MSG_DEBUG, "EXT-AUTH: mgmt TX subtype=%u len=%lu ret=%d",
++		   (unsigned int) ((buf[0] >> 4) & 0xf),
++		   (unsigned long) len, ret);
++	os_free(buf);
++	return ret;
++}
+ #endif /* CONFIG_EXTERNAL_RSN_AUTH */
+ 
+ 
+@@ -4183,6 +4251,9 @@ static int hostapd_ctrl_iface_receive_process(struct hostapd_data *hapd,
+ 	} else if (os_strncmp(buf, "EXT_AUTH_TX ", 12) == 0) {
+ 		if (hostapd_ctrl_iface_ext_auth_tx(hapd, buf + 12))
+ 			reply_len = -1;
++	} else if (os_strncmp(buf, "EXT_AUTH_MGMT_TX ", 17) == 0) {
++		if (hostapd_ctrl_iface_ext_auth_mgmt_tx(hapd, buf + 17))
++			reply_len = -1;
+ 	} else if (os_strncmp(buf, "EXT_AUTH_AUTHORIZE ", 19) == 0) {
+ 		u8 addr[ETH_ALEN];
+ 
+diff --git a/src/ap/ap_config.c b/src/ap/ap_config.c
+index 8f70004..11b7b5c 100644
+--- a/src/ap/ap_config.c
++++ b/src/ap/ap_config.c
+@@ -1292,14 +1292,25 @@ static int hostapd_config_check_bss(struct hostapd_bss_config *bss,
+ 				    struct hostapd_config *conf,
+ 				    int full_config)
+ {
++	if (full_config && bss->external_rsn_sae && !bss->external_rsn_auth) {
++		wpa_printf(MSG_ERROR,
++			   "external_rsn_sae requires external_rsn_auth=1");
++		return -1;
++	}
++
+ 	if (full_config && bss->external_rsn_auth) {
+ 		/*
+-		 * The external authenticator only implements the RSN 4-way
+-		 * handshake for PSK AKMs. SAE/OWE need the password (or the
+-		 * SAE state machine) on the CAP and WPA-Enterprise/FILS/FT
+-		 * need local state that is not relayed today; reject those
+-		 * instead of silently advertising a BSS that cannot work.
++		 * The external authenticator runs the RSN 4-way handshake for
++		 * the PSK AKMs and, when external_rsn_sae is enabled, also
++		 * owns the SAE/OWE exchange (the CAP has no password and no
++		 * local SAE state machine).  WPA-Enterprise/FILS/FT need
++		 * local state that is not relayed today; reject them instead
++		 * of silently advertising a BSS that cannot work.
+ 		 */
++		u32 allowed = WPA_KEY_MGMT_PSK | WPA_KEY_MGMT_PSK_SHA256;
++
++		if (bss->external_rsn_sae)
++			allowed |= WPA_KEY_MGMT_SAE | WPA_KEY_MGMT_OWE;
+ 		if (bss->wpa != WPA_PROTO_RSN || bss->osen) {
+ 			wpa_printf(MSG_ERROR,
+ 				   "external_rsn_auth requires WPA2/RSN (wpa=2)");
+@@ -1310,10 +1321,10 @@ static int hostapd_config_check_bss(struct hostapd_bss_config *bss,
+ 				   "external_rsn_auth does not support IEEE 802.1X");
+ 			return -1;
+ 		}
+-		if (bss->wpa_key_mgmt &
+-		    ~(WPA_KEY_MGMT_PSK | WPA_KEY_MGMT_PSK_SHA256)) {
++		if (bss->wpa_key_mgmt & ~allowed) {
+ 			wpa_printf(MSG_ERROR,
+-				   "external_rsn_auth supports only WPA-PSK and WPA-PSK-SHA256");
++				   "external_rsn_auth supports only WPA-PSK, WPA-PSK-SHA256%s",
++				   bss->external_rsn_sae ? ", SAE and OWE" : "");
+ 			return -1;
+ 		}
+ 	}
+diff --git a/src/ap/ap_config.h b/src/ap/ap_config.h
+index 77e1143..1fc35b2 100644
+--- a/src/ap/ap_config.h
++++ b/src/ap/ap_config.h
+@@ -388,6 +388,14 @@ struct hostapd_bss_config {
+ 	 */
+ 	int external_rsn_auth;
+ 	char *ext_auth_socket; /* UNIX dgram path, default per-ifname */
++	/*
++	 * The external RSN authenticator also owns SAE/OWE.  The CAP has no
++	 * SAE password or SAE state machine: suppress the local SAE exchange,
++	 * skip local RSN-IE validation (the manager already validated it and
++	 * holds the PMK) and let the manager drive the handshake through
++	 * 0x2018/0x2019.  Off by default so the WPA2-PSK path is unchanged.
++	 */
++	int external_rsn_sae;
+ 	/*
+ 	 * Exact RSN IE (element ID and length octets included) to advertise in
+ 	 * Beacon/Probe Response/(Re)Association Response frames instead of the
+diff --git a/src/ap/hostapd.c b/src/ap/hostapd.c
+index 59e2467..d941317 100644
+--- a/src/ap/hostapd.c
++++ b/src/ap/hostapd.c
+@@ -4162,6 +4162,9 @@ void hostapd_new_assoc_sta(struct hostapd_data *hapd, struct sta_info *sta,
+ 		 * authorization) runs in an external process; only report the
+ 		 * association and leave the local WPA state machine stopped.
+ 		 */
++		if (hapd->conf->external_rsn_sae &&
++		    hapd->conf->ieee80211w != NO_MGMT_FRAME_PROTECTION)
++			sta->flags |= WLAN_STA_MFP;
+ 		ext_auth_notify_assoc(hapd, sta);
+ 	} else {
+ 		ieee802_1x_new_station(hapd, sta);
+diff --git a/src/ap/ieee802_11.c b/src/ap/ieee802_11.c
+index c6d6c65..c0b66c5 100644
+--- a/src/ap/ieee802_11.c
++++ b/src/ap/ieee802_11.c
+@@ -3145,6 +3145,24 @@ static void handle_auth(struct hostapd_data *hapd,
+ 	if (res == HOSTAPD_ACL_PENDING)
+ 		return;
+ 
++#ifdef CONFIG_EXTERNAL_RSN_AUTH
++	/*
++	 * SAE is an 802.11 Authentication exchange (algorithm 3), not EAPOL.
++	 * When the external RSN authenticator owns SAE (the CAPsMAN manager
++	 * holds the password), the CAP has no SAE state and must not answer
++	 * locally.  Some deployments relay the raw Auth frame from a monitor
++	 * VIF; in either case hostapd must not run handle_auth_sae() and must
++	 * not send a local Authentication response.
++	 */
++	if (hapd->conf->external_rsn_auth && hapd->conf->external_rsn_sae &&
++	    auth_alg == WLAN_AUTH_SAE) {
++		wpa_printf(MSG_DEBUG,
++			   "EXT-AUTH: suppressing local SAE, auth_transaction=%u from "
++			   MACSTR, auth_transaction, MAC2STR(sa));
++		return;
++	}
++#endif /* CONFIG_EXTERNAL_RSN_AUTH */
++
+ #ifdef CONFIG_SAE
+ 	if (auth_alg == WLAN_AUTH_SAE && !from_queue &&
+ 	    (auth_transaction == 1 ||
+@@ -4162,6 +4180,28 @@ static int __check_assoc_ies(struct hostapd_data *hapd, struct sta_info *sta,
+ 
+ 	if (hapd->conf->wpa && wpa_ie) {
+ 		enum wpa_validate_result res;
++#ifdef CONFIG_EXTERNAL_RSN_AUTH
++		/*
++		 * In external RSN authenticator mode the CAPsMAN manager has
++		 * already validated the station's RSN IE and owns the PMK.
++		 * Running the local validation here fails for SAE with
++		 * "No PMKSA cache entry found" and rejects the association
++		 * (status 53 INVALID_PMKID) before the manager can run the
++		 * 4-way.  Keep the MFP station flag and skip the local
++		 * validation; the PSK path keeps the old behaviour because
++		 * external_rsn_sae is only set for SAE/OWE VAPs.
++		 */
++		if (hapd->conf->external_rsn_auth &&
++		    hapd->conf->external_rsn_sae) {
++			wpa_printf(MSG_DEBUG,
++				   "EXT-AUTH: skipping local RSN IE validation for "
++				   MACSTR " (external PMK)", MAC2STR(sta->addr));
++			if (hapd->conf->ieee80211w !=
++			    NO_MGMT_FRAME_PROTECTION)
++				sta->flags |= WLAN_STA_MFP;
++			goto skip_sae_owe;
++		}
++#endif /* CONFIG_EXTERNAL_RSN_AUTH */
+ #ifdef CONFIG_IEEE80211BE
+ 		struct mld_info *info = &sta->mld_info;
+ 		bool init = !sta->wpa_sm;

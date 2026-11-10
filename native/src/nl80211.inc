@@ -440,6 +440,26 @@ static int nl_sta_authorize(int ifindex, const uint8_t mac[6])
     return nl_send_ack(g_nl_cmd_fd, &m);
 }
 
+/* W46: PMF station flag.  hostapd would normally set this from the local
+ * RSN state machine, but in external-SAE mode the manager owns the RSN
+ * state and hostapd never sees the negotiated MFPC.  The manager's RSN caps
+ * are authoritative: set the kernel flag before authorizing the station so
+ * the driver accepts/uses BIP-protected management frames. */
+static int nl_sta_mfp(int ifindex, const uint8_t mac[6])
+{
+    if (ifindex <= 0) return -EINVAL;
+    struct nl_buf m;
+    struct nl80211_sta_flag_update upd;
+    memset(&upd, 0, sizeof(upd));
+    upd.mask = 1u << NL80211_STA_FLAG_MFP;
+    upd.set  = 1u << NL80211_STA_FLAG_MFP;
+    nlb_init(&m, NL80211_CMD_SET_STATION, NLM_F_ACK);
+    nlb_u32(&m, NL80211_ATTR_IFINDEX, (uint32_t)ifindex);
+    nlb_put(&m, NL80211_ATTR_MAC, mac, 6);
+    nlb_put(&m, NL80211_ATTR_STA_FLAGS2, &upd, sizeof(upd));
+    return nl_send_ack(g_nl_cmd_fd, &m);
+}
+
 /* Inject a bare EAPOL frame (EAPOL header first) to one station. */
 static int nl_control_port_tx(int ifindex, const uint8_t mac[6],
                               const uint8_t *eapol, size_t len)

@@ -94,6 +94,13 @@ static int run_once(struct cfg *c)
     /* W8: bind one ext-auth socket per BSS before the manager provisions any
      * VAP, and adopt anything that survived the previous connection. */
     cap_extmux_start(c, &ssl, &dc);
+    if (c->ext_auth_dir)
+        printf("hostapd: external_rsn_ie=%s external_rsn_sae=%s "
+               "EXT_AUTH_MGMT_TX=%s (probed /usr/sbin/wpad|hostapd)\n",
+               hostapd_has_rsn_override() ? "yes" : "no",
+               hostapd_has_sae_override() ? "yes" : "no",
+               hostapd_has_mgmt_tx() ? "yes" : "no");
+    fflush(stdout);
     /* W34: journal repair even when ext-auth is disabled (idempotent). */
     own_restore_vaps(c);
 

@@ -12,6 +12,10 @@ Apply order is lexicographic, after the stock OpenWrt patches:
 | `9997-external-rsn-ie.patch` | `external_rsn_ie=<hex>`; replaces the generated RSN IE with the manager's exact bytes (the station rejects M3 on any difference) | yes for PSK-free |
 | `9998-external-rsn-eapol-rx.patch` | relay STA EAPOL from `ieee802_1x_receive()` (the path mac80211 uses), not only from the driver event | yes |
 | `9999-external-rsn-no-psk.patch` | in external mode, discard every PSK field from the config and allow a passphrase-free BSS; reject SAE/OWE/802.1X there | yes |
+| `9999a-external-rsn-sae.patch` | `external_rsn_sae=1`; allow SAE/OWE in external mode, suppress the local SAE exchange, skip local `wpa_validate_wpa_ie()` (the manager already validated it and owns the PMK), set the MFP station flag, accept an `external_rsn_ie` blob with RSNXE, and add `EXT_AUTH_MGMT_TX` so the manager's 0x2019 Auth frames go out through the owning BSS | yes for SAE/OWE |
+
+`9999a` sorts immediately after `9999` in the C locale (`-` < `a`), so it is
+applied after the PSK-only guard it relaxes.
 
 ## Build
 
@@ -24,9 +28,14 @@ cd $SDK && make package/network/services/hostapd/compile
 ```
 
 `capagent` probes the resulting binary for `external_rsn_ie` and only emits the
-option when it is present, so an unpatched wpad keeps working.
+option when it is present, so an unpatched wpad keeps working.  The same probe
+pattern gates `external_rsn_sae` and `EXT_AUTH_MGMT_TX`; a binary without them
+keeps the WPA2-PSK-only behaviour (SAE VAPs are left open/unsupported instead
+of receiving an unknown config keyword).
 
 ## What the CAP sends to hostapd
+
+WPA2-PSK (unchanged):
 
 ```
 ssid=<from 0x6016 tag 0x03>
@@ -41,4 +50,26 @@ wpa_group_rekey=0
 wpa_ptk_rekey=0
 ```
 
-No `wpa_passphrase`, no `wpa_psk_file`: the passphrase stays on the manager.
+SAE/OWE (only with `9999a` in the binary):
+
+```
+ssid=<from 0x6016 tag 0x03>
+wpa=2
+wpa_key_mgmt=SAE
+rsn_pairwise=CCMP
+group_mgmt_cipher=AES-128-CMAC
+ieee80211w=2
+sae_pwe=2
+external_rsn_auth=1
+external_rsn_sae=1
+external_rsn_ie=<RSN IE + RSNXE from 0x6016, verbatim>
+ext_auth_socket=/var/run/hostapd/ext-auth-<ifname>
+wpa_group_rekey=0
+wpa_ptk_rekey=0
+```
+
+No `wpa_passphrase`, no `wpa_psk_file`, no `sae_password`: the passphrase stays
+on the manager.  `external_rsn_sae=1` makes hostapd drop the local SAE frame and
+skip local RSN-IE validation; the manager's `0x2019` Auth response is sent with
+`EXT_AUTH_MGMT_TX`, and capagent sets `NL80211_STA_FLAG_MFP` before
+`AUTHORIZED`.
