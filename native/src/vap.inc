@@ -604,3 +604,55 @@ static void vap_provision(int port, const uint8_t *body, uint16_t len,
     if (vap_hostapd_start(port, ifname, phy, vapid, body, len, vp, c) == 0)
         vp->ap_started = 1;
 }
+
+/* 0x600c destroy.  Always ack, always release our bookkeeping (the vapid
+ * map is only 16 slots per radio: leaking one per destroy wedged the second
+ * create cycle).  Netdev/hostapd teardown only for objects we created and
+ * only in own mode. */
+static void vap_destroy(int port, const struct cfg *c)
+{
+    int phy = (port >> 8) & 0x0f;
+    int vapid = port & 0x0f;
+    uint8_t mac[6] = {0};
+    struct vap *vp;
+
+    if (phy >= MAX_RADIOS) return;
+    vp = &g_vap[phy % MAX_RADIOS][vapid & 0x0f];
+    if (vp->used) memcpy(mac, vp->bssid, 6);
+
+    printf("0x600c: destroy port=0x%04x %s%s\n", port,
+           vp->used && vp->ifname[0] ? vp->ifname : "(unbound)",
+           wl_legacy() ? " -- legacy read-only, only our bookkeeping" : "");
+    fflush(stdout);
+
+    if (g_extmux) {
+        extmux_del_vap(g_extmux, (uint16_t)port);
+        extmux_del_vap(g_extmux, (uint16_t)((phy << 8) | vapid));
+    }
+    if (vp->used && vp->extfd >= 0) close(vp->extfd);
+    pmap_del(port);
+    pmap_del((phy << 8) | vapid);
+    vchan_del((phy << 8) | vapid);
+
+    g_vap_started[phy % MAX_RADIOS][vapid & 0x0f] = 0;
+    if (wl_own() && c->vap_teardown && vp->used) {
+        if (vp->ap_started) vap_hostapd_stop(vp);
+        /* Drop any AF_PACKET bridge client before the netdev disappears. */
+        for (int i = 0; i < g_ndp; ) {
+            if (g_dp[i].ifindex == vp->ifindex) {
+                close(g_dp[i].fd);
+                g_dp[i] = g_dp[--g_ndp];
+            } else {
+                i++;
+            }
+        }
+        if (vp->we_created) vap_netdev_del(vp->ifname);
+    }
+
+    if (mac[0] | mac[1] | mac[2] | mac[3] | mac[4] | mac[5])
+        vapid_release(phy, mac);
+
+    memset(vp, 0, sizeof(*vp));
+    vp->extfd = -1;
+    vp->l2fd = -1;
+}

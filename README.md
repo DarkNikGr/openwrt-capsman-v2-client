@@ -381,9 +381,35 @@ tree; stock RouterOS 7.25.1 does not. The SSID/RSN in `0x6016` is received and
 acked but does not contain the passphrase. Use the boot-pull fallback (or a
 local key) for local forwarding.
 
+### Ownership: legacy UCI vs manager-only (W33)
+
+At the start of every session capagent counts the `config wifi-iface` sections
+in `/etc/config/wireless`:
+
+* **one or more** → *legacy* mode. netifd/wpad owns every wireless interface.
+  capagent never creates, deletes, up/down's or tunes a netdev, never starts or
+  stops hostapd, never installs keys and never writes UCI or calls
+  `network.wireless reconf`. `APPLY=yes` is ignored. It still joins the manager
+  and reports `0x2018` through an existing monitor VIF if one is present.
+* **zero** → *own* mode. capagent creates the AP netdevs on `0x500b`, starts a
+  hostapd BSS per `0x6016`, and tears both down on `0x600c`.
+
+Check the decision without touching anything:
+
+```sh
+capagent --check-wireless                          # /etc/config/wireless
+capagent --check-wireless --wireless-config FILE   # any fixture
+```
+
+To hand the radios back to netifd after a manager-only run, stop capagent
+first and remove its leftovers (`/var/run/vap-*.pid`, `pkill -f /tmp/vap-`),
+then write the legacy `/etc/config/wireless` and run `wifi reload`.
+
 Developer-only flags in the client (not wired into the init script):
-`--eapol-leg tls|datachan|both`, `--crypto-selftest`, `--dc-*` test overrides,
-and the `-DCAPAGENT_LAB` harness (`--lab-ap`, `--lab-ssid`, `--lab-chan`).
+`--eapol-leg tls|datachan|both`, `--crypto-selftest`, `--selftest-policy`,
+`--wireless-owner own|legacy` (test override), `--no-vap-teardown`,
+`--dc-*` test overrides, and the `-DCAPAGENT_LAB` harness (`--lab-ap`,
+`--lab-ssid`, `--lab-chan`).
 
 ## Verify
 

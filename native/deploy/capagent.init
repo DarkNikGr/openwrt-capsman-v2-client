@@ -52,6 +52,11 @@ start_service() {
 	[ -n "${STATE_FILE:-}" ] && set -- "$@" --state-file "${STATE_FILE}"
 	[ -n "${FOURWAY_TIMEOUT:-}" ] && set -- "$@" --fourway-timeout "${FOURWAY_TIMEOUT}"
 	[ -n "${M1_RETRY:-}" ] && set -- "$@" --m1-retry "${M1_RETRY}"
+	# Ownership policy (W33).  WIRELESS_OWNER=auto is the production mode:
+	# a legacy wifi-iface config makes the agent read-only.
+	[ -n "${WIRELESS_CONFIG:-}" ] && set -- "$@" --wireless-config "${WIRELESS_CONFIG}"
+	[ -n "${WIRELESS_OWNER:-}" ] && set -- "$@" --wireless-owner "${WIRELESS_OWNER}"
+	[ "${VAP_TEARDOWN:-yes}" = no ] && set -- "$@" --no-vap-teardown
 	[ "${DATAPATH_BRIDGE:-no}" = yes ] && set -- "$@" --datapath-bridge
 	[ -n "${BCAST:-}" ] && set -- "$@" --bcast "${BCAST}"
 	[ -n "${VAP_MTU:-}" ] && set -- "$@" --vap-mtu "${VAP_MTU}"

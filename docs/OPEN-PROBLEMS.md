@@ -24,6 +24,8 @@ Current reality: control plane joins, but the BSSes come from a local
 | F8 | The CAP can create the netdevs itself from `0x500b` and spawn hostapd from `0x6016` (SSID + RSN IE + channel, `external_rsn_auth=1`, no PSK). Live: 8/8 created, 8 hostapd, the 4 x 2.4 GHz BSSes carry the manager's SSIDs. | `src/vap.inc`, commit 1bd9d78 |
 | F9 | The EAPOL relay works on the real RB1100: STA M2 -> `0x201b` -> manager -> `0x201c` M3 back. | live log `EXT-AUTH: EAPOL ... -> 0x201b` |
 | F10 | Remaining blocker: the station rejects M3 because hostapd's beacon RSN IE (caps `0x008c`, no GMCS) differs from the manager's (`0x0080` + BIP-CMAC `00:0f:ac:06`). | station log `IE in 3/4 msg does not match` |
+| F11 | **Ownership invariant (W33)**: a legacy `/etc/config/wireless` with `>=1 wifi-iface` makes capagent read-only (no netdev create/delete/up/down/tune, no hostapd start/stop, no key install, no UCI write/reconf); `0 wifi-iface` makes it own the radios. One predicate (`wl_legacy()`), one place per side effect. | `native/src/policy.inc`, `--selftest-policy`, `docs/W33-OWNERSHIP.md` |
+| F12 | `0x600c` now releases the vapid/port/BSS bookkeeping (it used to leak a slot per destroy and wedge at 16), and tears down netdev/hostapd only for objects capagent created. | `vap_destroy()`, `docs/W33-OWNERSHIP.md` §R3 |
 
 ## Open blockers (ranked)
 
@@ -31,9 +33,16 @@ Current reality: control plane joins, but the BSSes come from a local
    regenerates it with different capabilities and without the group-management
    cipher. Needs a forced RSN IE in the generated hostapd config (W21/W24).
 2. **5 GHz hostapd start fails** on the MT7612E (DFS/regulatory/centre-freq);
-   the driver refuses the AP. 2.4 GHz is up.
-3. **VAP lifecycle** — `0x600c` never stops hostapd/deletes the netdev/releases
-   the id, so a second create cycle wedges (W25/W28).
+   the driver refuses the AP. 2.4 GHz is up. (W33: reproduced on the live
+   device — `Match already configured` for the first BSS, `Resource busy` for
+   the rest; the 5 GHz wiphy allows only 4 interfaces total
+   (`iw list`), i.e. one hostapd **per radio** with `bss=` sections is the
+   structural fix, not one process per BSS.)
+3. **VAP lifecycle** — W33 fixed the leak: `0x600c` releases the vapid/port/BSS
+   bookkeeping and (own mode only) stops our hostapd and deletes our netdev.
+   Still open: reuse of a VAP id across a *manager-driven* SSID change on the
+   same port without a destroy, and validating the whole cycle against a
+   genuine CAP capture.
 4. **Zero-touch boot** — client + certificate + hostapd must live in ROM
    (custom image), otherwise a factory reset removes them.
 5. **No manual fallback allowed** — no SSH-driven bootstrap, no local
