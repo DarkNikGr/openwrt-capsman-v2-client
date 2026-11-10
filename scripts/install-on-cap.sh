@@ -11,7 +11,13 @@
 set -eu
 
 DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
-BIN="${DIR}/capagent-mipsel"
+ARCH=$(uname -m)
+case "$ARCH" in
+    mips*)   BIN="${DIR}/capagent-mipsel" ;;
+    aarch64) BIN="${DIR}/capagent-aarch64" ;;
+    *)       BIN="${DIR}/capagent-${ARCH}" ;;
+esac
+[ -x "$BIN" ] || BIN="${DIR}/capagent-mipsel"
 CONF_EXAMPLE="${DIR}/capagent.conf.example"
 PROG=/usr/sbin/capagent
 CONF=/etc/cap/capagent.conf
