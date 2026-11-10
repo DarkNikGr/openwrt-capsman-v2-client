@@ -1,23 +1,27 @@
 # W56 — 5 GHz per-BSS rebase onto current `main`
 
-Status: rebased, built and tested.  Base `f6cd5c8` (`origin/main`, unchanged
-when checked), W54 change `a15c9c3`, branch `w56-5ghz-rebased`.
+Status: rebased, built and tested.  Base `7bfec3a` (`origin/main` at push
+time), W54 change `a15c9c3`, branch `w56-5ghz-rebased`.
 
 ## Rebase result
 
-W54 was already a direct child of `f6cd5c8`, so the rebase itself is a
-descendant-preserving cherry-pick with no tree change:
+`origin/main` advanced while W56 was running: it merged W54 as `7bfec3a`
+(`merge: 5 GHz bring-up fix (W54)`), whose tree is identical to `a15c9c3`.
+The W56 branch was therefore rebased from `f6cd5c8` onto `7bfec3a` and the
+duplicate W54 cherry-pick was dropped:
 
 ```
-f6cd5c8 (origin/main)
-  + e9d5018  W54: mt76x02 BSS index plan + noscan (cherry-pick of a15c9c3)
-  + <next>   W56: narrow noscan, reserve BSS index 0 for VAPs
+7bfec3a (origin/main)
+  |  merge: W54 (tree == a15c9c3)
+  + bdc2b91  W56: narrow noscan, reserve BSS index 0 for VAPs
+  + f7c76ab  docs: W56 record and patch series
 ```
 
 No commit rewrites main's ownership work (`src/ownership.inc`,
 `src/policy.inc`, `src/netifd_status.inc`, ubus detection).  `own_claim()`
 still receives the address the netdev really carries (the W54 real BSSID),
 and `0xd00b` reports that same address.
+
 
 ## What W56 changes on top of W54
 
@@ -56,9 +60,13 @@ $ cat /sys/class/ieee80211/phy1/addresses
 ...
 ```
 
-### 3. Unchanged W54 guarantees
+### 3. Allocator guarantees
 
-* A manager BSSID that is legal and whose index is free is used unchanged.
+* A manager BSSID is used unchanged only when it is **exactly** one of the
+  addresses the phy publishes and its index is free.  Sharing bytes 1..5
+  with the radio MAC is not sufficient (W54's check): a byte 0 outside the
+  plan could still select index 0 and make the driver reprogram the radio
+  base MAC.
 * Otherwise the first free address from the phy plan is used and the real
   address is returned in `0xd00b` (body element `0x08`); the manager MAC
   remains known in `g_vmap` for later `0x6016`/`0x600c`/`0x201f`.
@@ -86,7 +94,7 @@ Both variants build with `-Wall -Wextra` and pass the same checks.  Patch
 files for the two bases live next to this document:
 
 ```
-docs/W56/patches/main/  0001-w54..., 0002-w56...
+docs/W56/patches/main/  0001-w56...   (main already contains W54)
 docs/W56/patches/w52/   0001-w54..., 0002-w56...
 ```
 
@@ -101,6 +109,18 @@ docs/W56/patches/w52/   0001-w54..., 0002-w56...
   * ch52/ch100 VHT80 -> **no** `noscan=1`, VHT80 centre frequency kept;
   * ch36 HT40 -> no `noscan=1`; ch6 HT40 -> no `noscan=1`;
   * output identical for the `main` and `w52` trees.
-* Read-only device check: phy1 is `mt76x2e`, `addresses` index 0 is the radio
-  MAC `28:d1:27:1b:2d:83`.  No live writes were made: the host lock was
-  free, but another track's `capagent`/guard was active on the device.
+* `bssidx_test`: the eight addresses the live phy1 publishes map to unique
+  indices 0..7; index 0 is the radio MAC and is reserved for VAP0.
+* `alloc_test`, run on the live device (read-only, no netdev/hostapd):
+  * with an empty-phy model: legal base `28:…:83` and legal index-1
+    `2a:…:83` are kept; off-plan `28:…:92` -> `2e:…:83` (index 2);
+    off-plan `3a:…:a1` -> `22:…:83` (index 3); monitor -> `26:…:83`
+    (index 4, never index 0);
+  * with the live phy state (another agent held indices 0/1): both legal
+    requests are remapped because they are not free, which is the required
+    "legal **and free**" rule.
+* Device check: phy1 is `mt76x2e`, `addresses` index 0 is the radio MAC
+  `28:d1:27:1b:2d:83`.  No wireless/netdev writes were made: the host lock
+  was free, but another track's `capagent`/guard was active on the device,
+  so only read-only sysfs inspection and the in-memory allocator harness
+  were run.

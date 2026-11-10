@@ -1,0 +1,771 @@
+From a67ef471a1c9cd46e9f55a20654ff218f4bda7ea Mon Sep 17 00:00:00 2001
+From: t <t@t>
+Date: Wed, 11 Nov 2026 00:13:54 +0200
+Subject: [PATCH 1/2] vap: mt76x02 BSS index plan + noscan so 5 GHz per-BSS
+ VAPs start (W54)
+
+The MT7612E (mt76x02) derives its hardware BSS index from byte 0 of the
+vif address, so a manager BSSID plan that varies only the last byte gives
+every VAP the same index and hostapd fails to open netdev 2..N with
+Resource busy.  netdevs are now created on an address from the driver's
+own /sys/class/ieee80211/phyN/addresses plan, the real address is reported
+in 0xd00b and the manager identity stays known for later 0x6016/0x600c.
+
+A VHT80 BSS also needs HT40, which makes hostapd run its 40 MHz
+coexistence scan; on a one-channel phy that scan returns -EBUSY and the
+HT20 fallback drops the VHT80 centre frequency.  noscan=1 skips only the
+scan (same knob netifd uses as ht_coex=0).
+
+The start path now waits (bounded) for AP-ENABLED and kills the instance
+on timeout, so a stuck BSS can no longer hold the wiphy for the next one.
+The mgmt monitor gets a free legal address on mt76x02 and is never created
+on the 4-interface MT7603E.
+---
+ docs/W54-MT7612E-PERBSS.md | 114 ++++++++++++++
+ native/capagent.c          |   1 +
+ native/src/channels.inc    | 314 ++++++++++++++++++++++++++++++++++---
+ native/src/mgmt.inc        |  22 +++
+ native/src/vap.inc         |  84 +++++++++-
+ 5 files changed, 510 insertions(+), 25 deletions(-)
+ create mode 100644 docs/W54-MT7612E-PERBSS.md
+
+diff --git a/docs/W54-MT7612E-PERBSS.md b/docs/W54-MT7612E-PERBSS.md
+new file mode 100644
+index 0000000..6f860fb
+--- /dev/null
++++ b/docs/W54-MT7612E-PERBSS.md
+@@ -0,0 +1,114 @@
++# W54 — 5 GHz per-BSS VAPs on the MT7612E (mt76x02)
++
++Status: implemented, local tests pass.  Reviewed against OpenWrt 24.10,
++kernel 6.6.73, hostapd 2.12-devel (OpenWrt `300-noscan.patch`).
++
++## Symptom
++
++Manager-only CAPsMAN v2 provisioning of 4 BSSes per radio brings up all four
++2.4 GHz BSSes, but on the MT7612E only the first one reaches `AP-ENABLED`.
++The later hostapd instances print
++
++```
++Could not set interface phy1-apN flags (UP): Resource busy
++nl80211 driver initialization failed.
++phy1-apN: AP-DISABLED
++```
++
++and the one that does start can sit in `HT_SCAN` while holding the wiphy, so
++every other start blocks in `D` state (`SIOCSIFFLAGS`, cfg80211 netlink).
++This is not an interface-count limit: the same phy runs 4 x VHT80 BSSes
++under netifd, and `iw phy phy1 info` reports `total <= 8`.
++
++## Three independent causes
++
++### 1. `mt76x02` derives the hardware BSS index from byte 0 of the vif MAC
++
++`mt76x02_add_interface()` (mt76x02_util.c):
++
++```c
++	if (vif->addr[0] & BIT(1))
++		idx = 1 + (((dev->mphy.macaddr[0] ^ vif->addr[0]) >> 2) & 7);
++	...
++	if (dev->mt76.vif_mask & BIT_ULL(idx) ||
++	    (vif->type != NL80211_IFTYPE_STATION && idx > 7))
++		return -EBUSY;
++```
++
++Only byte 0 (bits 2..4) selects the index.  A BSSID plan that keeps byte 0
++constant and varies only the last byte maps every VAP to the same index; the
++first succeeds and the rest fail in `dev_open()` with `-EBUSY`.
++
++`mt7603e` (2.4 GHz) allocates the first free index
++(`__ffs64(~dev->mt76.vif_mask)`), independent of the MAC, which is why only
++the 5 GHz radio failed.
++
++The driver publishes the legal set in
++`/sys/class/ieee80211/phyN/addresses` (8 addresses, bytes 1..5 on the radio
++base, byte 0 encoding the index).  A manager MAC that is already one of them
++is used unchanged; on a collision the first free legal address is used and
++the real address is returned in `0xd00b`.  Only byte 0 bits 2..4 change, so
++the driver never has to reprogram the radio base MAC.
++
++### 2. The 40 MHz coexistence scan on a single-channel phy
++
++With `ieee80211n=1`, `ht_capab=[HT40+]` (required for VHT80 centre
++frequency) and `secondary_channel != 0`, hostapd runs
++`ieee80211n_check_40mhz()` before enabling the BSS.  The offchannel scan is
++refused with `-EBUSY` when another interface exists on the phy, or never
++completes.  After 15 retries hostapd falls back to HT20, which cannot carry
++the VHT80 centre frequency:
++
++```
++80/80+80 MHz: no second channel offset
++Could not set channel for kernel driver
++AP-DISABLED
++```
++
++`noscan=1` (OpenWrt `300-noscan.patch`, `conf->noscan`) makes
++`ieee80211n_check_40mhz()` return immediately; HT40/VHT80 stay advertised.
++netifd sets the same knob as `ht_coex=0` in `/var/run/hostapd-phyN.conf`.
++
++### 3. A monitor VIF is a real driver interface
++
++On the MT7603E a monitor consumes one of the four driver slots
++(`MT7603_MAX_INTERFACES`), so with four VAPs it must not be created.  On
++mt76x02 it does not take a BSS index but it must not carry the radio MAC,
++which is index 0 / VAP0's address, so it gets its own legal address.
++
++## Implementation
++
++| file | change |
++|---|---|
++| `src/vap.inc` | `noscan=1` for HT40/VHT BSSes; start gate (flock) around hostapd; log-based `AP-ENABLED`/`DFS-CAC-START` wait bounded to 12 s with hard kill; pid read after the wait; never unlink a pid file that may belong to a live instance |
++| `src/channels.inc` | mt76x02 address allocator (`vap_bssid_alloc`, `vap_bssid_free`, `vap_bssid_pick_free`), seeded from the interfaces already on the phy, with `phy_is_mt76x02`/`phy_max_vifs`; `g_vmap` keeps manager MAC and real BSSID; `vapid_for` matches both; `vapid_release`/`vapid_gc` free the index |
++| `src/mgmt.inc` | monitor gets a free legal address on mt76x02 and is never created on a 4-interface radio |
++| `capagent.c` | `<sys/file.h>` |
++
++The start gate matters on top of the address fix: hostapd `-B` daemonizes
++after `hostapd_driver_init` but before `hostapd_setup_interface()` returns,
++so a pid file proves nothing.  Waiting for the log line and killing on
++timeout is what makes "started" mean "beaconing" and keeps one bad BSS from
++poisoning the next start on the same wiphy.
++
++## Tests
++
++* `make check`: crypto selftest, 27 policy checks, 30 netifd checks — pass.
++* Live one-variable matrix on phy1 (real hostapd, 80 MHz, ch36):
++  * driver address plan, no scan (`noscan=1`): 4/4
++  * driver address plan, scan allowed: 4/4 when the phy is otherwise idle,
++    `HT_SCAN` stalls as soon as the phy is busy — hence `noscan=1`
++  * identical byte-0 plan: 1/4, `Resource busy` for the rest
++  * driver plan + monitor: 4/4
++* Manager-only CAPsMAN v2 peer: all 8 `0xd00b` accepted, the 5 GHz VAPs get
++  indices 0/2/3/4 and the 2.4 GHz four VAPs start; see `REPORT.md` in the
++  work directory for the full transcript and the interference caveat.
++
++## Residual risks
++
++1. A manager that requires the exact BSSID it sent will see a different one
++   on mt76x02.  The CAP reports the real address in `0xd00b`.
++2. `noscan=1` disables OBSS 40 MHz coexistence handling; with one channel
++   per phy that handling was not functional.
++3. DFS channels still need CAC; `DFS-CAC-START` counts as started and is not
++   subject to the 12 s bound.
+diff --git a/native/capagent.c b/native/capagent.c
+index 0bad4a6..6a000a9 100644
+--- a/native/capagent.c
++++ b/native/capagent.c
+@@ -27,6 +27,7 @@
+ #include <netdb.h>
+ #include <netinet/in.h>
+ #include <sys/ioctl.h>
++#include <sys/file.h>        /* W54: flock for the per-phy hostapd start gate */
+ #include <linux/netlink.h>
+ #include <linux/genetlink.h>
+ #include <linux/nl80211.h>
+diff --git a/native/src/channels.inc b/native/src/channels.inc
+index 9bf41f0..5ff647b 100644
+--- a/native/src/channels.inc
++++ b/native/src/channels.inc
+@@ -115,23 +115,241 @@ static int vap_total_live(void)
+     return n;
+ }
+ 
+-static struct { int used; uint8_t mac[6]; } g_vmap[MAX_RADIOS][16];
++static struct {
++    int used;
++    uint8_t mac[6];             /* identity the manager uses (0x08) */
++    uint8_t bssid[6];           /* address the netdev really carries (W54) */
++} g_vmap[MAX_RADIOS][16];
++
++/* ---- W54: legal BSS addresses on an MT7612E (mt76x02) ----------------
++ *
++ * mt76x02_add_interface() derives the hardware BSS index from the first
++ * octet of the vif address:
++ *      idx = (addr[0] & 0x02) ? 1 + (((base[0] ^ addr[0]) >> 2) & 7) : 0
++ * and returns -EBUSY when that index is already in use (mt76x02_util.c).
++ * A CAPsMAN BSSID plan that keeps byte 0 the same for every VAP (varying
++ * only the last byte, as several managers and our own test peers do) makes
++ * every VAP want the same index: the first BSS starts, every later one
++ * fails in dev_open() with EBUSY, which hostapd reports as
++ *   Could not set interface phy1-apN flags (UP): Resource busy
++ * and which leaves the phy wedged (later starts block in D state).  The
++ * mgmt monitor cm<N> carries the radio MAC, i.e. index 0, and collides with
++ * VAP0 the same way.
++ *
++ * The driver publishes the legal addresses in
++ * /sys/class/ieee80211/phyN/addresses.  A manager MAC that is already one
++ * of them (bytes 1..5 on the radio base) is used unchanged when its index
++ * is free.  Otherwise, or on a collision, we pick a free address from that
++ * list: only byte 0 bits 2..4 change, so the driver never has to reprogram
++ * the radio base MAC (it only allows that for the very first interface).
++ */
++static int g_bss_seeded[MAX_RADIOS];
++static uint8_t g_bss_used[MAX_RADIOS];   /* bit n = BSS index n claimed */
++
++static int phy_is_mt76x02(int phy)
++{
++    char p[96], b[128];
++    snprintf(p, sizeof(p), "/sys/class/ieee80211/phy%d/device/driver",
++             real_phy(phy));
++    ssize_t n = readlink(p, b, sizeof(b) - 1);
++    if (n <= 0) return 0;
++    b[n] = 0;
++    char *s = strrchr(b, '/');
++    s = s ? s + 1 : b;
++    return !strcmp(s, "mt76x2e") || !strcmp(s, "mt76x0e") ||
++           !strcmp(s, "mt76x2u") || !strcmp(s, "mt76x0u");
++}
++
++/* W54: how many driver interfaces the phy can hold.  MT7603E has
++ * MT7603_MAX_INTERFACES = 4 (monitor included), mt76x02 has 8. */
++static int phy_max_vifs(int phy)
++{
++    char p[96], b[128];
++    snprintf(p, sizeof(p), "/sys/class/ieee80211/phy%d/device/driver",
++             real_phy(phy));
++    ssize_t n = readlink(p, b, sizeof(b) - 1);
++    if (n <= 0) return 0;
++    b[n] = 0;
++    char *s = strrchr(b, '/');
++    s = s ? s + 1 : b;
++    if (!strcmp(s, "mt7603e")) return 4;
++    if (!strcmp(s, "mt76x2e") || !strcmp(s, "mt76x0e") ||
++        !strcmp(s, "mt76x2u") || !strcmp(s, "mt76x0u")) return 8;
++    return 0;
++}
++
++static int phy_base_mac(int phy, uint8_t out[6])
++{
++    char p[96], b[64];
++    unsigned v[6];
++    snprintf(p, sizeof(p), "/sys/class/ieee80211/phy%d/macaddress",
++             real_phy(phy));
++    FILE *f = fopen(p, "r");
++    if (!f) return -1;
++    if (!fgets(b, sizeof(b), f)) { fclose(f); return -1; }
++    fclose(f);
++    if (sscanf(b, "%x:%x:%x:%x:%x:%x",
++               &v[0], &v[1], &v[2], &v[3], &v[4], &v[5]) != 6)
++        return -1;
++    for (int i = 0; i < 6; i++) out[i] = (uint8_t)v[i];
++    return 0;
++}
++
++/* The eight addresses the driver accepts, in index order (idx 0 first). */
++static int phy_legal_addrs(int phy, uint8_t out[8][6])
++{
++    char p[96], line[128];
++    snprintf(p, sizeof(p), "/sys/class/ieee80211/phy%d/addresses",
++             real_phy(phy));
++    FILE *f = fopen(p, "r");
++    if (!f) return 0;
++    int n = 0;
++    while (n < 8 && fgets(line, sizeof(line), f)) {
++        unsigned v[6];
++        if (sscanf(line, "%x:%x:%x:%x:%x:%x",
++                   &v[0], &v[1], &v[2], &v[3], &v[4], &v[5]) != 6)
++            continue;
++        for (int i = 0; i < 6; i++) out[n][i] = (uint8_t)v[i];
++        n++;
++    }
++    fclose(f);
++    return n;
++}
++
++static int bss_idx_of(const uint8_t base[6], const uint8_t mac[6])
++{
++    if (!(mac[0] & 0x02)) return 0;
++    return 1 + (((base[0] ^ mac[0]) >> 2) & 7);
++}
++
++/* Inverse of bss_idx_of(): bytes 1..5 stay on the radio base so that the
++ * driver never has to reprogram the base MAC (it only allows that for the
++ * very first interface). */
++static void bss_addr_of_idx(const uint8_t base[6], int idx, uint8_t out[6])
++{
++    memcpy(out, base, 6);
++    if (idx <= 0)
++        out[0] = (uint8_t)(base[0] & ~0x02);
++    else
++        out[0] = (uint8_t)((base[0] ^ (((idx - 1) & 7) << 2)) | 0x02);
++}
++
++/* Mark every non-station vif already on the phy (monitor, legacy APs,
++ * adopted VAPs) so the first allocation does not collide with them. */
++static void bss_seed(int r, int phy)
++{
++    uint8_t base[6];
++    if (phy_base_mac(phy, base) != 0) return;
++    DIR *d = opendir("/sys/class/net");
++    if (!d) return;
++    struct dirent *de;
++    while ((de = readdir(d)) != NULL) {
++        uint8_t m[6];
++        if (de->d_name[0] == '.') continue;
++        if (iface_phy_index(de->d_name) != real_phy(phy)) continue;
++        int idx = read_sysfs_int(de->d_name, "ifindex");
++        if (idx <= 0 || nl_get_iftype(idx) == NL80211_IFTYPE_STATION) continue;
++        if (read_sysfs_mac(de->d_name, m) != 0) continue;
++        g_bss_used[r] |= (uint8_t)(1u << bss_idx_of(base, m));
++    }
++    closedir(d);
++}
++
++/* Pick an address for a new VAP.  want = the manager's 0x08. */
++static void vap_bssid_alloc(int phy, const uint8_t want[6], uint8_t out[6])
++{
++    memcpy(out, want, 6);
++    if (!phy_is_mt76x02(phy)) return;
++    int r = phy % MAX_RADIOS;
++    uint8_t base[6], legal[8][6];
++    if (phy_base_mac(phy, base) != 0) return;
++    if (!g_bss_seeded[r]) { bss_seed(r, phy); g_bss_seeded[r] = 1; }
++
++    int nl = phy_legal_addrs(phy, legal);
++    if (nl <= 0) {                  /* older kernel: rebuild the plan */
++        for (int i = 0; i < 8; i++) bss_addr_of_idx(base, i, legal[i]);
++        nl = 8;
++    }
++    int compatible = !memcmp(want + 1, base + 1, 5);
++    if (compatible) {
++        int idx = bss_idx_of(base, want);
++        if (!(g_bss_used[r] & (1u << idx))) {
++            g_bss_used[r] |= (uint8_t)(1u << idx);
++            return;                      /* manager plan is legal: keep it */
++        }
++    }
++    for (int i = 0; i < nl; i++) {
++        int idx = bss_idx_of(base, legal[i]);
++        if (g_bss_used[r] & (1u << idx)) continue;
++        g_bss_used[r] |= (uint8_t)(1u << idx);
++        memcpy(out, legal[i], 6);
++        printf("vap: phy%d bss %02x:%02x:%02x:%02x:%02x:%02x -> "
++               "%02x:%02x:%02x:%02x:%02x:%02x (mt76x02 index %d)\n", phy,
++               want[0], want[1], want[2], want[3], want[4], want[5],
++               out[0], out[1], out[2], out[3], out[4], out[5], idx);
++        fflush(stdout);
++        return;
++    }
++    printf("vap: phy%d has no free mt76x02 BSS index for %02x:... "
++           "(keeping it: expect EBUSY)\n", phy, want[0]);
++    fflush(stdout);
++}
++
++static void vap_bssid_free(int phy, const uint8_t mac[6])
++{
++    if (!phy_is_mt76x02(phy)) return;
++    int r = phy % MAX_RADIOS;
++    uint8_t base[6];
++    if (!g_bss_seeded[r] || phy_base_mac(phy, base) != 0) return;
++    g_bss_used[r] &= (uint8_t)~(1u << bss_idx_of(base, mac));
++}
++
++/* First free legal address, for the mgmt monitor.  Returns 1 and marks the
++ * index when it found one, 0 when the phy does not need the treatment, -1
++ * when the phy is full. */
++static int vap_bssid_pick_free(int phy, uint8_t out[6])
++{
++    if (!phy_is_mt76x02(phy)) return 0;
++    int r = phy % MAX_RADIOS;
++    uint8_t base[6], legal[8][6];
++    if (phy_base_mac(phy, base) != 0) return 0;
++    if (!g_bss_seeded[r]) { bss_seed(r, phy); g_bss_seeded[r] = 1; }
++    int nl = phy_legal_addrs(phy, legal);
++    if (nl <= 0) {                  /* older kernel: rebuild the plan */
++        for (int i = 0; i < 8; i++) bss_addr_of_idx(base, i, legal[i]);
++        nl = 8;
++    }
++    for (int i = 0; i < nl; i++) {
++        int idx = bss_idx_of(base, legal[i]);
++        if (g_bss_used[r] & (1u << idx)) continue;
++        g_bss_used[r] |= (uint8_t)(1u << idx);
++        memcpy(out, legal[i], 6);
++        return 1;
++    }
++    return -1;
++}
++
+ 
+ static int vapid_lookup(int phy, const uint8_t mac[6])
+ {
+     int r = phy % MAX_RADIOS;
+     for (int i = 0; i < 16; i++)
+-        if (g_vmap[r][i].used && !memcmp(g_vmap[r][i].mac, mac, 6))
++        if (g_vmap[r][i].used &&
++            (!memcmp(g_vmap[r][i].mac, mac, 6) ||
++             !memcmp(g_vmap[r][i].bssid, mac, 6)))
+             return i;
+     return -1;
+ }
+ 
++/* W54: match either identity so a 0x6016/0x600c that echoes the manager's
++ * MAC still resolves to the VAP whose hardware BSSID had to be remapped. */
+ static void vapid_claim(int phy, int vapid, const uint8_t mac[6])
+ {
+     int r = phy % MAX_RADIOS;
+     if (vapid < 0 || vapid > 15) return;
+     g_vmap[r][vapid].used = 1;
+     memcpy(g_vmap[r][vapid].mac, mac, 6);
++    memcpy(g_vmap[r][vapid].bssid, mac, 6);
+ }
+ 
+ /* A slot is free only when no allocation and no (possibly not-yet-journaled)
+@@ -160,8 +378,12 @@ static void vapid_release(int phy, const uint8_t mac[6])
+ {
+     int r = phy % MAX_RADIOS;
+     for (int i = 0; i < 16; i++)
+-        if (g_vmap[r][i].used && !memcmp(g_vmap[r][i].mac, mac, 6))
++        if (g_vmap[r][i].used &&
++            (!memcmp(g_vmap[r][i].mac, mac, 6) ||
++             !memcmp(g_vmap[r][i].bssid, mac, 6))) {
++            vap_bssid_free(phy, g_vmap[r][i].bssid);
+             memset(&g_vmap[r][i], 0, sizeof(g_vmap[r][i]));
++        }
+ }
+ 
+ /* The 0x600c path releases by id: after a reconnect the registry may have
+@@ -169,8 +391,21 @@ static void vapid_release(int phy, const uint8_t mac[6])
+ static void vapid_release_slot(int phy, int vapid)
+ {
+     int r = phy % MAX_RADIOS;
+-    if (vapid >= 0 && vapid < 16)
++    if (vapid >= 0 && vapid < 16) {
++        if (g_vmap[r][vapid].used)
++            vap_bssid_free(phy, g_vmap[r][vapid].bssid);
+         memset(&g_vmap[r][vapid], 0, sizeof(g_vmap[r][vapid]));
++    }
++}
++
++static void vapid_set_bssid(int phy, const uint8_t mac[6], const uint8_t bssid[6])
++{
++    int r = phy % MAX_RADIOS;
++    for (int i = 0; i < 16; i++)
++        if (g_vmap[r][i].used && !memcmp(g_vmap[r][i].mac, mac, 6)) {
++            memcpy(g_vmap[r][i].bssid, bssid, 6);
++            return;
++        }
+ }
+ 
+ /* First 0x0A record of a create-vap request, as {freq,width,band}. */
+@@ -195,8 +430,11 @@ static void vapid_gc(void)
+     for (int r = 0; r < MAX_RADIOS; r++)
+         for (int i = 0; i < 16; i++)
+             if (g_vmap[r][i].used &&
+-                ifindex_by_mac_ap(g_vmap[r][i].mac, r, NULL, 0) <= 0)
++                ifindex_by_mac_ap(g_vmap[r][i].bssid, r, NULL, 0) <= 0 &&
++                ifindex_by_mac_ap(g_vmap[r][i].mac, r, NULL, 0) <= 0) {
++                vap_bssid_free(r, g_vmap[r][i].bssid);
+                 g_vmap[r][i].used = 0;
++            }
+ }
+ 
+ static void createvap_response(mbedtls_ssl_context *ssl, const uint8_t hdr[10],
+@@ -221,11 +459,11 @@ static void createvap_response(mbedtls_ssl_context *ssl, const uint8_t hdr[10],
+     struct vap *vp = NULL;
+     if (vapid >= 0) {
+         vp = &g_vap[phy % MAX_RADIOS][vapid];
+-        if (!vp->used || memcmp(vp->bssid, mac, 6) != 0) {
+-            if (vp->used)
+-                vap_destroy((phy << 8) | vapid, c);
+-            else
+-                vapid_release_slot(phy, vapid);
++        /* W54: vp->bssid is the address the netdev really carries and may
++           differ from the manager's 0x08 MAC.  The g_vmap identities decide
++           whether this is the same VAP; a repeated create is idempotent. */
++        if (!vp->used) {
++            vapid_release_slot(phy, vapid);
+             vapid = -1;
+             vp = NULL;
+         }
+@@ -255,6 +493,22 @@ static void createvap_response(mbedtls_ssl_context *ssl, const uint8_t hdr[10],
+         }
+     }
+     if (!vp) return;
++    uint8_t bssid[6];
++    /* W54: pick an address this radio can actually carry (mt76x02 BSS
++     * index plan).  Both identities stay known: mac is what the manager
++     * uses, bssid is what the netdev/beacon carries.  A repeated create for
++     * the same VAP reuses its address instead of burning another index. */
++    {
++        int known = vapid_lookup(phy, mac);
++        int r = phy % MAX_RADIOS;
++        if (known >= 0 && g_vmap[r][known].used &&
++            memcmp(g_vmap[r][known].bssid, mac, 6)) {
++            memcpy(bssid, g_vmap[r][known].bssid, 6);
++        } else {
++            vap_bssid_alloc(phy, mac, bssid);
++            vapid_set_bssid(phy, mac, bssid);
++        }
++    }
+     {   /* remember which vapid owns this VLAN (needed for a2=1 keys) */
+         const uint8_t *vv = NULL; uint16_t vl = 0;
+         if (find_el(req, reqlen, 0x7d, &vv, &vl) && vl == 2)
+@@ -270,15 +524,31 @@ static void createvap_response(mbedtls_ssl_context *ssl, const uint8_t hdr[10],
+         preferred = c->ifnames[phy];
+     int managed = 0;
+     int ifindex = 0;
+-    own_claim(c, phy, vapid, preferred, mac, ifname, sizeof(ifname),
++    own_claim(c, phy, vapid, preferred, bssid, ifname, sizeof(ifname),
+               &ifindex, &managed);
+     if (ifindex < 0)
+         ifindex = 0;
+     if (!ifname[0])
+         snprintf(ifname, sizeof(ifname), "%s", pref);
+-    if (ifindex <= 0)
++    if (ifindex <= 0) {
+         printf("vap: phy=%d vapid=%d has no netdev and no name is available "
+                "(owned=%d)\n", phy, vapid, managed);
++        vap_bssid_free(phy, bssid);
++    } else {
++        /* A pre-existing/adopted netdev keeps its own address (and with it
++         * its driver BSS index); trust sysfs over our plan. */
++        uint8_t have[6];
++        if (read_sysfs_mac(ifname, have) == 0 &&
++            memcmp(have, bssid, 6) != 0) {
++            vap_bssid_free(phy, bssid);
++            memcpy(bssid, have, 6);
++            uint8_t base[6];
++            if (phy_is_mt76x02(phy) && phy_base_mac(phy, base) == 0)
++                g_bss_used[phy % MAX_RADIOS] |=
++                    (uint8_t)(1u << bss_idx_of(base, have));
++        }
++        vapid_set_bssid(phy, mac, bssid);
++    }
+ 
+     /* P0: bind the VAP to its netdev, VLAN and channel. */
+     {
+@@ -318,7 +588,7 @@ static void createvap_response(mbedtls_ssl_context *ssl, const uint8_t hdr[10],
+         if (!vp->freq) vp->freq = phy_freq_hint(phy);
+         if (!vp->freq) vp->freq = (phy & 1) ? 5180u : 2437u;
+         curfreq = vp->freq;
+-        memcpy(vp->bssid, mac, 6);
++        memcpy(vp->bssid, bssid, 6);
+         vp->ifindex = ifindex;
+         if (vp->ifname[0] && strcmp(vp->ifname, ifname)) {
+             if (vp->extfd >= 0) { close(vp->extfd); vp->extfd = -1; }
+@@ -339,23 +609,25 @@ static void createvap_response(mbedtls_ssl_context *ssl, const uint8_t hdr[10],
+             vchan_set((phy << 8) | vap, vp->freq, 1,
+                       band_code_for_freq(vp->freq));
+         printf("vap: rid=%d wid=%d vlan=%u freq=%u bssid=%02x:%02x:%02x:%02x:"
+-               "%02x:%02x ifindex=%d ifname=%s\n", phy, vapid, vp->vlan,
+-               vp->freq, mac[0], mac[1], mac[2], mac[3], mac[4], mac[5],
++               "%02x:%02x mgr=%02x:%02x:%02x:%02x:%02x:%02x ifindex=%d "
++               "ifname=%s\n", phy, vapid, vp->vlan, vp->freq,
++               bssid[0], bssid[1], bssid[2], bssid[3], bssid[4], bssid[5],
++               mac[0], mac[1], mac[2], mac[3], mac[4], mac[5],
+                ifindex, ifname);
+         fflush(stdout);
+         if (managed && c->datapath_bridge) dp_vap_open(vp);
+         if (managed && (c->mgmt_relay || c->mgmt_source))
+             mgmt_vap_add(ifindex);
+-        cap_vap_ready(phy, vapid, ifindex, ifname, mac, c);
++        cap_vap_ready(phy, vapid, ifindex, ifname, bssid, c);
+     }
+ 
+     if (c->no_ack) {
+         /* A genuine CAP sends nothing when the data channel is created OK;
+            0xD00B is only the failure path. */
+         if (ifindex > 0) {
+-            pmap_set(phy << 8 | vapid, ifindex, mac);
++            pmap_set(phy << 8 | vapid, ifindex, bssid);
+             if (vap_port_alias_ok(vap, vapid))
+-                pmap_set(phy << 8 | vap, ifindex, mac);
++                pmap_set(phy << 8 | vap, ifindex, bssid);
+         }
+         printf("0xd00b phy=%d ifname=%s (no-ack: success reply suppressed)\n",
+                phy, ifname);
+@@ -363,12 +635,12 @@ static void createvap_response(mbedtls_ssl_context *ssl, const uint8_t hdr[10],
+         return;
+     }
+     if (ifindex > 0) {
+-        pmap_set(phy << 8 | vapid, ifindex, mac);
++        pmap_set(phy << 8 | vapid, ifindex, bssid);
+         if (vap_port_alias_ok(vap, vapid))
+-            pmap_set(phy << 8 | vap, ifindex, mac);
++            pmap_set(phy << 8 | vap, ifindex, bssid);
+     }
+ 
+-    n += put_el(body+n, 0x08, mac, 6);
++    n += put_el(body+n, 0x08, bssid, 6);
+     put32(v, (uint32_t)vapid);
+     n += put_el(body+n, 0x47, v, 4);
+     put32(v, (uint32_t)ifindex);
+diff --git a/native/src/mgmt.inc b/native/src/mgmt.inc
+index 6b3d0f7..136c868 100644
+--- a/native/src/mgmt.inc
++++ b/native/src/mgmt.inc
+@@ -405,11 +405,31 @@ static int mon_create(int phy)
+     char name[32];
+     if (nl_cmd_open() != 0) return -1;
+     snprintf(name, sizeof(name), "cm%d", phy % 100);
++    /* W54: a monitor is a real driver interface on both mt76 phys.  On the
++     * 4-interface MT7603E it would take one of the four CAPsMAN VAP slots,
++     * so it is never created there while VAPs are managed.  On mt76x02 it
++     * would otherwise carry the radio MAC = BSS index 0, i.e. VAP0's slot;
++     * give it the first free legal address instead. */
++    if (phy_max_vifs(phy) == 4) {
++        printf("mon: phy%d is a 4-interface radio; not taking a VAP slot\n",
++               phy);
++        fflush(stdout);
++        return -1;
++    }
++    uint8_t mmac[6];
++    int have_m = vap_bssid_pick_free(phy, mmac);
++    if (have_m < 0) {
++        printf("mon: phy%d has no free mt76x02 BSS index; no monitor VIF\n",
++               phy);
++        fflush(stdout);
++        return -1;
++    }
+     struct nl_buf m;
+     nlb_init(&m, NL80211_CMD_NEW_INTERFACE, NLM_F_ACK);
+     nlb_u32(&m, NL80211_ATTR_WIPHY, (uint32_t)phy);
+     nlb_put(&m, NL80211_ATTR_IFNAME, name, strlen(name) + 1);
+     nlb_u32(&m, NL80211_ATTR_IFTYPE, NL80211_IFTYPE_MONITOR);
++    if (have_m > 0) nlb_put(&m, NL80211_ATTR_MAC, mmac, 6);
+     nlb_flag(&m, NL80211_ATTR_SOCKET_OWNER);
+     int r = nl_send_ack(g_nl_cmd_fd, &m);
+     if (r == -EEXIST) {
+@@ -419,12 +439,14 @@ static int mon_create(int phy)
+         nlb_u32(&m, NL80211_ATTR_WIPHY, (uint32_t)phy);
+         nlb_put(&m, NL80211_ATTR_IFNAME, name, strlen(name) + 1);
+         nlb_u32(&m, NL80211_ATTR_IFTYPE, NL80211_IFTYPE_MONITOR);
++        if (have_m > 0) nlb_put(&m, NL80211_ATTR_MAC, mmac, 6);
+         nlb_flag(&m, NL80211_ATTR_SOCKET_OWNER);
+         r = nl_send_ack(g_nl_cmd_fd, &m);
+     }
+     if (r) {
+         fprintf(stderr, "mon: NEW_INTERFACE phy=%d %s: %d (%s)\n",
+                 phy, name, r, r < 0 ? strerror(-r) : "?");
++        if (have_m > 0) vap_bssid_free(phy, mmac);
+         return -1;
+     }
+     int ifindex = if_nametoindex(name);
+diff --git a/native/src/vap.inc b/native/src/vap.inc
+index 9e0aa9c..5866baa 100644
+--- a/native/src/vap.inc
++++ b/native/src/vap.inc
+@@ -161,8 +161,10 @@ static void vap_write_channel(FILE *f, uint32_t freq, int wcode)
+         if (chan < 1 || chan > 14) chan = 6;
+         int width = (wcode == 2 || wcode == 3) ? 40 : 20;
+         fprintf(f, "hw_mode=g\nchannel=%d\nieee80211n=1\n", chan);
+-        if (width == 40)
++        if (width == 40) {
+             fprintf(f, "ht_capab=[HT40%c]\n", chan <= 7 ? '+' : '-');
++            fprintf(f, "noscan=1\n");       /* W54: no 40 MHz coex scan */
++        }
+         return;
+     }
+ 
+@@ -176,6 +178,18 @@ static void vap_write_channel(FILE *f, uint32_t freq, int wcode)
+     }
+ 
+     fprintf(f, "hw_mode=a\nchannel=%d\n", chan);
++    /* W54: never let hostapd run the 40 MHz coexistence scan
++     * (HAPD_IFACE_HT_SCAN, ieee80211n_check_40mhz()).  On mt76x02 one
++     * wiphy = one channel, so the offchannel scan that hostapd issues
++     * before enabling an HT40/VHT BSS returns -EBUSY (or never completes)
++     * as soon as another interface exists on the phy.  After 15 retries
++     * hostapd falls back to HT20, which then cannot carry the VHT80
++     * centre frequency ("80/80+80 MHz: no second channel offset") and the
++     * BSS ends AP-DISABLED -- the W38 "5 GHz per-BSS hostapd hangs in D"
++     * symptom.  noscan=1 skips only the scan; HT40 and VHT80 stay.  The
++     * stock OpenWrt hostapd already ships this option (300-noscan.patch)
++     * and netifd sets ht_coex=0 for the same reason. */
++    if (width >= 40) fprintf(f, "noscan=1\n");
+     if (g_vap_country && g_vap_country[0])
+         fprintf(f, "country_code=%s\nieee80211d=1\n%s\n", g_vap_country,
+                 vap_is_dfs_chan(chan) ? "ieee80211h=1" : "");
+@@ -241,10 +255,37 @@ static void vap_bridge_if_present(const char *ifname, unsigned vlan,
+     (void)ifname;
+ }
+ 
++/* W54: serialise hostapd starts per agent and only report success when the
++ * BSS really reached AP-ENABLED.  hostapd -B daemonizes after driver init
++ * but before eloop setup, so a pid file exists while the interface can
++ * still be in HT_SCAN/DFS; the next start on the same phy then gets EBUSY
++ * or blocks in D state.  The lock plus the bounded wait (and the hard kill
++ * on timeout) keep one bad BSS from poisoning the whole radio. */
++static int vap_wait_ap_enabled(const char *logf, int ms)
++{
++    for (int i = 0; i < ms / 100; i++) {
++        FILE *f = fopen(logf, "r");
++        if (f) {
++            char b[4096];
++            size_t n = fread(b, 1, sizeof(b) - 1, f);
++            fclose(f);
++            b[n] = 0;
++            if (strstr(b, "AP-ENABLED") ||
++                strstr(b, "DFS-CAC-START") ||
++                strstr(b, "DFS-CAC-COMPLETED")) return 1;
++            if (strstr(b, "AP-DISABLED") ||
++                strstr(b, "driver initialization failed") ||
++                strstr(b, "Could not set interface")) return 0;
++        }
++        usleep(100000);
++    }
++    return -1;
++}
++
+ /* Build and start a hostapd instance for one provisioned VAP. */
+-static int vap_hostapd_start(int port, const char *ifname, int phy, int vapid,
+-                             const uint8_t *body, uint16_t len,
+-                             struct vap *vp, const struct cfg *c)
++static int vap_hostapd_start_one(int port, const char *ifname, int phy, int vapid,
++                                 const uint8_t *body, uint16_t len,
++                                 struct vap *vp, const struct cfg *c)
+ {
+     const uint8_t *ssid = NULL, *ie = NULL, *chv = NULL;
+     uint16_t sl = 0, il = 0, cl = 0;
+@@ -352,7 +393,27 @@ static int vap_hostapd_start(int port, const char *ifname, int phy, int vapid,
+             return -1;
+         }
+     }
++    /* Bounded, log-based readiness check: the pid alone proves nothing,
++     * and hostapd -B may write it only while we are waiting. */
++    int ready = vap_wait_ap_enabled(logf, 12000);
+     int hpid = vap_hostapd_pid(ifname);
++    if (ready == 0) {
++        printf("vap: hostapd %s did not enable, see %s\n", ifname, logf);
++        fflush(stdout);
++        if (hpid > 0) kill((pid_t)hpid, SIGTERM);
++        /* Never unlink the pid file here: it may belong to an instance that
++         * is already up (a repeated 0x6016) and unlinking it makes the
++         * watchdog spawn a duplicate.  A stale pid is harmless. */
++        return -1;
++    }
++    if (ready < 0) {
++        /* Still not enabled after 12 s: do not leave it holding the phy. */
++        printf("vap: hostapd %s STUCK (no AP-ENABLED in 12 s), killing pid=%d,"
++               " see %s\n", ifname, hpid, logf);
++        fflush(stdout);
++        if (hpid > 0) kill((pid_t)hpid, SIGKILL);
++        return -1;
++    }
+     printf("vap: hostapd %s ssid=%s freq=%u akm=%s%s%s mfp=%d vlan=%u pid=%d\n",
+            ifname, (const char *)ssid, freq,
+            ri.akm_psk ? "psk" : "", ri.akm_psk256 ? ",psk256" : "",
+@@ -363,6 +424,21 @@ static int vap_hostapd_start(int port, const char *ifname, int phy, int vapid,
+     return hpid > 0 ? hpid : -1;
+ }
+ 
++static int vap_hostapd_start(int port, const char *ifname, int phy, int vapid,
++                             const uint8_t *body, uint16_t len,
++                             const struct vap *vp, const struct cfg *c)
++{
++    int lockfd = open("/var/run/cap-vap-start.lock",
++                      O_CREAT | O_RDWR | O_CLOEXEC, 0600);
++    if (lockfd >= 0) flock(lockfd, LOCK_EX);
++    int r = vap_hostapd_start_one(port, ifname, phy, vapid, body, len, vp, c);
++    if (lockfd >= 0) {
++        flock(lockfd, LOCK_UN);
++        close(lockfd);
++    }
++    return r;
++}
++
+ /* True when the pid file points at a live hostapd **that we started**.
+  * W33: the pid is verified against our own config path.  A stale pid file
+  * whose number was recycled by netifd's wpad must never be mistaken for
+-- 
+2.56.0
+

@@ -1,0 +1,243 @@
+From 02fd8438f3a44ea43019ebf63064974271d56e92 Mon Sep 17 00:00:00 2001
+From: t <t@t>
+Date: Wed, 11 Nov 2026 00:21:54 +0200
+Subject: [PATCH] vap: narrow noscan to non-DFS VHT80; reserve mt76x02 BSS
+ index 0 (W56)
+
+W54 enabled noscan=1 for every HT40/VHT BSS.  Only the 80 MHz case has
+evidence for it, and a DFS primary must keep its CAC/radar scan, so emit
+noscan only when width >= 80 on a non-DFS channel.  2.4 GHz 40 MHz goes
+back to hostapd's normal coexistence handling.  Compute the HT40 direction
+before emitting noscan so an HT20 fallback cannot retain it.
+
+The mgmt monitor now starts at legal address index 1 and skips both index 0
+and the radio MAC, so VAP0's slot is never taken by cm<N>.
+
+The W54 allocator and the real-BSSID 0xd00b reply are unchanged.
+---
+ docs/W56-5GHZ-REBASE.md | 106 ++++++++++++++++++++++++++++++++++++++++
+ native/src/channels.inc |  25 ++++++----
+ native/src/vap.inc      |  22 ++++-----
+ 3 files changed, 132 insertions(+), 21 deletions(-)
+ create mode 100644 docs/W56-5GHZ-REBASE.md
+
+diff --git a/docs/W56-5GHZ-REBASE.md b/docs/W56-5GHZ-REBASE.md
+new file mode 100644
+index 0000000..dd87005
+--- /dev/null
++++ b/docs/W56-5GHZ-REBASE.md
+@@ -0,0 +1,106 @@
++# W56 — 5 GHz per-BSS rebase onto current `main`
++
++Status: rebased, built and tested.  Base `f6cd5c8` (`origin/main`, unchanged
++when checked), W54 change `a15c9c3`, branch `w56-5ghz-rebased`.
++
++## Rebase result
++
++W54 was already a direct child of `f6cd5c8`, so the rebase itself is a
++descendant-preserving cherry-pick with no tree change:
++
++```
++f6cd5c8 (origin/main)
++  + e9d5018  W54: mt76x02 BSS index plan + noscan (cherry-pick of a15c9c3)
++  + <next>   W56: narrow noscan, reserve BSS index 0 for VAPs
++```
++
++No commit rewrites main's ownership work (`src/ownership.inc`,
++`src/policy.inc`, `src/netifd_status.inc`, ubus detection).  `own_claim()`
++still receives the address the netdev really carries (the W54 real BSSID),
++and `0xd00b` reports that same address.
++
++## What W56 changes on top of W54
++
++### 1. `noscan=1` is now exactly the VHT80, non-DFS case
++
++W54 wrote `noscan=1` for every 2.4 GHz 40 MHz and every 5 GHz >= 40 MHz BSS.
++W56 narrows it:
++
++```c
++if (width >= 80 && !vap_is_dfs_chan(chan)) fprintf(f, "noscan=1\n");
++```
++
++* 2.4 GHz (20/40) has no reason to skip the coexistence scan and no longer
++  does.
++* 5 GHz 40 MHz is left with the normal hostapd scan.
++* 5 GHz 80 MHz on a non-DFS primary (the case proven in W54) keeps `noscan=1`.
++* A DFS primary (52–64, 100–144) **never** gets `noscan=1`; CAC/radar
++  detection stays intact and `ieee80211h=1` is still emitted.
++* The HT40 direction is now computed before the `noscan` line, so a channel
++  that falls back to HT20 (no secondary channel, e.g. ch165) cannot leave a
++  stale `noscan=1`.
++
++### 2. Monitor never takes BSS index 0
++
++`vap_bssid_pick_free()` starts at legal address index 1 and skips both
++BSS index 0 and the radio MAC.  Index 0 stays available for VAP0 when the
++manager sends a legal, free MAC that maps there.  On a 4-interface MT7603E
++the monitor is still not created at all.
++
++The device publishes the plan in index order:
++
++```
++$ cat /sys/class/ieee80211/phy1/addresses
++28:d1:27:1b:2d:83   <- index 0, radio MAC
++2a:d1:27:1b:2d:83   <- index 1, first address offered to the monitor
++...
++```
++
++### 3. Unchanged W54 guarantees
++
++* A manager BSSID that is legal and whose index is free is used unchanged.
++* Otherwise the first free address from the phy plan is used and the real
++  address is returned in `0xd00b` (body element `0x08`); the manager MAC
++  remains known in `g_vmap` for later `0x6016`/`0x600c`/`0x201f`.
++* The start gate keeps `flock(/var/run/cap-vap-start.lock)` and the bounded
++  wait for `AP-ENABLED` / `DFS-CAC-START`; timeout kills the instance.
++
++## W52 lifecycle compatibility
++
++W52 (`d7363cb`, `w52-vap-lifecycle`) is not yet in `main`.  The W56 series
++was also applied on top of W52 and resolved so that every function W52 uses
++keeps its name and contract:
++
++* `vap_hostapd_start()` remains the externally called function; W54's
++  serialised implementation is the internal `vap_hostapd_start_one()`.
++* `vapid_for()` still returns `-1` at 16/16 and still claims a registry row.
++* `vapid_release()` / `vapid_release_slot()` now also free the mt76x02 BSS
++  index, so destroy/recreate cycles do not leak indices.
++* `vapid_claim()` initialises both identities (`mac` and `bssid`), so a
++  reconnect/lost-reply row can never allocate a zero BSSID.
++* W52's stale `g_vmap`/`g_vap` check compares against both identities before
++  tearing a row down.
++* `vap_destroy()` keeps its ordering: netdev gone first, then slot release.
++
++Both variants build with `-Wall -Wextra` and pass the same checks.  Patch
++files for the two bases live next to this document:
++
++```
++docs/W56/patches/main/  0001-w54..., 0002-w56...
++docs/W56/patches/w52/   0001-w54..., 0002-w56...
++```
++
++## Test evidence
++
++* `make ... -j4`: mipsel static `capagent-mipsel`, no errors.
++* `make ... check`: crypto selftest all pass, 27 policy checks 0 failures,
++  ownership and netifd parser tests pass (both on `main` and on `w52`).
++* `vapchan_test` (host harness built for mipsel, calls the production
++  `vap_write_channel()`):
++  * ch36 VHT80 -> `noscan=1`;
++  * ch52/ch100 VHT80 -> **no** `noscan=1`, VHT80 centre frequency kept;
++  * ch36 HT40 -> no `noscan=1`; ch6 HT40 -> no `noscan=1`;
++  * output identical for the `main` and `w52` trees.
++* Read-only device check: phy1 is `mt76x2e`, `addresses` index 0 is the radio
++  MAC `28:d1:27:1b:2d:83`.  No live writes were made: the host lock was
++  free, but another track's `capagent`/guard was active on the device.
+diff --git a/native/src/channels.inc b/native/src/channels.inc
+index e1959e8..112fb8a 100644
+--- a/native/src/channels.inc
++++ b/native/src/channels.inc
+@@ -243,14 +243,19 @@ static void vap_bssid_alloc(int phy, const uint8_t want[6], uint8_t out[6])
+         for (int i = 0; i < 8; i++) bss_addr_of_idx(base, i, legal[i]);
+         nl = 8;
+     }
+-    int compatible = !memcmp(want + 1, base + 1, 5);
+-    if (compatible) {
+-        int idx = bss_idx_of(base, want);
+-        if (!(g_bss_used[r] & (1u << idx))) {
+-            g_bss_used[r] |= (uint8_t)(1u << idx);
+-            return;                      /* manager plan is legal: keep it */
++    /* Use the manager's address unchanged only when the driver publishes
++     * exactly that address.  Matching bytes 1..5 is not enough: byte 0
++     * also selects the index, and an address outside the plan could make
++     * the driver reprogram the radio base MAC on index 0. */
++    for (int i = 0; i < nl; i++)
++        if (!memcmp(want, legal[i], 6)) {
++            int idx = bss_idx_of(base, want);
++            if (!(g_bss_used[r] & (1u << idx))) {
++                g_bss_used[r] |= (uint8_t)(1u << idx);
++                return;                  /* manager plan is legal: keep it */
++            }
++            break;              /* legal, but its index is already taken */
+         }
+-    }
+     for (int i = 0; i < nl; i++) {
+         int idx = bss_idx_of(base, legal[i]);
+         if (g_bss_used[r] & (1u << idx)) continue;
+@@ -279,7 +284,8 @@ static void vap_bssid_free(int phy, const uint8_t mac[6])
+ 
+ /* First free legal address, for the mgmt monitor.  Returns 1 and marks the
+  * index when it found one, 0 when the phy does not need the treatment, -1
+- * when the phy is full. */
++ * when the phy is full.  W56: index 0 is the radio MAC and the VAP0 slot, so
++ * the monitor must never take it; start the search at legal index 1. */
+ static int vap_bssid_pick_free(int phy, uint8_t out[6])
+ {
+     if (!phy_is_mt76x02(phy)) return 0;
+@@ -292,8 +298,9 @@ static int vap_bssid_pick_free(int phy, uint8_t out[6])
+         for (int i = 0; i < 8; i++) bss_addr_of_idx(base, i, legal[i]);
+         nl = 8;
+     }
+-    for (int i = 0; i < nl; i++) {
++    for (int i = 1; i < nl; i++) {
+         int idx = bss_idx_of(base, legal[i]);
++        if (idx == 0 || !memcmp(legal[i], base, 6)) continue;
+         if (g_bss_used[r] & (1u << idx)) continue;
+         g_bss_used[r] |= (uint8_t)(1u << idx);
+         memcpy(out, legal[i], 6);
+diff --git a/native/src/vap.inc b/native/src/vap.inc
+index a546cd5..274d360 100644
+--- a/native/src/vap.inc
++++ b/native/src/vap.inc
+@@ -161,10 +161,8 @@ static void vap_write_channel(FILE *f, uint32_t freq, int wcode)
+         if (chan < 1 || chan > 14) chan = 6;
+         int width = (wcode == 2 || wcode == 3) ? 40 : 20;
+         fprintf(f, "hw_mode=g\nchannel=%d\nieee80211n=1\n", chan);
+-        if (width == 40) {
++        if (width == 40)
+             fprintf(f, "ht_capab=[HT40%c]\n", chan <= 7 ? '+' : '-');
+-            fprintf(f, "noscan=1\n");       /* W54: no 40 MHz coex scan */
+-        }
+         return;
+     }
+ 
+@@ -178,6 +176,8 @@ static void vap_write_channel(FILE *f, uint32_t freq, int wcode)
+     }
+ 
+     fprintf(f, "hw_mode=a\nchannel=%d\n", chan);
++    int sign = width >= 40 ? vap_ht40_sign5(freq) : 0;
++    if (width >= 40 && !sign) width = 20;
+     /* W54: never let hostapd run the 40 MHz coexistence scan
+      * (HAPD_IFACE_HT_SCAN, ieee80211n_check_40mhz()).  On mt76x02 one
+      * wiphy = one channel, so the offchannel scan that hostapd issues
+@@ -186,20 +186,18 @@ static void vap_write_channel(FILE *f, uint32_t freq, int wcode)
+      * hostapd falls back to HT20, which then cannot carry the VHT80
+      * centre frequency ("80/80+80 MHz: no second channel offset") and the
+      * BSS ends AP-DISABLED -- the W38 "5 GHz per-BSS hostapd hangs in D"
+-     * symptom.  noscan=1 skips only the scan; HT40 and VHT80 stay.  The
+-     * stock OpenWrt hostapd already ships this option (300-noscan.patch)
+-     * and netifd sets ht_coex=0 for the same reason. */
+-    if (width >= 40) fprintf(f, "noscan=1\n");
++     * symptom.  W56: only the VHT80 case needs (and has proven) this,
++     * and a DFS channel must keep its CAC/radar scan, so noscan is never
++     * written for a DFS primary.  The stock OpenWrt hostapd already ships
++     * this option (300-noscan.patch) and netifd sets ht_coex=0. */
++    if (width >= 80 && !vap_is_dfs_chan(chan)) fprintf(f, "noscan=1\n");
+     if (g_vap_country && g_vap_country[0])
+         fprintf(f, "country_code=%s\nieee80211d=1\n%s\n", g_vap_country,
+                 vap_is_dfs_chan(chan) ? "ieee80211h=1" : "");
+     fprintf(f, "ieee80211n=1\nieee80211ac=1\n");
+ 
+-    if (width >= 40) {
+-        int sign = vap_ht40_sign5(freq);
+-        if (!sign) width = 20;
+-        else fprintf(f, "ht_capab=[HT40%c]\n", sign > 0 ? '+' : '-');
+-    }
++    if (width >= 40)
++        fprintf(f, "ht_capab=[HT40%c]\n", sign > 0 ? '+' : '-');
+     if (width >= 80) {
+         fprintf(f, "vht_oper_chwidth=1\n");
+         fprintf(f, "vht_oper_centr_freq_seg0_idx=%u\n",
+-- 
+2.56.0
+
