@@ -405,11 +405,31 @@ static int mon_create(int phy)
     char name[32];
     if (nl_cmd_open() != 0) return -1;
     snprintf(name, sizeof(name), "cm%d", phy % 100);
+    /* W54: a monitor is a real driver interface on both mt76 phys.  On the
+     * 4-interface MT7603E it would take one of the four CAPsMAN VAP slots,
+     * so it is never created there while VAPs are managed.  On mt76x02 it
+     * would otherwise carry the radio MAC = BSS index 0, i.e. VAP0's slot;
+     * give it the first free legal address instead. */
+    if (phy_max_vifs(phy) == 4) {
+        printf("mon: phy%d is a 4-interface radio; not taking a VAP slot\n",
+               phy);
+        fflush(stdout);
+        return -1;
+    }
+    uint8_t mmac[6];
+    int have_m = vap_bssid_pick_free(phy, mmac);
+    if (have_m < 0) {
+        printf("mon: phy%d has no free mt76x02 BSS index; no monitor VIF\n",
+               phy);
+        fflush(stdout);
+        return -1;
+    }
     struct nl_buf m;
     nlb_init(&m, NL80211_CMD_NEW_INTERFACE, NLM_F_ACK);
     nlb_u32(&m, NL80211_ATTR_WIPHY, (uint32_t)phy);
     nlb_put(&m, NL80211_ATTR_IFNAME, name, strlen(name) + 1);
     nlb_u32(&m, NL80211_ATTR_IFTYPE, NL80211_IFTYPE_MONITOR);
+    if (have_m > 0) nlb_put(&m, NL80211_ATTR_MAC, mmac, 6);
     nlb_flag(&m, NL80211_ATTR_SOCKET_OWNER);
     int r = nl_send_ack(g_nl_cmd_fd, &m);
     if (r == -EEXIST) {
@@ -419,12 +439,14 @@ static int mon_create(int phy)
         nlb_u32(&m, NL80211_ATTR_WIPHY, (uint32_t)phy);
         nlb_put(&m, NL80211_ATTR_IFNAME, name, strlen(name) + 1);
         nlb_u32(&m, NL80211_ATTR_IFTYPE, NL80211_IFTYPE_MONITOR);
+        if (have_m > 0) nlb_put(&m, NL80211_ATTR_MAC, mmac, 6);
         nlb_flag(&m, NL80211_ATTR_SOCKET_OWNER);
         r = nl_send_ack(g_nl_cmd_fd, &m);
     }
     if (r) {
         fprintf(stderr, "mon: NEW_INTERFACE phy=%d %s: %d (%s)\n",
                 phy, name, r, r < 0 ? strerror(-r) : "?");
+        if (have_m > 0) vap_bssid_free(phy, mmac);
         return -1;
     }
     int ifindex = if_nametoindex(name);
