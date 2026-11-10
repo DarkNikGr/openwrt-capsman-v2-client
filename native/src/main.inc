@@ -36,11 +36,34 @@ static int run_once(struct cfg *c)
     mbedtls_ctr_drbg_context ctr;
     mbedtls_x509_crt crt;
     mbedtls_pk_context pk;
+    mbedtls_pk_context newpk;
+    uint8_t csr[CERT_CSR_MAX];
+    size_t csrlen = 0;
+    int bootstrap, verify_failed = 0, have_newpk = 0, enrolled = 0;
     uint8_t body[BODY_MAX];
     size_t join_len;
     uint8_t hdr[14];
     struct dc_ctx dc;
     char mgr[160];
+
+    /* Init everything up front: the early goto out must free valid (zeroed)
+     * contexts even when connect_tls() was never reached. */
+    mbedtls_net_init(&fd);
+    mbedtls_ssl_init(&ssl);
+    mbedtls_ssl_config_init(&conf);
+    mbedtls_entropy_init(&ent);
+    mbedtls_ctr_drbg_init(&ctr);
+    mbedtls_x509_crt_init(&crt);
+    mbedtls_pk_init(&pk);
+    mbedtls_pk_init(&newpk);
+    g_cert_pk = NULL;
+    g_cert_ctr = &ctr;
+    g_cert_cfg = c;
+    g_cert_cn[0] = 0;
+    g_cert_enrolling = 0;
+    /* g_cert_dup and g_cert_fail_streak persist across attempts on purpose. */
+    /* The pinned CA may have been replaced by an enrolment/rotation. */
+    if (g_ca_loaded) { mbedtls_x509_crt_free(&g_ca); g_ca_loaded = 0; }
 
     memset(&dc, 0, sizeof(dc));
     dc.fd = -1;
@@ -73,8 +96,80 @@ static int run_once(struct cfg *c)
            (c->dont_verify || !c->ca_cert) ? "no" : "ca");
     fflush(stdout);
 
-    if (connect_tls(&fd, &ssl, &conf, &ent, &ctr, &crt, &pk, c) != 0)
+    /* W16/W43 certificate lifecycle.  Enrol when:
+     *   - --enroll was given, or
+     *   - the key/cert pair is missing (first boot / factory reset), or
+     *   - the stored certificate is expired,
+     * and additionally when CA verification of the manager fails (the manager
+     * rotated its CA), which is handled below by retrying in bootstrap mode.
+     * With require-peer-certificate=yes on the manager a certificate-less
+     * join is rejected during the TLS handshake, so bootstrap fails there:
+     * that setting makes pre-provisioned certificates mandatory. */
+    int need_enroll = c->enroll || !cert_key_ok(c) || cert_is_expired(c);
+    if (need_enroll && c->no_enroll) {
+        fprintf(stderr, "cert: no usable certificate and --no-enroll given\n");
+        g_cert_fail_streak++;
         goto out;
+    }
+    if (need_enroll) {
+        if (!cert_key_ok(c))
+            printf("cert: no usable key/certificate; enrolling\n");
+        else if (cert_is_expired(c))
+            printf("cert: stored certificate is expired; re-enrolling\n");
+        else
+            printf("cert: --enroll: forcing a new certificate\n");
+        fflush(stdout);
+    } else {
+        printf("cert: using stored certificate %s\n",
+               cert_stored_subject(c));
+        fflush(stdout);
+    }
+    bootstrap = need_enroll;
+    if (connect_tls(&fd, &ssl, &conf, &ent, &ctr, &crt, &pk, c,
+                    bootstrap, &verify_failed) != 0) {
+        if (!bootstrap && !c->no_enroll && !c->dont_verify && verify_failed) {
+            fprintf(stderr, "cert: manager certificate does not verify with "
+                            "%s; manager CA changed, re-enrolling\n",
+                    c->ca_cert ? c->ca_cert : "-");
+            tls_free_all(&fd, &ssl, &conf, &ent, &ctr, &crt, &pk);
+            bootstrap = 1;
+            if (connect_tls(&fd, &ssl, &conf, &ent, &ctr, &crt, &pk, c,
+                            1, NULL) != 0) {
+                fprintf(stderr, "cert: bootstrap join without a certificate "
+                        "failed (manager require-peer-certificate=yes?)\n");
+                goto out;
+            }
+        } else {
+            if (bootstrap) {
+                fprintf(stderr, "cert: enrolment needs a certificate-less "
+                        "join; manager require-peer-certificate=yes blocks it\n");
+                g_cert_fail_streak++;
+            }
+            goto out;
+        }
+    }
+    if (!bootstrap) g_cert_fail_streak = 0;   /* steady-state mTLS works */
+
+    if (bootstrap) {
+        if (cert_gen_key(&newpk, &ctr) != 0) {
+            fprintf(stderr, "cert: key generation failed\n");
+            g_cert_fail_streak++;
+            goto out;
+        }
+        have_newpk = 1;
+        cert_make_cn(c, g_cert_cn, sizeof(g_cert_cn), &ctr);
+        if (cert_make_csr(g_cert_cn, &newpk, &ctr, csr, sizeof(csr),
+                          &csrlen) != 0) {
+            fprintf(stderr, "cert: CSR generation failed\n");
+            g_cert_fail_streak++;
+            goto out;
+        }
+        g_cert_pk = &newpk;
+        g_cert_enrolling = 1;
+        printf("cert: enrolling CN=%s csr=%zuB (key stays on the CAP)\n",
+               g_cert_cn, csrlen);
+        fflush(stdout);
+    }
 
     /* W8: bind one ext-auth socket per BSS before the manager provisions any
      * VAP, and adopt anything that survived the previous connection. */
@@ -94,7 +189,7 @@ static int run_once(struct cfg *c)
         }
     }
 
-    build_join(body, c, &join_len);
+    build_join(body, c, &join_len, bootstrap ? csr : NULL, csrlen);
     if (send_msg(&ssl, TYPE_JOIN, 0, body, (uint16_t)join_len) != 0) goto out;
 
     for (int phy = 0; phy < c->nradios; phy++) {
@@ -113,6 +208,9 @@ static int run_once(struct cfg *c)
     time_t last_stats = 0;
     time_t last_dc_ka = 0;
     time_t last_refresh = 0;
+    /* An enrolling join must get its 0xc029 (or an error) in bounded time;
+     * a manager that accepts TLS but answers nothing must not hang us. */
+    time_t enroll_deadline = bootstrap ? time(NULL) + 20 : 0;
 #ifdef CAPAGENT_LAB
     if (c->lab_iface && lab_ap_setup(c) != 0) {
         fprintf(stderr, "lab: AP setup failed\n");
@@ -125,6 +223,12 @@ static int run_once(struct cfg *c)
         int dp_first = -1, dp_count = 0, ext_any = 0;
         int mon_i[MON_MAX];
         int have_tls = mbedtls_ssl_get_bytes_avail(&ssl) > 0;
+        if (bootstrap && !enrolled && enroll_deadline &&
+            time(NULL) > enroll_deadline) {
+            fprintf(stderr, "cert: no join response within 20s; retrying\n");
+            g_cert_fail_streak++;
+            break;
+        }
         for (int i = 0; i < MON_MAX; i++) mon_i[i] = -1;
 
         pfd[nfd].fd = fd.fd;
@@ -266,7 +370,22 @@ static int run_once(struct cfg *c)
             send_hdr_msg(&ssl, TYPE_DESTROY_RESP, hdr + 2, NULL, 0);
         } else if (type == TYPE_JOIN_RESP) {
             dump_raw("joinresp", type, port, body, len);
-            handle_c029(body, len);
+            int cr = cert_handle_join_resp(body, len);
+            if (cr == CERT_RESP_NONE) {
+                handle_c029(body, len);
+            } else if (cr == CERT_RESP_ENROLLED) {
+                enrolled = 1;
+                printf("cert: certificate stored; continuing this session\n");
+                fflush(stdout);
+            } else if (cr == CERT_RESP_IGNORED) {
+                /* nothing to do */
+            } else if (cr == CERT_RESP_DUP) {
+                /* Reconnect with a fresh CN (cert.inc logs the reason). */
+                break;
+            } else {
+                /* Other join error: drop the session and retry later. */
+                break;
+            }
         } else if (type == TYPE_POLL) {   /* periodic status poll */
             static int n27;
             /* The genuine CAP answers with MAC/vapid/ifindex/ifname/current
@@ -399,6 +518,9 @@ out:
     lab_shutdown();
 #endif
     if (dc.fd >= 0) close(dc.fd);
+    if (have_newpk) mbedtls_pk_free(&newpk);
+    g_cert_pk = NULL;
+    g_cert_enrolling = 0;
     mbedtls_ssl_close_notify(&ssl);
     mbedtls_net_free(&fd);
     mbedtls_ssl_free(&ssl);
@@ -420,6 +542,9 @@ static void usage(const char *p)
         "  --caps-man-certificate-common-names CN[,CN]\n"
         "  --ca-cert FILE               verify the manager certificate\n"
         "  --dont-verify-certificate    disable TLS verification\n"
+        "  --enroll                     force a new CSR enrolment this run\n"
+        "  --no-enroll                  never generate a CSR (fail if no cert)\n"
+        "  --cert-cn CN                 fixed enrolment CN (default: identity-rand)\n"
         "  --slaves-datapath NAME       accepted for WinBox parity\n"
         "  --slaves-static              accepted for WinBox parity\n"
         "  --macs MAC[,MAC]|auto        radio MACs (default: from phy sysfs)\n"
@@ -485,7 +610,7 @@ int main(int argc, char **argv)
            OPT_PHYS, OPT_DP_BRIDGE, OPT_VAP_MTU, OPT_BCAST, OPT_MGMT_RELAY,
            OPT_MGMT_SOURCE, OPT_EXTAUTH, OPT_COUNTRY, OPT_VAPAUTO, OPT_NOVAPAUTO,
            OPT_EXTCTRL, OPT_STATE, OPT_FOURWAY, OPT_M1RETRY,
-           OPT_MLME, OPT_MLME_PORT };
+           OPT_MLME, OPT_MLME_PORT, OPT_ENROLL, OPT_NOENROLL, OPT_CERTCN };
     static struct option opts[] = {
         {"manager", required_argument, 0, 'm'},
         {"port", required_argument, 0, 'p'},
@@ -498,6 +623,9 @@ int main(int argc, char **argv)
         {"caps-man-certificate-common-names", required_argument, 0, OPT_CN},
         {"ca-cert", required_argument, 0, OPT_CA},
         {"dont-verify-certificate", no_argument, 0, OPT_NOVERIFY},
+        {"enroll", no_argument, 0, OPT_ENROLL},
+        {"no-enroll", no_argument, 0, OPT_NOENROLL},
+        {"cert-cn", required_argument, 0, OPT_CERTCN},
         {"slaves-datapath", required_argument, 0, OPT_SDP},
         {"slaves-static", no_argument, 0, OPT_SSTATIC},
         {"identity", required_argument, 0, OPT_IDENTITY},
@@ -551,6 +679,9 @@ int main(int argc, char **argv)
         case OPT_CN: c.manager_cn = optarg; break;
         case OPT_CA: c.ca_cert = optarg; break;
         case OPT_NOVERIFY: c.dont_verify = 1; break;
+        case OPT_ENROLL: c.enroll = 1; break;
+        case OPT_NOENROLL: c.no_enroll = 1; break;
+        case OPT_CERTCN: c.cert_cn = optarg; break;
         case OPT_SDP: c.slaves_datapath = optarg; break;
         case OPT_SSTATIC: c.slaves_static = 1; break;
         case OPT_IDENTITY: c.identity = optarg; break;
@@ -638,8 +769,13 @@ int main(int argc, char **argv)
     c.manager_spec = c.manager;
     for (;;) {
         run_once(&c);
-        fprintf(stderr, "reconnect in 5s\n");
-        sleep(5);
+        int delay = cert_retry_delay();
+        if (g_cert_fail_streak)
+            fprintf(stderr, "reconnect in %ds (certificate failures: %d)\n",
+                    delay, g_cert_fail_streak);
+        else
+            fprintf(stderr, "reconnect in %ds\n", delay);
+        sleep(delay);
     }
     return 0;
 }

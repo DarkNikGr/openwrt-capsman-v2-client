@@ -31,6 +31,8 @@ start_service() {
 		--key "${KEY:-/etc/cap/client.key}" \
 		--macs "${MACS:-auto}"
 	[ -f "${CA_CERT:-/etc/cap/ca.pem}" ] && set -- "$@" --ca-cert "${CA_CERT:-/etc/cap/ca.pem}"
+	[ "${NO_ENROLL:-no}" = yes ] && set -- "$@" --no-enroll
+	[ -n "${CERT_CN:-}" ] && set -- "$@" --cert-cn "${CERT_CN}"
 	[ "${DONT_VERIFY_CERTIFICATE:-no}" = yes ] && set -- "$@" --dont-verify-certificate
 	[ -n "${CAPS_MAN_CERT_CN:-}" ] && set -- "$@" --caps-man-certificate-common-names "${CAPS_MAN_CERT_CN}"
 	[ "${LOCK_TO_CAPS_MAN:-no}" = yes ] && set -- "$@" --lock-to-caps-man

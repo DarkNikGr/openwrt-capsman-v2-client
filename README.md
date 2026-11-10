@@ -45,9 +45,11 @@ OpenWrt 24.10, MediaTek MT7603E + MT7612E), managed by an
 >   relays EAPOL and installs the derived keys) is **built and lab-tested** but
 >   blocked on the live CAP: the manager never starts the pilot VAP, so no
 >   `0x6016`/`0x201c` ever arrives for it.
-> * A factory reset still wipes the client, certificate and configuration; a
->   custom image with the client + certificate in ROM is required and does not
->   exist yet.
+> * A factory reset still wipes the client and its certificate, but the agent
+>   now **re-enrols automatically** on first boot (no certificate baked into
+>   the image) as long as the manager keeps `require-peer-certificate=no`
+>   (the RouterOS default). See
+>   [Certificate lifecycle](#certificate-lifecycle-zero-touch-enrolment).
 >
 > Until those items are closed, **any working WiFi here is local
 > configuration**, not CAPsMAN-provisioned. See
@@ -327,7 +329,39 @@ prefer to copy it directly.
 
 `install.sh` installs `/usr/sbin/capagent`, writes
 `/etc/cap/capagent.conf` (if missing), enables `capagent` and restarts it.
-Certificates are expected at `/etc/cap/client.pem` and `/etc/cap/client.key`.
+Certificates are expected at `/etc/cap/client.pem` and `/etc/cap/client.key`;
+if they are missing the agent enrols itself (below).
+
+### Certificate lifecycle (zero-touch enrolment)
+
+On first boot (factory reset) `/etc/cap` is empty. The agent then:
+
+1. generates an EC P-256 key **on the CAP** (`client.key`, mode 0600);
+2. sends a PKCS#10 CSR in the join (`0x4029` TLV `0x76`) with the CN
+   `<identity>-<8 random hex>` — a fresh CN every time, because RouterOS
+   refuses to issue a second certificate for an existing CN;
+3. receives the signed leaf and the CAPsMAN CA in the join reply
+   (`0xc029` TLVs `0x77`/`0x78`), verifies the leaf against the CA and against
+   its own key, and atomically writes `client.pem`, `ca.pem` and `client.key`;
+4. keeps using that certificate on every later join (mTLS), pinning the
+   manager against the saved `ca.pem`.
+
+A stored certificate that is expired is replaced. A manager CA rotation is
+detected as a TLS verification failure and triggers a new enrolment. A
+duplicate-CN rejection from the manager triggers a retry with a fresh CN.
+Retries are spaced (5 s doubling to 60 s), never a busy loop, and every step
+logs a `cert:` line.
+
+Requirements and limits:
+
+* the manager must have `require-peer-certificate=no` (default) at least
+  until the CAP has enrolled; with `yes` a certificate-less CAP is rejected
+  during the handshake and needs a pre-provisioned certificate;
+* the first enrolment is trust-on-first-use: set `MANAGER` and/or
+  `LOCK_TO_CAPS_MAN=yes` if the network is hostile;
+* `--enroll` forces a new certificate, `--no-enroll` disables enrolment, and
+  `--cert-cn CN` pins the CN (a duplicate adds a random suffix);
+* `/etc/cap` must be writable (it is on the overlay).
 
 ### Manager side (once)
 

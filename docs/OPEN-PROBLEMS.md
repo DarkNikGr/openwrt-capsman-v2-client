@@ -34,8 +34,12 @@ Current reality: control plane joins, but the BSSes come from a local
    the driver refuses the AP. 2.4 GHz is up.
 3. **VAP lifecycle** — `0x600c` never stops hostapd/deletes the netdev/releases
    the id, so a second create cycle wedges (W25/W28).
-4. **Zero-touch boot** — client + certificate + hostapd must live in ROM
-   (custom image), otherwise a factory reset removes them.
+4. **Zero-touch boot** — the client and hostapd must live in ROM (custom
+   image). The certificate no longer does: since W43 the agent generates its
+   key + CSR and enrols on first boot when `/etc/cap` is empty, then re-joins
+   with the stored certificate (manager `require-peer-certificate=no`, the
+   default). Still open: client + hostapd in ROM, and the manager-only BSS
+   path below.
 5. **No manual fallback allowed** — no SSH-driven bootstrap, no local
    `wireless` file, no second daemon on the manager.
 
@@ -72,7 +76,10 @@ Current reality: control plane joins, but the BSSes come from a local
 15. Custom OpenWrt image: client + cert + config in ROM, first-boot join with
     no overlay; factory-reset acceptance test.
 16. Certificate lifecycle: enrolment (`0x76`/`0x77`/`0x78`), renewal, and what
-    happens when the manager rotates its CA.
+    happens when the manager rotates its CA — **done in W43**
+    (`native/src/cert.inc`, `scripts/lab-cert-lifecycle.sh`). Remaining:
+    `require-peer-certificate=yes` has no protocol-level recovery after a
+    factory reset, by design.
 17. Regression harness: one command that joins, waits for 8/8 VAPs, associates
     a STA, completes the 4-way, DHCPs and pings — pass/fail JSON.
 18. Interop matrix: wpa2-psk / wpa2-eap / SAE / OWE × on-cap / on-capsman /
