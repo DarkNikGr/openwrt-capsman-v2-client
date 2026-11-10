@@ -1248,7 +1248,26 @@ static void handle_2019(mbedtls_ssl_context *ssl, int port,
     }
     if (mlme_owned)
         r = mlme_tx_mgmt(ifindex, fr, fl);
-    else if (ext_tx)
+    else if (ext_tx && (st == 1 || st == 3)) {
+        /* W58: the same manager template can reach a hostapd-owned BSS as
+         * 0x2019 subtype 1.  Complete it before EXT_AUTH_MGMT_TX, otherwise
+         * mac80211 drops the frame and OWE never sees the DH element. */
+        uint8_t out[2048];
+        int cn = mlme_complete_assoc(fr, fl, out, sizeof(out));
+        if (cn < 0) {
+            printf("0x2019 %s: bad template len=%u (%s)\n",
+                   st == 1 ? "assoc-resp" : "reassoc-resp", fl,
+                   strerror(-cn));
+            fflush(stdout);
+            return;
+        }
+        r = ext_auth_mgmt_tx(c, ifindex, out, (size_t)cn);
+        printf("0x2019 %s completed len=%u -> hostapd TX %d ret=%d (%s)\n",
+               st == 1 ? "assoc-resp" : "reassoc-resp", fl, cn, r,
+               r ? strerror(-r) : "ok");
+        fflush(stdout);
+        return;
+    } else if (ext_tx)
         r = ext_auth_mgmt_tx(c, ifindex, fr, fl);
     else
         r = (nl_cmd_open() == 0) ? nl_mgmt_tx(ifindex, freq, fr, fl) : -1;
@@ -1276,6 +1295,38 @@ static void handle_2019(mbedtls_ssl_context *ssl, int port,
         }
     }
     fflush(stdout);
+}
+
+/* Manager 0x6019 for a hostapd-owned external-RSN BSS.  The template has
+ * the same missing Supported Rates element as the MLME path; complete it and
+ * hand it to hostapd's driver TX (EXT_AUTH_MGMT_TX) instead of dropping it. */
+static int ext_handle_assoc_resp(mbedtls_ssl_context *ssl, int port,
+                                 const uint8_t *body, size_t len,
+                                 const struct cfg *c)
+{
+    const uint8_t *fr = NULL;
+    uint16_t fl = 0;
+    int ifindex, st, n;
+    struct vap *vp;
+    uint8_t out[2048];
+    (void)ssl;
+
+    if (!c->ext_auth_dir) return 0;
+    if (!find_el(body, len, 0x3e, &fr, &fl) || fl < 30) return 0;
+    st = (fr[0] >> 4) & 0xf;
+    if (st != 1 && st != 3) return 0;
+    ifindex = vap_ifindex(xm_canon_port(port), NULL);
+    vp = vap_by_ifindex(ifindex);
+    if (ifindex <= 0 || !vp || !vp->external_auth || !hostapd_has_mgmt_tx())
+        return 0;
+    n = mlme_complete_assoc(fr, fl, out, sizeof(out));
+    if (n < 0) return n;
+    int r = ext_auth_mgmt_tx(c, ifindex, out, (size_t)n);
+    printf("0x6019 %s completed len=%u -> hostapd TX %d ifindex=%d ret=%d "
+           "(%s)\n", st == 1 ? "assoc-resp" : "reassoc-resp", fl, n,
+           ifindex, r, r ? strerror(-r) : "ok");
+    fflush(stdout);
+    return 1;
 }
 
 /* ======================================================================

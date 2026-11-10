@@ -285,6 +285,24 @@ static int vap_netdev_create(int phy, const char *ifname, const uint8_t mac[6])
         fprintf(stderr, "vap: %s did not appear\n", ifname);
         return -1;
     }
+    /* W58: NEW_INTERFACE may leave the fresh VIF as managed on kernels
+     * that drop NL80211_ATTR_IFTYPE; START_AP then succeeds but mac80211
+     * reverts the type on the next reconfig and the BSS never beacons.
+     * Set the type explicitly before anyone starts the AP. */
+    /* Some kernels/drivers (and a host NetworkManager racing a fresh wlan
+     * VIF) leave NEW_INTERFACE as managed even though the reply said AP;
+     * START_AP then succeeds but mac80211 drops the BSS on the next
+     * reconfig.  Enforce the type before anyone starts the AP. */
+    {
+        int t0 = nl_get_iftype(ifindex);
+        int rt = nl_set_iftype(ifindex, NL80211_IFTYPE_AP);
+        if (rt || t0 != NL80211_IFTYPE_AP) {
+            printf("vap: %s iftype %d -> %d SET AP ret=%d (%s)\n", ifname,
+                   t0, nl_get_iftype(ifindex), rt,
+                   rt < 0 ? strerror(-rt) : "ok");
+            fflush(stdout);
+        }
+    }
     if (set_iface_up(ifname) < 0)
         fprintf(stderr, "vap: %s up: %s\n", ifname, strerror(errno));
     printf("vap: created %s ifindex=%d phy=%d\n", ifname, ifindex, rp);
@@ -522,7 +540,7 @@ static int vap_hostapd_start_one(int port, const char *ifname, int phy, int vapi
 
 static int vap_hostapd_start(int port, const char *ifname, int phy, int vapid,
                              const uint8_t *body, uint16_t len,
-                             const struct vap *vp, const struct cfg *c)
+                             struct vap *vp, const struct cfg *c)
 {
     int lockfd = open("/var/run/cap-vap-start.lock",
                       O_CREAT | O_RDWR | O_CLOEXEC, 0600);

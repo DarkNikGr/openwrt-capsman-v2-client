@@ -174,6 +174,17 @@ static int mlme_start_ap(struct mlme_vap *m)
 
     if (mlme_build_beacon(m, head, &hl, tail, &tl) != 0) return -EINVAL;
     if (nl_cmd_open() != 0) return -ENODEV;
+    /* The VIF must really be AP before START_AP (see vap_netdev_create). */
+    {
+        int t0 = nl_get_iftype(m->ifindex);
+        int rt = nl_set_iftype(m->ifindex, NL80211_IFTYPE_AP);
+        if (rt || t0 != NL80211_IFTYPE_AP) {
+            printf("mlme: %s iftype %d -> %d SET AP ret=%d (%s)\n", m->ssid,
+                   t0, nl_get_iftype(m->ifindex), rt,
+                   rt ? strerror(-rt) : "ok");
+            fflush(stdout);
+        }
+    }
     if (g_nl_evt_fd < 0) g_nl_evt_fd = nl_open_socket();
     if (g_nl_evt_fd < 0) return -ENODEV;
 

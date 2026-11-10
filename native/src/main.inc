@@ -487,7 +487,8 @@ static int run_once(struct cfg *c)
             /* With hostapd the template is discarded; for an MLME-owned BSS
              * the CAP completes it (rates/capab/AID) and sends it on air. */
             dump_raw("assocresp", type, port, body, len);
-            if (!mlme_handle_assoc_resp(&ssl, port, body, len, c)) {
+            if (!mlme_handle_assoc_resp(&ssl, port, body, len, c) &&
+                !ext_handle_assoc_resp(&ssl, port, body, len, c)) {
                 printf("0x6019 from manager (template discarded, hostapd "
                        "answered on air)\n");
                 fflush(stdout);

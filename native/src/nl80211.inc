@@ -180,6 +180,19 @@ static int nl_cmd_open(void)
     return 0;
 }
 
+/* Set a netdev's nl80211 iftype.  Some kernels/drivers ignore (or lose)
+ * NL80211_ATTR_IFTYPE on NEW_INTERFACE and leave a fresh VAP as managed;
+ * verify and correct it explicitly before START_AP. */
+static int nl_set_iftype(int ifindex, uint32_t type)
+{
+    struct nl_buf m;
+    if (ifindex <= 0 || nl_cmd_open() != 0) return -ENODEV;
+    nlb_init(&m, NL80211_CMD_SET_INTERFACE, NLM_F_ACK);
+    nlb_u32(&m, NL80211_ATTR_IFINDEX, (uint32_t)ifindex);
+    nlb_u32(&m, NL80211_ATTR_IFTYPE, type);
+    return nl_send_ack(g_nl_cmd_fd, &m);
+}
+
 /* Current nl80211 iftype of a netdev (AP_VLAN detection for the bridge). */
 static int nl_get_iftype(int ifindex){
     if (ifindex <= 0 || nl_cmd_open() != 0) return -1;
