@@ -378,6 +378,15 @@ static void build_newphy(uint8_t *b, const uint8_t mac[6], int phy, size_t *out)
     n += put_el(b+n, 0x4c, v32, 4);   /* rx chains */
     for (size_t i = 0; i < nbands; i++)
         n += put_el(b+n, 0x4d, bands[i], 5);
+
+    /* 0x84 = little-endian capability bitset.  Bit 6 (0x40) tells the
+       manager the CAP supports the data channel; without it a
+       datapath.traffic-processing=on-capsman VAP is refused with
+       "data channel not supported".  Keep bit 7 (MLO) clear. */
+    {
+        uint8_t caps84[4] = { 0x40, 0x00, 0x00, 0x00 };
+        n += put_el(b+n, 0x84, caps84, sizeof(caps84));
+    }
     *out = n;
 }
 
@@ -711,6 +720,42 @@ static void handle_c029(const uint8_t *body, uint16_t len)
     fflush(stdout);
 }
 
+static int vapid_for(int phy, const uint8_t mac[6]);
+
+/* VLAN -> vapid map, learned from the a2=0 virtual creates.  The a2=1
+   datachan creates carry the master MAC for every VLAN, so the MAC alone
+   cannot identify the VAP. */
+struct vlan_wid { int used; uint16_t vlan; int wid; };
+static struct vlan_wid g_vw[2][16];
+
+static void vlan_wid_set(int phy, uint16_t vlan, int wid)
+{
+    int r = phy & 1;
+    for (int i = 0; i < 16; i++) {
+        if (g_vw[r][i].used && g_vw[r][i].vlan == vlan) {
+            g_vw[r][i].wid = wid;
+            return;
+        }
+    }
+    for (int i = 0; i < 16; i++) {
+        if (!g_vw[r][i].used) {
+            g_vw[r][i].used = 1;
+            g_vw[r][i].vlan = vlan;
+            g_vw[r][i].wid = wid;
+            return;
+        }
+    }
+}
+
+static int vlan_wid_get(int phy, uint16_t vlan)
+{
+    int r = phy & 1;
+    for (int i = 0; i < 16; i++)
+        if (g_vw[r][i].used && g_vw[r][i].vlan == vlan)
+            return g_vw[r][i].wid;
+    return -1;
+}
+
 /* ---- optional datachan receiver (UDP 5248, AES-256-CCM) -------------- */
 
 struct dc_ctx {
@@ -733,6 +778,17 @@ struct dc_ctx {
     struct sockaddr_storage peer;
     socklen_t peer_len;
 };
+
+/* One c2 key/cookie per (radio, wlan id): the manager sends a separate
+   0x500b a2=1 for every VAP, all on the same datachan. */
+struct dc_keyent {
+    int used;
+    uint8_t key[DC_KEY_MAX];
+    size_t key_len;
+    uint8_t cookie[DC_COOKIE_MAX];
+    size_t cookie_len;
+};
+static struct dc_keyent g_dckey[2][16];
 
 /* c2 datachan header ("cdh"), exactly as c2.ko cm_datachan_xmit() writes it:
      [0]      radio id (rid; 0x500b message port >> 8)
@@ -875,27 +931,35 @@ static void dc_install(struct dc_ctx *d, const uint8_t *key, size_t key_len,
 static void dc_send_keepalive(struct dc_ctx *d)
 {
     uint8_t pkt[DC_PFX_LEN + DC_COOKIE_MAX];
-    size_t n = 0;
 
-    if (d->fd < 0 || !d->cookie_len || !d->peer_len) return;
-    pkt[n++] = DC_PFX_MAGIC;
-    pkt[n++] = DC_PFX_KEEPALIVE;
-    memcpy(pkt + n, d->cookie, d->cookie_len);
-    n += d->cookie_len;
-    sendto(d->fd, pkt, n, 0, (struct sockaddr *)&d->peer, d->peer_len);
+    if (d->fd < 0 || !d->peer_len) return;
+    for (int r = 0; r < 2; r++) {
+        for (int w = 0; w < 16; w++) {
+            struct dc_keyent *e = &g_dckey[r][w];
+            size_t n = 0;
+            if (!e->used || !e->cookie_len) continue;
+            pkt[n++] = DC_PFX_MAGIC;
+            pkt[n++] = DC_PFX_KEEPALIVE;
+            memcpy(pkt + n, e->cookie, e->cookie_len);
+            n += e->cookie_len;
+            sendto(d->fd, pkt, n, 0,
+                   (struct sockaddr *)&d->peer, d->peer_len);
+        }
+    }
 }
 
-static int dc_decrypt(struct dc_ctx *d, const uint8_t hdr[DC_HDR_LEN],
-                      const uint8_t *ct, size_t ct_len,
-                      const uint8_t tag[DC_TAG_LEN], uint8_t *pt)
+static int dc_decrypt_key(const uint8_t *key, size_t key_len,
+                           const uint8_t hdr[DC_HDR_LEN],
+                           const uint8_t *ct, size_t ct_len,
+                           const uint8_t tag[DC_TAG_LEN], uint8_t *pt)
 {
     mbedtls_ccm_context ccm;
     int ret = MBEDTLS_ERR_CCM_AUTH_FAILED;
     uint8_t nonce[DC_NONCE_LEN];
 
     mbedtls_ccm_init(&ccm);
-    if (mbedtls_ccm_setkey(&ccm, MBEDTLS_CIPHER_ID_AES, d->key,
-                           (unsigned)d->key_len * 8) != 0) {
+    if (mbedtls_ccm_setkey(&ccm, MBEDTLS_CIPHER_ID_AES, key,
+                           (unsigned)key_len * 8) != 0) {
         mbedtls_ccm_free(&ccm);
         return -1;
     }
@@ -933,16 +997,29 @@ static void dc_service(struct dc_ctx *d)
         }
         /* cm_datachan_match_keepalive(): len-2 == cookielen, cookie at +2.
            Take it from any source port and latch that port as the peer. */
-        if ((buf[1] & DC_PFX_KEEPALIVE) && d->cookie_len &&
-            (size_t)r == d->cookie_len + DC_PFX_LEN &&
-            !memcmp(buf + DC_PFX_LEN, d->cookie, d->cookie_len)) {
-            if (!d->peer_len || memcmp(&src, &d->peer, sizeof(src)) != 0) {
-                memcpy(&d->peer, &src, sizeof(src));
-                d->peer_len = slen;
-                printf("datachan: peer learned from keepalive\n");
+        if (buf[1] & DC_PFX_KEEPALIVE) {
+            int matched = 0;
+            for (int r2 = 0; r2 < 2 && !matched; r2++)
+                for (int w2 = 0; w2 < 16 && !matched; w2++) {
+                    struct dc_keyent *e = &g_dckey[r2][w2];
+                    if (e->used && e->cookie_len &&
+                        (size_t)r == e->cookie_len + DC_PFX_LEN &&
+                        !memcmp(buf + DC_PFX_LEN, e->cookie, e->cookie_len))
+                        matched = 1;
+                }
+            if (!matched && d->cookie_len &&
+                (size_t)r == d->cookie_len + DC_PFX_LEN &&
+                !memcmp(buf + DC_PFX_LEN, d->cookie, d->cookie_len))
+                matched = 1;
+            if (matched) {
+                if (!d->peer_len || memcmp(&src, &d->peer, sizeof(src)) != 0) {
+                    memcpy(&d->peer, &src, sizeof(src));
+                    d->peer_len = slen;
+                    printf("datachan: peer learned from keepalive\n");
+                }
+                printf("datachan keepalive len=%d\n", (int)r);
+                continue;
             }
-            printf("datachan keepalive len=%d\n", (int)r);
-            continue;
         }
         if (buf[1] & DC_PFX_FRAG) {
             printf("datachan: fragmented frame, unsupported\n");
@@ -958,18 +1035,25 @@ static void dc_service(struct dc_ctx *d)
         }
         plen = (size_t)r - DC_PFX_LEN - DC_HDR_LEN;
         ct = buf + DC_PFX_LEN + DC_HDR_LEN;
-        if (!d->have_key || plen < DC_TAG_LEN) {
-            printf("datachan frame rid=%u wid=%u len=%zu (no key)\n",
-                   rid, wid, plen);
-            continue;
-        }
-        ct_len = plen - DC_TAG_LEN;
-        if (ct_len > sizeof(pt)) continue;
-        tag = ct + ct_len;
-        if (dc_decrypt(d, buf + DC_PFX_LEN, ct, ct_len, tag, pt) != 0) {
-            printf("datachan auth failed rid=%u wid=%u flags=%u seq=%llu "
-                   "len=%zu\n", rid, wid, flags, (unsigned long long)seq, plen);
-            continue;
+        {
+            struct dc_keyent *ke = &g_dckey[rid & 1][wid & 0x0f];
+            const uint8_t *kk = ke->used ? ke->key : d->key;
+            size_t kkl = ke->used ? ke->key_len : d->key_len;
+            if (!kkl || plen < DC_TAG_LEN) {
+                printf("datachan frame rid=%u wid=%u len=%zu (no key)\n",
+                       rid, wid, plen);
+                continue;
+            }
+            ct_len = plen - DC_TAG_LEN;
+            if (ct_len > sizeof(pt)) continue;
+            tag = ct + ct_len;
+            if (dc_decrypt_key(kk, kkl, buf + DC_PFX_LEN, ct, ct_len,
+                               tag, pt) != 0) {
+                printf("datachan auth failed rid=%u wid=%u keyidx=%u "
+                       "flags=%u seq=%llu len=%zu\n", rid, wid, keyidx,
+                       flags, (unsigned long long)seq, plen);
+                continue;
+            }
         }
         if (!dc_replay_ok(d, seq)) {
             printf("datachan replay dropped seq=%llu\n",
@@ -1027,7 +1111,7 @@ static int dc_send_frame(struct dc_ctx *d, const uint8_t *frame, size_t flen)
 /* Install the id/port/cookie/key from a 0x500b create and start listening.
    The datachan is opt-in: without --datachan the fields are only logged. */
 static void dc_handle_create(struct dc_ctx *d, const struct cfg *c,
-                             mbedtls_net_context *tls,
+                             mbedtls_net_context *tls, uint16_t create_port,
                              const uint8_t *body, uint16_t len)
 {
     const uint8_t *v = NULL, *key = NULL, *cookie = NULL;
@@ -1054,6 +1138,32 @@ static void dc_handle_create(struct dc_ctx *d, const struct cfg *c,
     if (c->dc_cookie_len) {
         cookie = c->dc_cookie;
         cookie_len = c->dc_cookie_len;
+    }
+
+    /* Every VAP has its own a2=1 key/cookie on the shared datachan. */
+    if (key) {
+        const uint8_t *m = NULL; uint16_t ml = 0;
+        if (find_el(body, len, 0x08, &m, &ml) && ml == 6) {
+            int rid = create_port >> 8;
+            uint16_t vlan = 0;
+            int wid = -1;
+            if (find_el(body, len, 0x7d, &v, &l) && l == 2) {
+                vlan = rd16(v);
+                wid = vlan_wid_get(rid, vlan);
+            }
+            if (wid < 0)
+                wid = vapid_for(rid, m);
+            struct dc_keyent *e = &g_dckey[rid & 1][wid & 0x0f];
+            e->used = 1;
+            memcpy(e->key, key, key_len);
+            e->key_len = key_len;
+            if (cookie && cookie_len) {
+                memcpy(e->cookie, cookie, cookie_len);
+                e->cookie_len = cookie_len;
+            }
+            printf("datachan: key rid=%d wid=%d vlan=%u keyidx=%u "
+                   "cookie=%zuB\n", rid, wid, vlan, keyidx, cookie_len);
+        }
     }
 
     printf("0x500b datachan id=%u port=%u key=%zuB cookie=%zuB\n",
@@ -1239,6 +1349,11 @@ static void createvap_response(mbedtls_ssl_context *ssl, const uint8_t hdr[10],
     else if (phy < c->nradios)
         memcpy(mac, c->macs[phy], 6);
     int vapid = vapid_for(phy, mac);
+    {   /* remember which vapid owns this VLAN (needed for a2=1 keys) */
+        const uint8_t *vv = NULL; uint16_t vl = 0;
+        if (find_el(req, reqlen, 0x7d, &vv, &vl) && vl == 2)
+            vlan_wid_set(phy, rd16(vv), vapid);
+    }
     snprintf(ifname, sizeof(ifname), "phy%d-ap%d", phy, vapid);
     if (c->no_ack) {
         /* A genuine CAP sends nothing when the data channel is created OK;
@@ -1567,6 +1682,142 @@ static void parse_ifnames(struct cfg *c, const char *s)
     }
 }
 
+/* ---- station statistics reported to the manager (0x200E / 0x2015) ------ */
+static void put64(uint8_t *p, uint64_t v)
+{
+    put32(p, (uint32_t)(v >> 32));
+    put32(p + 4, (uint32_t)v);
+}
+
+struct st_prev { int used; uint8_t mac[6]; uint64_t rx, tx; time_t t; };
+static struct st_prev g_stprev[32];
+
+static struct st_prev *st_prev_slot(const uint8_t *mac)
+{
+    int free_i = -1;
+    for (int i = 0; i < 32; i++) {
+        if (g_stprev[i].used && !memcmp(g_stprev[i].mac, mac, 6))
+            return &g_stprev[i];
+        if (!g_stprev[i].used && free_i < 0) free_i = i;
+    }
+    if (free_i >= 0) {
+        memset(&g_stprev[free_i], 0, sizeof(g_stprev[free_i]));
+        g_stprev[free_i].used = 1;
+        memcpy(g_stprev[free_i].mac, mac, 6);
+        return &g_stprev[free_i];
+    }
+    return NULL;
+}
+
+static void emit_station(mbedtls_ssl_context *ssl, int phy, int vap,
+                         const uint8_t *mac, int sig,
+                         uint64_t rx, uint64_t tx, uint64_t rxp, uint64_t txp,
+                         unsigned long inact_ms, unsigned long conn_s)
+{
+    uint8_t b[BODY_MAX], v2[2], v4[4], ch[40], st[44], rt[8], w;
+    size_t n = 0, cn = 0;
+    uint16_t port = (uint16_t)((phy << 8) | vap);
+    uint16_t freq = (phy & 1) ? 5180 : 2437;
+    time_t now = time(NULL);
+
+    /* 0x200E: station appeared/updated; this is the signal source. */
+    n += put_el(b + n, 0x07, mac, 6);
+    put16(v2, freq);
+    cn += put_el(ch + cn, 0x0b, v2, 2);
+    w = (phy & 1) ? 3 : 1;
+    cn += put_el(ch + cn, 0x0c, &w, 1);
+    w = (phy & 1) ? 0x03 : 0x81;
+    cn += put_el(ch + cn, 0x10, &w, 1);
+    n += put_el(b + n, 0x0a, ch, (uint16_t)cn);
+    {   /* opaque station-info blob (24 dwords) copied into sta+0x18 */
+        uint8_t si[96];
+        memset(si, 0, sizeof(si));
+        n += put_el(b + n, 0x16, si, sizeof(si));
+    }
+    put32(v4, (uint32_t)inact_ms);
+    n += put_el(b + n, 0x15, v4, 4);
+    put16(v2, 0);
+    n += put_el(b + n, 0x17, v2, 2);
+    n += put_el(b + n, 0x18, v2, 2);
+    put32(v4, (uint32_t)(int32_t)sig);
+    n += put_el(b + n, 0x19, v4, 4);
+    put32(v4, 0);
+    n += put_el(b + n, 0x1a, v4, 4);
+    send_msg(ssl, 0x200e, port, b, (uint16_t)n);
+    static time_t last_dbg;
+    if (time(NULL) != last_dbg) {
+        last_dbg = time(NULL);
+        printf("stats tx %02x:%02x:%02x:%02x:%02x:%02x phy=%d vap=%d "
+               "sig=%d rx=%llu tx=%llu rxp=%llu txp=%llu\n",
+               mac[0], mac[1], mac[2], mac[3], mac[4], mac[5],
+               phy, vap, sig, rx, tx, rxp, txp);
+        fflush(stdout);
+    }
+
+    /* 0x2015: PEERSTATSRESULT: BASIC (3x u32 + 4x u64) + LIVERATE. */
+    n = 0;
+    n += put_el(b + n, 0x08, mac, 6);
+    struct st_prev *p = st_prev_slot(mac);
+    uint32_t ra = 0, rb = 0;
+    if (p && p->t && now > p->t) {
+        ra = (uint32_t)((rx - p->rx) / (uint64_t)(now - p->t));
+        rb = (uint32_t)((tx - p->tx) / (uint64_t)(now - p->t));
+    }
+    if (p) { p->rx = rx; p->tx = tx; p->t = now; }
+    put32(st + 0, (uint32_t)now);
+    put32(st + 4, (uint32_t)conn_s);
+    put32(st + 8, (uint32_t)(now - (time_t)(inact_ms / 1000)));
+    put64(st + 12, rx);
+    put64(st + 20, tx);
+    put64(st + 28, rxp);
+    put64(st + 36, txp);
+    n += put_el(b + n, 0x3d, st, 44);
+    put32(rt, ra);
+    put32(rt + 4, rb);
+    n += put_el(b + n, 0x40, rt, 8);
+    send_msg(ssl, 0x2015, port, b, (uint16_t)n);
+}
+
+static void send_station_stats(mbedtls_ssl_context *ssl, const struct cfg *c)
+{
+    for (int phy = 0; phy < c->nradios; phy++) {
+        for (int vap = 0; vap < 8; vap++) {
+            char ifn[32], cmd[96], line[256];
+            snprintf(ifn, sizeof(ifn), "phy%d-ap%d", phy, vap);
+            snprintf(cmd, sizeof(cmd),
+                     "/usr/sbin/iw dev %s station dump 2>/dev/null", ifn);
+            FILE *fp = popen(cmd, "r");
+            if (!fp) continue;
+            uint8_t mac[6]; int have = 0, sig = 0;
+            unsigned long long rx = 0, tx = 0, rxp = 0, txp = 0;
+            unsigned long inact = 0, conn = 0;
+            while (fgets(line, sizeof(line), fp)) {
+                unsigned int m[6];
+                if (sscanf(line, "Station %x:%x:%x:%x:%x:%x",
+                           &m[0], &m[1], &m[2], &m[3], &m[4], &m[5]) == 6) {
+                    if (have)
+                        emit_station(ssl, phy, vap, mac, sig, rx, tx, rxp,
+                                     txp, inact, conn);
+                    for (int k = 0; k < 6; k++) mac[k] = (uint8_t)m[k];
+                    have = 1; sig = 0;
+                    rx = tx = rxp = txp = 0; inact = conn = 0;
+                } else if (sscanf(line, " signal: %d", &sig) == 1) {
+                } else if (sscanf(line, " rx bytes: %llu", &rx) == 1) {
+                } else if (sscanf(line, " tx bytes: %llu", &tx) == 1) {
+                } else if (sscanf(line, " rx packets: %llu", &rxp) == 1) {
+                } else if (sscanf(line, " tx packets: %llu", &txp) == 1) {
+                } else if (sscanf(line, " inactive time: %lu", &inact) == 1) {
+                } else if (sscanf(line, " connected time: %lu", &conn) == 1) {
+                }
+            }
+            if (have)
+                emit_station(ssl, phy, vap, mac, sig, rx, tx, rxp, txp,
+                             inact, conn);
+            pclose(fp);
+        }
+    }
+}
+
 static int run_once(struct cfg *c)
 {
     mbedtls_net_context fd;
@@ -1655,7 +1906,7 @@ static int run_once(struct cfg *c)
             fflush(stdout);
             if (phy >= 0 && phy < c->nradios)
                 createvap_response(&ssl, hdr + 2, phy, vap, c, body, len);
-            dc_handle_create(&dc, c, &fd, body, len);
+            dc_handle_create(&dc, c, &fd, port, body, len);
         } else if (type == TYPE_DESTROY) {
             printf("RX 0x600c destroy\n");
             fflush(stdout);
@@ -1683,6 +1934,11 @@ static int run_once(struct cfg *c)
             put32(x27, (p27 & 1) ? 5180u : 2437u);
             z27 += put_el(b27 + z27, 0x61, x27, 4);
             send_hdr_msg(&ssl, 0xE027, hdr + 2, b27, (uint16_t)z27);
+            static time_t last_stats;
+            if (time(NULL) != last_stats) {
+                last_stats = time(NULL);
+                send_station_stats(&ssl, c);
+            }
             if ((++n27 % 100) == 1) {
                 printf("RX 0x6027 poll (count=%d) -> 0xE027 len=%zu\n",
                        n27, z27);

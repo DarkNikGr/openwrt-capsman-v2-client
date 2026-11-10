@@ -42,31 +42,46 @@ provisioned by the same manager as MikroTik hardware.
 | Master + virtual interfaces bound & active on the manager | ✅ |
 | SSID / RSN / channel push (`0x6016`, ack `0xe016`) | ✅ received |
 | VLAN push (`0x500b` TLV `0x7d`) | ✅ received |
-| Security material push (`0x201f`) | 🟡 GTK/IGTK observed |
+| SSID / RSN / channel push (`0x6016`, ack `0xe016`) | ✅ received |
+| VLAN push (`0x500b` TLV `0x7d`) | ✅ received |
+| Security material push (`0x201f`) | ✅ GTK/IGTK |
+| **Datachan create** (`0x500b` `a2=1`, key/cookie) | ✅ reachable |
+| Datachan keepalive (UDP 5248) | ✅ accepted |
 | PSK / passphrase delivery | 🟡 **not observed yet** |
-| Apply pushed SSID/VLAN to UCI | 🟡 in progress |
-| Status/traffic poll (`0x6027` → `0xe027`) | 🟡 counters not observed yet |
+| EAPOL / data bridging over the datachan | 🟡 next step |
+| Status/traffic (`0x200e` / `0x2015`) | 🟡 decoded, manager table pending |
+
+### Datachan (split-MAC path)
+
+The manager only creates the key-bearing datachan when **both** hold:
+
+* the VAP's datapath is `traffic-processing=on-capsman`, and
+* NEWPHY advertises `0x84` byte 0 bit 6 (`40 00 00 00`).
+
+It then sends `0x500b a2=1` with a 32-byte key (`0xa8`), key index (`0xa9`)
+and keepalive cookie (`0xaa`), and the CAP must answer the UDP 5248 keepalive
+`10 02 || cookie`. Our client now brings the datachan up and the manager
+accepts it (no "data channel timeout").
+
+Every VAP gets its own `a2=1` key/cookie on the shared datachan; they are
+identified by the VLAN (`0x7d`) and must be installed per `(radio, vapid)`.
+The manager then sends plain Ethernet frames over the datachan.
 
 ### Open questions
 
-In our captures CAPsMAN v2 behaves as a split-MAC manager: it validates the
-passphrase and returns derived keys (`0x201f`), while `0x6016` carries the
-SSID and the public RSN IE. We have **not yet observed** the PSK itself, nor
-the `0x500b a2=1` datachan create that is the most likely carrier for it. The
-c2 datachan is also the most likely source of the per-station traffic/status
-counters.
+The manager still behaves as a split-MAC authenticator: it validates the
+passphrase and returns derived keys. We have **not yet observed** the PSK
+itself. The datachan is now reachable, so the remaining work is the data
+plane:
 
-Paths currently being investigated:
+* bridge EAPOL between the local radios and the manager over the datachan
+  (`0x201c` is the manager→CAP TX leg);
+* forward Ethernet frames between the datachan and the local VAPs
+  (`on-capsman`), or keep `on-cap` and use hostapd locally.
 
-* trigger the manager to issue the datachan create (`a2=1`);
-* bridge EAPOL to the manager over the datachan, so the manager acts as the
-  RSN authenticator and the CAP never needs the PSK;
-* a one-shot configuration fetch at boot (no daemon);
-* complete split-MAC support in the client.
-
-Until one of these lands, the AP serves the SSID/VLAN/key configuration
-already present in `/etc/config/wireless`; the manager owns channels and
-interface state.
+Until that lands, the AP serves the SSID/VLAN/key configuration already
+present in `/etc/config/wireless`; the manager owns channels and interface
+state.
 
 
 

@@ -123,6 +123,64 @@ datachan, which is still under investigation.
 
 
 
+## Datachan (c2, UDP 5248)
+
+The manager creates the key-bearing datachan (`0x500b` with `a2=1`) only when
+the VAP's datapath is `traffic-processing=on-capsman` **and** NEWPHY `0x84`
+byte 0 has bit 6 set (`40 00 00 00`, little-endian; bit 7 must stay clear).
+Otherwise it reports "data channel not supported".
+
+`a2=1` adds:
+
+```
+00aa 16  keepalive cookie
+00a6  2  UDP port (0x1480 = 5248)
+00a8 32  AES-256-CCM key
+00a9  1  key index (0/1)
+```
+
+Every VAP gets its own key and cookie on the shared datachan. The create
+carries the **master** MAC for all VLANs, so the VAP must be derived from the
+VLAN (`0x7d`), not the MAC.
+
+UDP payload:
+
+```
+10 | flags | cdh[8] | body
+cdh[0]      radio id
+cdh[1]      bit7 keyidx | bits6..4 flags | bits3..0 vapid
+cdh[2..7]   sequence, 48-bit little-endian
+```
+
+Keepalive: `10 02 || cookie` (unencrypted). The manager matches the cookie to
+the VAP and keeps the datachan alive; without it the session ends with a
+"data channel timeout".
+
+The manager sends plain Ethernet frames on the datachan (observed: IPv6 ND
+from the VAP MAC). The CAP has to bridge them to/from the local interface for
+`on-capsman` forwarding. EAPOL is the same: RX over the datachan, TX to the
+CAP via `0x201c` over TLS.
+
+Rekey: the manager sends `0x402b` with `0xa8` (32-byte key) and `0xa9` (slot)
+and expects an empty `0xc02b`; install the new key at the slot and reset the
+sequence state.
+
+## Status / traffic
+
+All CAP→manager statistics travel on the TLS control channel, not the
+datachan:
+
+| Type | Contents |
+|---|---|
+| `0x200e` | station appeared/updated: MAC `07`, channel `0a`, age `15`, station-info `16`, `17/18`, signal dBm `19`, `1a` |
+| `0x2015` | `PEERSTATSRESULT`: MAC `08`, BASIC `3d` (3×u32 + 4×u64 counters), LIVERATE `40` (2×u32 bytes/s) |
+| `0x2013` | ACS/channel scan: channel `0a`, load `2a`, RSSI `2b/2c`, noise `2d`, radar `32`, rank `33` |
+
+`0x200e` creates the station on the manager and carries the signal; `0x2015`
+updates its counters and rates. The manager's registration table only reflects
+stations it authenticates itself, so these are most useful in the split-MAC
+datachan mode.
+
 ## Gotchas
 
 * `0x77` in `0xc029` is an X.509 certificate, not a config tree. Do not parse
