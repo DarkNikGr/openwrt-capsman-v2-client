@@ -22,6 +22,7 @@ Merge commits: `e6005af` (W47), `5398e07` (W43), `155ac76` (W36).
 |---|---|---|
 | `w39-deterministic-vap-start` | `5364e76` | already an ancestor of `origin/main`; nothing to merge |
 | `w46-mgmt-auth` | `0e8960e` | branch tip is an ancestor of `origin/main`; the actual W46 edits are **uncommitted** in `/tmp/opencode/work-W46/repo` (6 modified source files + `patches/9999a-external-rsn-sae.patch`). Not copied: another track owns that working tree and a merge must be reproducible from a pushed commit. Follow-up: commit/push W46, then merge it. |
+| `w38-vap-lifecycle` | `9a961c3` | discovered on `origin` but not in the W50 branch list. One 919-line commit touching six VAP/datapath files; dry-run against main conflicts in **all six** (`channels.inc`, `datapath.inc`, `main.inc`, `mgmt.inc`, `nl80211.inc`, `vap.inc`). Out of scope for a mechanical consolidation: it needs its own review/merge track. It is the natural prerequisite for enabling W36's MLME teardown path. |
 
 ## Resolutions
 
@@ -62,14 +63,17 @@ init script merged cleanly.
 ## Known follow-ups
 
 1. W46 has to be committed and pushed before it can be merged.
-2. W36 introduces two `-Wformat-truncation` warnings in
+2. `w38-vap-lifecycle` is still open and unmerged; it should be merged (or
+   explicitly dropped) before W36 is enabled in production. Its dry run
+   conflicts in all six files it touches.
+3. W36 introduces two `-Wformat-truncation` warnings in
    `util.inc:phy_name_by_index`; the build is not warning-free.
-3. W36's MLME teardown/`0x600c` path is not covered by the W38 lifecycle work
+4. W36's MLME teardown/`0x600c` path is not covered by the W38 lifecycle work
    (W38 is not on `origin/main`); test create/destroy cycles before enabling
    `MLME=yes`.
-4. Re-run the live W42 gate (read-only) when the CAP is free; the committed
+5. Re-run the live W42 gate (read-only) when the CAP is free; the committed
    `baseline/legacy.json` is still a pre-integration snapshot.
-5. `docs/BUILD.md` pins `0e8960e` as its measurement base; update it to the
+6. `docs/BUILD.md` pins `0e8960e` as its measurement base; update it to the
    integration tip after merge.
 
 ## Landing on main
