@@ -32,3 +32,5 @@ out/
 native/.w34-tests/
 # per-arch agent binaries built in-tree by native/Makefile
 native/capagent-aarch64
+# W53 extmux host-test scratch
+native/.w53-tests/
