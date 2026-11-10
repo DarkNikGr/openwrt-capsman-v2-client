@@ -108,15 +108,21 @@ Per VAP, len 46:
 005a 0005 { 0053 0001 01 }
 ```
 
-`0x0054` is the cipher (`00-0f-ac-04` = CCMP) and `0x0051` is 16 bytes of key
-material. The exact PSK/passphrase mapping is still being finalised; see the
-roadmap in the README.
+`0x0054` is the cipher (`00-0f-ac-04` = CCMP) and `0x0051` is the **GTK**
+(16 bytes), not the PMK/PSK. The manager is the RSN authenticator: it derives
+the PMK from the passphrase, runs the 4-way handshake and sends only derived
+keys back. There is no PSK field in any control message.
+
+`0x201f` should be acknowledged with `0xe01f`.
 
 ## Status poll (`0x6027`)
 
 The manager sends `0x6027` (empty body) about once per second per interface.
-An empty `0xe027` reply is accepted. The traffic/station TLV layout is the
-remaining item for the RouterOS status card.
+The genuine CAP answers `0xe027` with `{0x08 MAC, 0x47 vap, 0x48 ifindex,
+0x49 ifname, 0x61 freq}`; the manager reads only `0x61`. This reply carries no
+traffic counters or station list — those travel over the c2 datachan, which a
+control-only CAP cannot establish.
+
 
 ## Gotchas
 

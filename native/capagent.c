@@ -1663,17 +1663,37 @@ static int run_once(struct cfg *c)
         } else if (type == TYPE_JOIN_RESP) {
             dump_raw("joinresp", type, port, body, len);
             handle_c029(body, len);
-        } else if (type == 0x6027) {   /* periodic status/traffic poll */
+        } else if (type == 0x6027) {   /* periodic status poll */
             static int n27;
-            send_hdr_msg(&ssl, 0xE027, hdr + 2, NULL, 0);
+            /* The genuine CAP answers with MAC/vapid/ifindex/ifname/current
+               freq; the manager only reads 0x61. */
+            int p27 = port >> 8, v27 = port & 0xff;
+            char in27[32];
+            uint8_t m27[6] = {0}, b27[BODY_MAX], x27[4];
+            size_t z27 = 0;
+            snprintf(in27, sizeof(in27), "phy%d-ap%d", p27, v27);
+            read_sysfs_mac(in27, m27);
+            int i27 = read_sysfs_int(in27, "ifindex");
+            z27 += put_el(b27 + z27, 0x08, m27, 6);
+            put32(x27, (uint32_t)v27);
+            z27 += put_el(b27 + z27, 0x47, x27, 4);
+            put32(x27, (uint32_t)i27);
+            z27 += put_el(b27 + z27, 0x48, x27, 4);
+            z27 += put_el(b27 + z27, 0x49, in27, (uint16_t)strlen(in27));
+            put32(x27, (p27 & 1) ? 5180u : 2437u);
+            z27 += put_el(b27 + z27, 0x61, x27, 4);
+            send_hdr_msg(&ssl, 0xE027, hdr + 2, b27, (uint16_t)z27);
             if ((++n27 % 100) == 1) {
-                printf("RX 0x6027 status poll (count=%d) -> 0xE027\n", n27);
+                printf("RX 0x6027 poll (count=%d) -> 0xE027 len=%zu\n",
+                       n27, z27);
                 fflush(stdout);
             }
         } else if (type == 0x201f) {   /* security key material per VAP */
             dump_raw("sec201f", type, port, body, len);
-            printf("RX 0x201f security port=0x%04x len=%u\n", port, len);
+            printf("RX 0x201f security port=0x%04x len=%u -> ack 0xE01F\n",
+                   port, len);
             fflush(stdout);
+            send_hdr_msg(&ssl, 0xE01F, hdr + 2, NULL, 0);
         } else if (type == 0x6016) {   /* ActAp start/config push (SSID/RSN/chan) */
             dump_raw("start", type, port, body, len);
             printf("RX 0x6016 start port=0x%04x len=%u -> ack 0xE016\n", port, len);
