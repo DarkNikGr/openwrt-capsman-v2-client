@@ -495,6 +495,25 @@ iw station dump
 Useful log lines: `RX 0x500b ... a2=`, `datachan: listening`, `0x201c:
 inject`, `0x201f key-install`, and the `0x2015`/`0x200e` counters.
 
+## Regression gate
+
+One command, stable JSON, explicit pass rules:
+
+```sh
+scripts/w42_harness.py --legacy        # classic local-wifi-iface deployment
+scripts/w42_harness.py --manager-only  # zero wifi-iface, manager owns the 4-way
+scripts/w42_harness.py --manager-only --json-out manager.json --dump-dir ev/
+```
+
+Exit code `0` means every required check passed for that mode. Both modes
+sample a stability window and require 8/8 VAPs, manager start (`0x6016`), STA
+association, the correct VLAN lease, ping, and no `0x201c ... ret=-19`
+injection. `--manager-only` additionally requires zero `wifi-iface`, a
+manager-owned 4-way (`0x201f` + registration row, no CAP-local
+`EAPOL-4WAY-HS-COMPLETED`) and a PSK-free CAP. See
+[docs/REGRESSION-GATE.md](docs/REGRESSION-GATE.md) for the full rule table and
+the stale-ifindex self-test (`--selftest-pmap`, `scripts/test-pmap-refresh.sh`).
+
 ## Repository layout
 
 ```
@@ -504,6 +523,7 @@ cap-client/
 │   ├── OPEN-PROBLEMS.md      # tracked blockers + verified facts
 │   ├── ARCHITECTURE.md       # datapath modes and split-MAC chain
 │   ├── FINDINGS.md           # control protocol / TLV reference
+│   ├── REGRESSION-GATE.md    # acceptance modes, pass rules, baselines
 │   ├── W27-INTEGRATION.md    # W8/W6/W14 integration notes
 │   └── patches/              # hostapd 9997-external-rsn-ie.patch
 ├── native/
@@ -516,7 +536,11 @@ cap-client/
 │   ├── build-mipsel.sh
 │   ├── build-aarch64.sh
 │   ├── install-on-cap.sh
+│   ├── w42_harness.py        # regression gate (legacy / manager-only)
+│   ├── run-regression.sh     # thin wrapper for the gate
+│   ├── test-pmap-refresh.sh  # stale-ifindex self-test
 │   └── enroll.md
+├── baseline/                 # live legacy + manager-only JSON captures
 ├── VERSION
 └── README.md
 ```

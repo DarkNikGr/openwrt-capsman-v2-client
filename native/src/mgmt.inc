@@ -1216,7 +1216,11 @@ static int xm_on_direct(void *ctx, const struct extmux_vap *v,
 {
     (void)ctx;
     if (nl_cmd_open() != 0) return -1;
-    return nl_control_port_tx(v->ifindex, mac, eapol, len);
+    /* Re-resolve before every direct injection: extmux cached ifindex at
+     * bind time, but a VAP recreate gives the netdev a new ifindex. */
+    int ifindex = vap_ifindex(v->port, NULL);
+    if (ifindex <= 0) return -ENODEV;
+    return nl_control_port_tx(ifindex, mac, eapol, len);
 }
 
 static void xm_on_authorized(void *ctx, const struct extmux_vap *v,

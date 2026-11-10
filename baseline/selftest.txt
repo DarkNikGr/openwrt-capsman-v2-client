@@ -1,0 +1,26 @@
+W42 stale-ifindex proof
+
+Final binary: native/capagent-mipsel (rebased onto origin/main 89f3f21,
+W33/W34 ownership included)
+  md5    = c7af70ff44b57f8d2971fedeef9c7d23
+  sha256 = run `sha256sum native/capagent-mipsel`
+
+[1] Host lab (scripts/test-pmap-refresh.sh): dummy netdev deleted/recreated
+    first: w42pmap0 ifindex=3068
+    pmap: port 0x0001 refreshed ifindex 103068 -> 3068 (w42pmap0)
+    SELFTEST ... resolved=3068 result=PASS
+    recreated: w42pmap0 ifindex=3069 (cached=3068)
+    pmap: port 0x0001 refreshed ifindex 3068 -> 3069 (w42pmap0)
+    SELFTEST ... resolved=3069 result=PASS
+    pmap refresh self-test: PASS (cached 3068 -> live 3069)
+
+[2] Live Xiaomi, --selftest-pmap against the real VAP phy0-ap1
+    (binary from the W42 branch before the upstream merge; same resolver)
+    pmap: port 0x0001 refreshed ifindex 100039 -> 39 (phy0-ap1)
+    SELFTEST pmap iface=phy0-ap1 live=39 cached=100039 resolved=39 result=PASS
+    SELFTEST_RC=0
+
+[3] Live manager-only capture (baseline/manager-only.json)
+    stale_ifindex_fix: PASS
+    0x201c attempts=60 ok=30 enodev=0 pmap_refreshed=0
+    (30 manager M1 frames reached the STA; no injection used a stale ifindex)

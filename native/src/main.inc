@@ -491,6 +491,7 @@ static void usage(const char *p)
         "  --lab-chan N                 lab channel (default 1)\n"
         "  --mlme                       in-CAP MLME for one VAP (no hostapd)\n"
         "  --mlme-port PORT             VAP port, default 0x0000 (2.4 master)\n"
+        "  --selftest-pmap IFACE[,OLD]  verify stale port->ifindex refresh, exit\n"
         "  --version                    print the version and exit\n",
         p);
 }
@@ -531,7 +532,7 @@ int main(int argc, char **argv)
            OPT_EXTCTRL, OPT_STATE, OPT_FOURWAY, OPT_M1RETRY,
            OPT_MLME, OPT_MLME_PORT,
            OPT_WLCONF, OPT_WLOWNER, OPT_NOTEARDOWN, OPT_POLICYTEST,
-           OPT_CHECKWL, OPT_VAPSTATE };
+           OPT_CHECKWL, OPT_VAPSTATE, OPT_SELFTEST_PMAP };
     static struct option opts[] = {
         {"manager", required_argument, 0, 'm'},
         {"port", required_argument, 0, 'p'},
@@ -586,6 +587,7 @@ int main(int argc, char **argv)
         {"lab-chan", required_argument, 0, OPT_LAB_CHAN},
         {"mlme", no_argument, 0, OPT_MLME},
         {"mlme-port", required_argument, 0, OPT_MLME_PORT},
+        {"selftest-pmap", required_argument, 0, OPT_SELFTEST_PMAP},
         {"help", no_argument, 0, 'h'},
         {"version", no_argument, 0, 'V'},
         {0,0,0,0}
@@ -650,6 +652,7 @@ int main(int argc, char **argv)
         case OPT_MLME_PORT:
             c.mlme_port = (int)strtol(optarg, NULL, 0);
             break;
+        case OPT_SELFTEST_PMAP: c.selftest_pmap = optarg; break;
         case OPT_WLCONF: c.wireless_conf = optarg; break;
         case OPT_WLOWNER:
             if (!strcmp(optarg, "auto")) c.wireless_mode = -1;
@@ -702,6 +705,33 @@ int main(int argc, char **argv)
         return 0;
     }
     if (c.crypto_selftest) return dc_selftest();
+    if (c.selftest_pmap) {
+        /* Deterministic check of the 0x201c stale-ifindex fix: seed the port
+         * map with a dead ifindex and require the resolver to find the live
+         * one from the netdev name.  IFACE[,OLD] lets a test pass the real
+         * ifindex the netdev had before it was recreated. */
+        char *spec = strdup(c.selftest_pmap);
+        char *comma = spec ? strchr(spec, ',') : NULL;
+        uint8_t smac[6] = {0};
+        int live, stale, got;
+        if (!spec) return 2;
+        if (comma) *comma = 0;
+        live = read_sysfs_int(spec, "ifindex");
+        if (live <= 0) {
+            fprintf(stderr, "SELFTEST pmap iface=%s: not found\n", spec);
+            free(spec);
+            return 2;
+        }
+        stale = comma ? atoi(comma + 1) : live + 100000;
+        if (stale == live) stale = live + 100000;
+        pmap_set(0x0001, stale, NULL);
+        got = vap_ifindex_hint(0x0001, spec, smac);
+        printf("SELFTEST pmap iface=%s live=%d cached=%d resolved=%d "
+               "result=%s\n", spec, live, stale, got,
+               got == live ? "PASS" : "FAIL");
+        free(spec);
+        return got == live ? 0 : 1;
+    }
     if (c.nradios == 0) resolve_phy_macs(&c);
     if (c.nradios == 0) {
         fprintf(stderr, "no valid radio MACs\n");

@@ -315,17 +315,21 @@ static void pmap_del(int port)
         }
 }
 
-/* Resolve (phy<<8)|vap to an ifindex, falling back to sysfs.
+/* Resolve (phy<<8)|vap to a live ifindex.
  *
  * W33: the cached slot is validated before use.  A manager reconnect (or a
  * hostapd restart that recreates the netdev) leaves the old ifindex in the
  * table; installing a key on it fails with -ENODEV/-ENETDOWN, and if the
  * number was recycled it can point at an unrelated netdev.  The cached
  * ifindex is only trusted while if_indextoname() still resolves it to the
- * same MAC; otherwise the entry is dropped and re-resolved by name/MAC. */
-static int vap_ifindex(int port, uint8_t mac[6])
+ * same MAC; otherwise the entry is dropped and re-resolved by name/MAC.
+ *
+ * W42: the same resolver is used by 0x201c EAPOL TX (including the extmux
+ * direct-injection fallback).  hint lets the self-test name an arbitrary
+ * netdev; production callers pass NULL. */
+static int vap_ifindex_hint(int port, const char *hint, uint8_t mac[6])
 {
-    int ifindex = 0;
+    int ifindex = 0, cached = 0;
     uint8_t cmac[6] = {0};
     char nm[IF_NAMESIZE];
 
@@ -336,7 +340,7 @@ static int vap_ifindex(int port, uint8_t mac[6])
         return 0;
     }
 
-    if (pmap_get(port, &ifindex, cmac) && ifindex > 0 &&
+    if (pmap_get(port, &ifindex, cmac) && ifindex > 0 && !hint &&
         if_indextoname((unsigned)ifindex, nm)) {
         uint8_t now[6];
         if (read_sysfs_mac(nm, now) == 0 && !memcmp(now, cmac, 6)) {
@@ -346,23 +350,38 @@ static int vap_ifindex(int port, uint8_t mac[6])
         printf("pmap: port 0x%04x ifindex=%d (%s) stale, re-resolving\n",
                port, ifindex, nm);
         fflush(stdout);
-        pmap_del(port);
-    } else if (ifindex > 0) {
-        pmap_del(port);
     }
+    cached = ifindex;
+    if (cached > 0) pmap_del(port);
 
-    char ifname[32];
-    snprintf(ifname, sizeof(ifname), "phy%d-ap%d", port >> 8, port & 0xff);
+    char ifname[IF_NAMESIZE];
+    if (hint && hint[0])
+        snprintf(ifname, sizeof(ifname), "%s", hint);
+    else
+        snprintf(ifname, sizeof(ifname), "phy%d-ap%d", port >> 8, port & 0xff);
     ifindex = read_sysfs_int(ifname, "ifindex");
-    if (ifindex <= 0) {
+    if (ifindex <= 0 && !hint) {
         /* Only a real AP netdev may stand in for the VAP. */
         ifindex = ifindex_by_mac_ap(cmac, port >> 8, ifname, sizeof(ifname));
     }
     if (ifindex > 0) {
+        if (cached > 0 && cached != ifindex)
+            printf("pmap: port 0x%04x refreshed ifindex %d -> %d (%s)\n",
+                   port, cached, ifindex, ifname);
         if (mac) read_sysfs_mac(ifname, mac);
         pmap_set(port, ifindex, mac);
+        fflush(stdout);
+    } else if (cached > 0) {
+        printf("pmap: port 0x%04x stale (cached ifindex %d gone)\n",
+               port, cached);
+        fflush(stdout);
     }
     return ifindex;
+}
+
+static int vap_ifindex(int port, uint8_t mac[6])
+{
+    return vap_ifindex_hint(port, NULL, mac);
 }
 
 /* One key.  group=0 -> PAIRWISE with ATTR_MAC; group=1 -> GTK/IGTK. */

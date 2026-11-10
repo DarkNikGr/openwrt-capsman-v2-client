@@ -1,0 +1,1046 @@
+{
+  "schema": "w42.cap-regression/1",
+  "generated_at": "2026-11-10T20:23:11.160720+00:00",
+  "started_at": "2026-11-10T20:22:50.266000+00:00",
+  "mode": "legacy",
+  "mode_question": "classic deployment: local wifi-iface, CAP-local RSN, working data path",
+  "targets": {
+    "manager": "10.0.0.1:2244",
+    "cap": "10.0.0.126",
+    "cap_identity": "OpenWrt-CAP3"
+  },
+  "definitions": {
+    "join": "/interface wifi capsman remote-cap contains an entry for OpenWrt-CAP3 (state, address, connected-time present).",
+    "manager reports state=Ok": "that remote-cap entry has state=\"Ok\" (not Connecting/Error).",
+    "manager has a registration row for the STA": "/interface wifi registration-table has a row for the STA MAC; this is the manager's view, independent of hostapd's local view.",
+    "CAP holds no PSK (manager owns the 4-way)": "every hostapd BSS carries external_rsn_auth=1 and no real wpa_passphrase (only a placeholder); the RSN state machine is the manager's.",
+    "8/8 VAPs": "Two radios x four BSS (1 master + 3 slaves) provisioned by the manager and present as netdevs on the CAP: phy0-ap0..3 (2.4 GHz) and phy1-ap0..3 (5 GHz).",
+    "VAP up on the CAP": "netdev exists; iw reports type AP; operstate=up; ifindex>0; the netdev is enslaved to its expected br-vlanXX bridge; hostapd's generated config maps that BSS to the same bridge.",
+    "manager started the VAP (0x6016)": "the manager sent CAPsMAN v2 TYPE_START (0x6016) for that VAP's port and capagent acknowledged with 0xE016. Port encoding: radio0 0x0000..0x0003, radio1 0x0100..0x0103.",
+    "real STA associated": "iw station dump on a VAP shows associated=yes/authenticated=yes and the manager registration-table contains the STA MAC.",
+    "4-way complete": "iw station dump shows authorized=yes AND the manager row is authorized, with the CAP log showing 0x201b/0x201c/0x201f for the peer.",
+    "DHCP on the right VLAN": "the manager's DHCP server of the VLAN bound to that SSID has a bound lease for the STA MAC in that VLAN's subnet (cap-test vlan30 10.0.30/24, cap-guest vlan10 10.0.100/24, cap-iot vlan20 10.0.120/24, cap-hidden vlan99 10.0.0/24).",
+    "ping passes": "the manager can ping the leased STA address (3 probes, >=1 reply).",
+    "classic local wifi-iface layout": "/etc/config/wireless owns the BSSes (classic deployment): at least eight wifi-iface sections covering cap-hidden/test/guest/iot.",
+    "classic CAP-local RSN": "the CAP holds the PSK and hostapd completes the 4-way locally; this is the expected classic-mode behaviour and is accepted here.",
+    "zero local wifi-iface": "/etc/config/wireless has wifi-device sections only; the manager is the sole source of every SSID, VLAN and security setting.",
+    "no injection to a stale ifindex": "0x201c EAPOL TX must never target an ifindex whose netdev was recreated; a cached port map is re-resolved from the live ifname / BSSID before injection."
+  },
+  "pass_rules": {
+    "legacy_wifi_iface": "/etc/config/wireless contains >=8 wifi-iface sections and all four expected SSIDs (cap-hidden, cap-test, cap-guest, cap-iot)",
+    "classic_local_rsn": "at least one generated hostapd BSS carries a real wpa_passphrase and none carries external_rsn_auth=1",
+    "join": "remote-cap has an entry for OpenWrt-CAP3 with an address and connected-time",
+    "manager_state_ok": "that entry's state field is exactly 'Ok'",
+    "vaps_defined": "exactly 8 /interface wifi objects are bound to OpenWrt-CAP3",
+    "vaps_up": "all 8 phyX-apN exist, are type AP, operstate=up, ifindex>0, enslaved to the expected br-vlanXX, and the last sample is still 8/8",
+    "vap_start_0x6016": "the CAP log contains RX 0x6016 start port=0x0000..0x0003 and 0x0100..0x0103",
+    "sta_associate": "iw station dump reports associated=yes and authenticated=yes for the selected STA",
+    "manager_registration": "/interface wifi registration-table has a row for the STA MAC",
+    "cap_psk_free": "every hostapd BSS has external_rsn_auth=1 and no real wpa_passphrase (only a placeholder)",
+    "fourway": "kernel authorized=yes (a CAP-local 4-way is the classic behaviour and is accepted)",
+    "dhcp_vlan": "a bound manager DHCP lease for the STA MAC lies inside the SSID's VLAN subnet",
+    "ping": "the manager's ping to that lease receives at least one reply",
+    "stale_ifindex_fix": "no '0x201c: inject ... ret=-19' in the log window; if a port was re-resolved it is logged as 'pmap: ... refreshed'"
+  },
+  "required_checks": [
+    "legacy_wifi_iface",
+    "classic_local_rsn",
+    "join",
+    "manager_state_ok",
+    "vaps_defined",
+    "vaps_up",
+    "vap_start_0x6016",
+    "sta_associate",
+    "fourway",
+    "dhcp_vlan",
+    "ping",
+    "stale_ifindex_fix"
+  ],
+  "verdict": {
+    "status": "FAIL",
+    "live": "FAIL",
+    "full": null,
+    "failed_required": [
+      "dhcp_vlan",
+      "ping"
+    ],
+    "overall": "FAIL"
+  },
+  "counts": {
+    "vaps_defined": 8,
+    "vaps_up_now": 8,
+    "vaps_up_max": 8,
+    "vaps_started_0x6016": 8,
+    "stations": 2,
+    "wifi_iface": 8,
+    "fourway_owner": "cap-local",
+    "pmap_refreshed": 0,
+    "inject_enodev": 0
+  },
+  "checks": [
+    {
+      "id": "legacy_wifi_iface",
+      "question": "classic local wifi-iface layout",
+      "status": "PASS",
+      "detail": "8 wifi-iface section(s), ssids=cap-guest,cap-hidden,cap-iot,cap-test",
+      "definition": "/etc/config/wireless owns the BSSes (classic deployment): at least eight wifi-iface sections covering cap-hidden/test/guest/iot.",
+      "pass_rule": "/etc/config/wireless contains >=8 wifi-iface sections and all four expected SSIDs (cap-hidden, cap-test, cap-guest, cap-iot)",
+      "required": true,
+      "evidence": {
+        "wifi_iface": 8,
+        "ssids": [
+          "cap-hidden",
+          "cap-test",
+          "cap-guest",
+          "cap-hidden",
+          "cap-test",
+          "cap-guest",
+          "cap-iot",
+          "cap-iot"
+        ],
+        "expected_ssids": [
+          "cap-guest",
+          "cap-hidden",
+          "cap-iot",
+          "cap-test"
+        ],
+        "wifi_device": 2
+      }
+    },
+    {
+      "id": "classic_local_rsn",
+      "question": "classic CAP-local RSN",
+      "status": "PASS",
+      "detail": "real wpa_passphrase entries=12 external_rsn_auth=absent",
+      "definition": "the CAP holds the PSK and hostapd completes the 4-way locally; this is the expected classic-mode behaviour and is accepted here.",
+      "pass_rule": "at least one generated hostapd BSS carries a real wpa_passphrase and none carries external_rsn_auth=1",
+      "required": true,
+      "evidence": {
+        "wpa_passphrase_count": 12,
+        "external_rsn_auth": false,
+        "conf": {
+          "/var/run/hostapd-phy0.conf": {
+            "wpa": [
+              "0",
+              "2",
+              "2",
+              "2"
+            ],
+            "ssid": [
+              "cap-hidden",
+              "cap-test",
+              "cap-guest",
+              "cap-iot"
+            ],
+            "bridge": [
+              "br-vlan99",
+              "br-vlan30",
+              "br-vlan10",
+              "br-vlan20"
+            ],
+            "bss": [
+              "phy0-ap1",
+              "phy0-ap2",
+              "phy0-ap3"
+            ],
+            "wpa_passphrase": [
+              "cap-test-12345",
+              "GuestWiFi-123",
+              "IoTWiFi-123"
+            ],
+            "wpa_key_mgmt": [
+              "WPA-PSK",
+              "WPA-PSK",
+              "WPA-PSK"
+            ],
+            "vlan_file": [
+              "/var/run/hostapd-phy0-ap1.vlan",
+              "/var/run/hostapd-phy0-ap2.vlan",
+              "/var/run/hostapd-phy0-ap3.vlan"
+            ]
+          },
+          "/var/run/hostapd-phy0.conf.prev": {
+            "wpa": [
+              "0",
+              "2",
+              "2",
+              "2"
+            ],
+            "ssid": [
+              "cap-hidden",
+              "cap-test",
+              "cap-guest",
+              "cap-iot"
+            ],
+            "bridge": [
+              "br-vlan99",
+              "br-vlan30",
+              "br-vlan10",
+              "br-vlan20"
+            ],
+            "bss": [
+              "phy0-ap1",
+              "phy0-ap2",
+              "phy0-ap3"
+            ],
+            "wpa_passphrase": [
+              "cap-test-12345",
+              "GuestWiFi-123",
+              "IoTWiFi-123"
+            ],
+            "wpa_key_mgmt": [
+              "WPA-PSK",
+              "WPA-PSK",
+              "WPA-PSK"
+            ],
+            "vlan_file": [
+              "/var/run/hostapd-phy0-ap1.vlan",
+              "/var/run/hostapd-phy0-ap2.vlan",
+              "/var/run/hostapd-phy0-ap3.vlan"
+            ]
+          },
+          "/var/run/hostapd-phy1.conf": {
+            "wpa": [
+              "0",
+              "2",
+              "2",
+              "2"
+            ],
+            "ssid": [
+              "cap-hidden",
+              "cap-test",
+              "cap-guest",
+              "cap-iot"
+            ],
+            "bridge": [
+              "br-vlan99",
+              "br-vlan30",
+              "br-vlan10",
+              "br-vlan20"
+            ],
+            "bss": [
+              "phy1-ap1",
+              "phy1-ap2",
+              "phy1-ap3"
+            ],
+            "wpa_passphrase": [
+              "cap-test-12345",
+              "GuestWiFi-123",
+              "IoTWiFi-123"
+            ],
+            "wpa_key_mgmt": [
+              "WPA-PSK",
+              "WPA-PSK",
+              "WPA-PSK"
+            ],
+            "vlan_file": [
+              "/var/run/hostapd-phy1-ap1.vlan",
+              "/var/run/hostapd-phy1-ap2.vlan",
+              "/var/run/hostapd-phy1-ap3.vlan"
+            ]
+          },
+          "/var/run/hostapd-phy1.conf.prev": {
+            "wpa": [
+              "0",
+              "2",
+              "2",
+              "2"
+            ],
+            "ssid": [
+              "cap-hidden",
+              "cap-test",
+              "cap-guest",
+              "cap-iot"
+            ],
+            "bridge": [
+              "br-vlan99",
+              "br-vlan30",
+              "br-vlan10",
+              "br-vlan20"
+            ],
+            "bss": [
+              "phy1-ap1",
+              "phy1-ap2",
+              "phy1-ap3"
+            ],
+            "wpa_passphrase": [
+              "cap-test-12345",
+              "GuestWiFi-123",
+              "IoTWiFi-123"
+            ],
+            "wpa_key_mgmt": [
+              "WPA-PSK",
+              "WPA-PSK",
+              "WPA-PSK"
+            ],
+            "vlan_file": [
+              "/var/run/hostapd-phy1-ap1.vlan",
+              "/var/run/hostapd-phy1-ap2.vlan",
+              "/var/run/hostapd-phy1-ap3.vlan"
+            ]
+          }
+        }
+      }
+    },
+    {
+      "id": "join",
+      "question": "cap joins the manager",
+      "status": "PASS",
+      "detail": "CAP OpenWrt-CAP3 is connected from 10.0.0.126",
+      "definition": "/interface wifi capsman remote-cap contains an entry for OpenWrt-CAP3 (state, address, connected-time present).",
+      "pass_rule": "remote-cap has an entry for OpenWrt-CAP3 with an address and connected-time",
+      "required": true,
+      "evidence": {
+        "identity": "OpenWrt-CAP3",
+        "address": "10.0.0.126",
+        "connected_time": "1m34s",
+        "version": "7.25.1"
+      }
+    },
+    {
+      "id": "manager_state_ok",
+      "question": "manager reports state=Ok",
+      "status": "PASS",
+      "detail": "remote-cap state='Ok'",
+      "definition": "that remote-cap entry has state=\"Ok\" (not Connecting/Error).",
+      "pass_rule": "that entry's state field is exactly 'Ok'",
+      "required": true,
+      "evidence": {
+        "state": "Ok",
+        "connected_time": "1m34s"
+      }
+    },
+    {
+      "id": "vaps_defined",
+      "question": "vaps defined in /interface wifi",
+      "status": "PASS",
+      "detail": "8/8 manager VAP objects bound to OpenWrt-CAP3",
+      "definition": "Two radios x four BSS (1 master + 3 slaves) provisioned by the manager and present as netdevs on the CAP: phy0-ap0..3 (2.4 GHz) and phy1-ap0..3 (5 GHz).",
+      "pass_rule": "exactly 8 /interface wifi objects are bound to OpenWrt-CAP3",
+      "required": true,
+      "evidence": {
+        "defined": 8,
+        "expected": 8,
+        "names": [
+          "cap-wifi1",
+          "cap-wifi1-virtual1",
+          "cap-wifi1-virtual2",
+          "cap-wifi1-virtual3",
+          "cap-wifi2",
+          "cap-wifi2-virtual1",
+          "cap-wifi2-virtual2",
+          "cap-wifi2-virtual3"
+        ]
+      }
+    },
+    {
+      "id": "vaps_up",
+      "question": "vaps actually up on the CAP",
+      "status": "PASS",
+      "detail": "now=8/8, max_in_window=8/8, stable=True",
+      "definition": "netdev exists; iw reports type AP; operstate=up; ifindex>0; the netdev is enslaved to its expected br-vlanXX bridge; hostapd's generated config maps that BSS to the same bridge.",
+      "pass_rule": "all 8 phyX-apN exist, are type AP, operstate=up, ifindex>0, enslaved to the expected br-vlanXX, and the last sample is still 8/8",
+      "required": true,
+      "evidence": {
+        "now": 8,
+        "max": 8,
+        "stable": true,
+        "missing_now": [],
+        "missing_in_window": [],
+        "vaps": [
+          {
+            "ifname": "phy0-ap0",
+            "ssid": "cap-hidden",
+            "expected_bridge": "br-vlan99",
+            "observed": {
+              "name": "phy0-ap0",
+              "ifindex": 38,
+              "operstate": "up",
+              "master": "br-vlan99",
+              "mac": "2a:d1:27:1b:2d:82",
+              "ssid": "cap-hidden",
+              "type": "AP"
+            }
+          },
+          {
+            "ifname": "phy0-ap1",
+            "ssid": "cap-test",
+            "expected_bridge": "br-vlan30",
+            "observed": {
+              "name": "phy0-ap1",
+              "ifindex": 39,
+              "operstate": "up",
+              "master": "br-vlan30",
+              "mac": "2e:d1:27:1b:2d:82",
+              "ssid": "cap-test",
+              "type": "AP"
+            }
+          },
+          {
+            "ifname": "phy0-ap2",
+            "ssid": "cap-guest",
+            "expected_bridge": "br-vlan10",
+            "observed": {
+              "name": "phy0-ap2",
+              "ifindex": 40,
+              "operstate": "up",
+              "master": "br-vlan10",
+              "mac": "22:d1:27:1b:2d:82",
+              "ssid": "cap-guest",
+              "type": "AP"
+            }
+          },
+          {
+            "ifname": "phy0-ap3",
+            "ssid": "cap-iot",
+            "expected_bridge": "br-vlan20",
+            "observed": {
+              "name": "phy0-ap3",
+              "ifindex": 41,
+              "operstate": "up",
+              "master": "br-vlan20",
+              "mac": "26:d1:27:1b:2d:82",
+              "ssid": "cap-iot",
+              "type": "AP"
+            }
+          },
+          {
+            "ifname": "phy1-ap0",
+            "ssid": "cap-hidden",
+            "expected_bridge": "br-vlan99",
+            "observed": {
+              "name": "phy1-ap0",
+              "ifindex": 37,
+              "operstate": "up",
+              "master": "br-vlan99",
+              "mac": "2a:d1:27:1b:2d:83",
+              "ssid": "cap-hidden",
+              "type": "AP"
+            }
+          },
+          {
+            "ifname": "phy1-ap1",
+            "ssid": "cap-test",
+            "expected_bridge": "br-vlan30",
+            "observed": {
+              "name": "phy1-ap1",
+              "ifindex": 42,
+              "operstate": "up",
+              "master": "br-vlan30",
+              "mac": "2e:d1:27:1b:2d:83",
+              "ssid": "cap-test",
+              "type": "AP"
+            }
+          },
+          {
+            "ifname": "phy1-ap2",
+            "ssid": "cap-guest",
+            "expected_bridge": "br-vlan10",
+            "observed": {
+              "name": "phy1-ap2",
+              "ifindex": 43,
+              "operstate": "up",
+              "master": "br-vlan10",
+              "mac": "22:d1:27:1b:2d:83",
+              "ssid": "cap-guest",
+              "type": "AP"
+            }
+          },
+          {
+            "ifname": "phy1-ap3",
+            "ssid": "cap-iot",
+            "expected_bridge": "br-vlan20",
+            "observed": {
+              "name": "phy1-ap3",
+              "ifindex": 44,
+              "operstate": "up",
+              "master": "br-vlan20",
+              "mac": "26:d1:27:1b:2d:83",
+              "ssid": "cap-iot",
+              "type": "AP"
+            }
+          }
+        ],
+        "samples": [
+          8,
+          8,
+          8,
+          8,
+          8,
+          8,
+          8
+        ]
+      }
+    },
+    {
+      "id": "vap_start_0x6016",
+      "question": "manager started the VAP (0x6016)",
+      "status": "PASS",
+      "detail": "8/8 VAP start ports seen in the CAP log",
+      "definition": "the manager sent CAPsMAN v2 TYPE_START (0x6016) for that VAP's port and capagent acknowledged with 0xE016. Port encoding: radio0 0x0000..0x0003, radio1 0x0100..0x0103.",
+      "pass_rule": "the CAP log contains RX 0x6016 start port=0x0000..0x0003 and 0x0100..0x0103",
+      "required": true,
+      "evidence": {
+        "seen_ports": [
+          "0x0000",
+          "0x0001",
+          "0x0002",
+          "0x0003",
+          "0x0100",
+          "0x0101",
+          "0x0102",
+          "0x0103"
+        ],
+        "expected_ports": [
+          "0x0000",
+          "0x0001",
+          "0x0002",
+          "0x0003",
+          "0x0100",
+          "0x0101",
+          "0x0102",
+          "0x0103"
+        ],
+        "missing_ports": [],
+        "eapol": {
+          "0x201b": 0,
+          "0x201c": 0,
+          "0x201f_pairwise": 0,
+          "pmap_refreshed": 0,
+          "inject_ok": 0,
+          "inject_enodev": 0,
+          "authorized": 0,
+          "fourway_fail": 0,
+          "hostapd_local_4way": 4
+        }
+      }
+    },
+    {
+      "id": "sta_associate",
+      "question": "real STA associated",
+      "status": "PASS",
+      "detail": "STA 7a:50:ea:77:ba:8e on phy0-ap3 ssid=cap-iot associated=yes authenticated=yes manager_row=False",
+      "definition": "iw station dump on a VAP shows associated=yes/authenticated=yes and the manager registration-table contains the STA MAC.",
+      "pass_rule": "iw station dump reports associated=yes and authenticated=yes for the selected STA",
+      "required": true,
+      "evidence": {
+        "mac": "7a:50:ea:77:ba:8e",
+        "vap": "phy0-ap3",
+        "ssid": "cap-iot",
+        "flags": {
+          "signal": "-32",
+          "authorized": "yes",
+          "authenticated": "yes",
+          "associated": "yes"
+        },
+        "manager_registration": false,
+        "signal": "-32"
+      }
+    },
+    {
+      "id": "manager_registration",
+      "question": "manager has a registration row for the STA",
+      "status": "FAIL",
+      "detail": "manager registration-table row for 7a:50:ea:77:ba:8e: no",
+      "definition": "/interface wifi registration-table has a row for the STA MAC; this is the manager's view, independent of hostapd's local view.",
+      "pass_rule": "/interface wifi registration-table has a row for the STA MAC",
+      "required": false,
+      "evidence": {
+        "mac": "7a:50:ea:77:ba:8e",
+        "row": null
+      }
+    },
+    {
+      "id": "cap_psk_free",
+      "question": "CAP holds no PSK (manager owns the 4-way)",
+      "status": "FAIL",
+      "detail": "external_rsn_auth=ABSENT real wpa_passphrase entries=12; hostapd local 4-way events=4",
+      "definition": "every hostapd BSS carries external_rsn_auth=1 and no real wpa_passphrase (only a placeholder); the RSN state machine is the manager's.",
+      "pass_rule": "every hostapd BSS has external_rsn_auth=1 and no real wpa_passphrase (only a placeholder)",
+      "required": false,
+      "evidence": {
+        "external_rsn_auth": false,
+        "wpa_passphrase_count": 12,
+        "hostapd_local_4way": 4,
+        "conf": {
+          "/var/run/hostapd-phy0.conf": {
+            "wpa": [
+              "0",
+              "2",
+              "2",
+              "2"
+            ],
+            "ssid": [
+              "cap-hidden",
+              "cap-test",
+              "cap-guest",
+              "cap-iot"
+            ],
+            "bridge": [
+              "br-vlan99",
+              "br-vlan30",
+              "br-vlan10",
+              "br-vlan20"
+            ],
+            "bss": [
+              "phy0-ap1",
+              "phy0-ap2",
+              "phy0-ap3"
+            ],
+            "wpa_passphrase": [
+              "cap-test-12345",
+              "GuestWiFi-123",
+              "IoTWiFi-123"
+            ],
+            "wpa_key_mgmt": [
+              "WPA-PSK",
+              "WPA-PSK",
+              "WPA-PSK"
+            ],
+            "vlan_file": [
+              "/var/run/hostapd-phy0-ap1.vlan",
+              "/var/run/hostapd-phy0-ap2.vlan",
+              "/var/run/hostapd-phy0-ap3.vlan"
+            ]
+          },
+          "/var/run/hostapd-phy0.conf.prev": {
+            "wpa": [
+              "0",
+              "2",
+              "2",
+              "2"
+            ],
+            "ssid": [
+              "cap-hidden",
+              "cap-test",
+              "cap-guest",
+              "cap-iot"
+            ],
+            "bridge": [
+              "br-vlan99",
+              "br-vlan30",
+              "br-vlan10",
+              "br-vlan20"
+            ],
+            "bss": [
+              "phy0-ap1",
+              "phy0-ap2",
+              "phy0-ap3"
+            ],
+            "wpa_passphrase": [
+              "cap-test-12345",
+              "GuestWiFi-123",
+              "IoTWiFi-123"
+            ],
+            "wpa_key_mgmt": [
+              "WPA-PSK",
+              "WPA-PSK",
+              "WPA-PSK"
+            ],
+            "vlan_file": [
+              "/var/run/hostapd-phy0-ap1.vlan",
+              "/var/run/hostapd-phy0-ap2.vlan",
+              "/var/run/hostapd-phy0-ap3.vlan"
+            ]
+          },
+          "/var/run/hostapd-phy1.conf": {
+            "wpa": [
+              "0",
+              "2",
+              "2",
+              "2"
+            ],
+            "ssid": [
+              "cap-hidden",
+              "cap-test",
+              "cap-guest",
+              "cap-iot"
+            ],
+            "bridge": [
+              "br-vlan99",
+              "br-vlan30",
+              "br-vlan10",
+              "br-vlan20"
+            ],
+            "bss": [
+              "phy1-ap1",
+              "phy1-ap2",
+              "phy1-ap3"
+            ],
+            "wpa_passphrase": [
+              "cap-test-12345",
+              "GuestWiFi-123",
+              "IoTWiFi-123"
+            ],
+            "wpa_key_mgmt": [
+              "WPA-PSK",
+              "WPA-PSK",
+              "WPA-PSK"
+            ],
+            "vlan_file": [
+              "/var/run/hostapd-phy1-ap1.vlan",
+              "/var/run/hostapd-phy1-ap2.vlan",
+              "/var/run/hostapd-phy1-ap3.vlan"
+            ]
+          },
+          "/var/run/hostapd-phy1.conf.prev": {
+            "wpa": [
+              "0",
+              "2",
+              "2",
+              "2"
+            ],
+            "ssid": [
+              "cap-hidden",
+              "cap-test",
+              "cap-guest",
+              "cap-iot"
+            ],
+            "bridge": [
+              "br-vlan99",
+              "br-vlan30",
+              "br-vlan10",
+              "br-vlan20"
+            ],
+            "bss": [
+              "phy1-ap1",
+              "phy1-ap2",
+              "phy1-ap3"
+            ],
+            "wpa_passphrase": [
+              "cap-test-12345",
+              "GuestWiFi-123",
+              "IoTWiFi-123"
+            ],
+            "wpa_key_mgmt": [
+              "WPA-PSK",
+              "WPA-PSK",
+              "WPA-PSK"
+            ],
+            "vlan_file": [
+              "/var/run/hostapd-phy1-ap1.vlan",
+              "/var/run/hostapd-phy1-ap2.vlan",
+              "/var/run/hostapd-phy1-ap3.vlan"
+            ]
+          }
+        }
+      }
+    },
+    {
+      "id": "fourway",
+      "question": "4-way completes",
+      "status": "PASS",
+      "detail": "owner=cap-local, kernel authorized=yes, manager row=False, 0x201f pairwise=0, hostapd local 4-way events=4; kernel authorized by hostapd's LOCAL 4-way, not by the manager (no 0x201f pairwise)",
+      "definition": "iw station dump shows authorized=yes AND the manager row is authorized, with the CAP log showing 0x201b/0x201c/0x201f for the peer.",
+      "pass_rule": "kernel authorized=yes (a CAP-local 4-way is the classic behaviour and is accepted)",
+      "required": true,
+      "evidence": {
+        "owner": "cap-local",
+        "authorized": "yes",
+        "manager_registration": false,
+        "eapol": {
+          "0x201b": 0,
+          "0x201c": 0,
+          "0x201f_pairwise": 0,
+          "pmap_refreshed": 0,
+          "inject_ok": 0,
+          "inject_enodev": 0,
+          "authorized": 0,
+          "fourway_fail": 0,
+          "hostapd_local_4way": 4
+        }
+      }
+    },
+    {
+      "id": "dhcp_vlan",
+      "question": "STA gets DHCP on the right VLAN",
+      "status": "FAIL",
+      "detail": "ssid=cap-iot vlan=20 expected=10.0.120.0/24 lease=none",
+      "definition": "the manager's DHCP server of the VLAN bound to that SSID has a bound lease for the STA MAC in that VLAN's subnet (cap-test vlan30 10.0.30/24, cap-guest vlan10 10.0.100/24, cap-iot vlan20 10.0.120/24, cap-hidden vlan99 10.0.0/24).",
+      "pass_rule": "a bound manager DHCP lease for the STA MAC lies inside the SSID's VLAN subnet",
+      "required": true,
+      "evidence": {
+        "ssid": "cap-iot",
+        "vlan": 20,
+        "expected_subnet": "10.0.120.0/24",
+        "lease": null,
+        "all_leases_for_mac": []
+      }
+    },
+    {
+      "id": "ping",
+      "question": "ping passes",
+      "status": "FAIL",
+      "detail": "ping n/a: no reply",
+      "definition": "the manager can ping the leased STA address (3 probes, >=1 reply).",
+      "pass_rule": "the manager's ping to that lease receives at least one reply",
+      "required": true,
+      "evidence": {}
+    },
+    {
+      "id": "stale_ifindex_fix",
+      "question": "no injection to a stale ifindex",
+      "status": "PASS",
+      "detail": "0x201c attempts=0 ok=0 enodev=0 pmap_refreshed=0",
+      "definition": "0x201c EAPOL TX must never target an ifindex whose netdev was recreated; a cached port map is re-resolved from the live ifname / BSSID before injection.",
+      "pass_rule": "no '0x201c: inject ... ret=-19' in the log window; if a port was re-resolved it is logged as 'pmap: ... refreshed'",
+      "required": true,
+      "evidence": {
+        "eapol": {
+          "0x201b": 0,
+          "0x201c": 0,
+          "0x201f_pairwise": 0,
+          "pmap_refreshed": 0,
+          "inject_ok": 0,
+          "inject_enodev": 0,
+          "authorized": 0,
+          "fourway_fail": 0,
+          "hostapd_local_4way": 4
+        }
+      }
+    }
+  ],
+  "sampling": {
+    "window_s": 15,
+    "interval_s": 2.0,
+    "samples": [
+      {
+        "up_count": 8
+      },
+      {
+        "up_count": 8
+      },
+      {
+        "up_count": 8
+      },
+      {
+        "up_count": 8
+      },
+      {
+        "up_count": 8
+      },
+      {
+        "up_count": 8
+      },
+      {
+        "up_count": 8
+      }
+    ]
+  },
+  "live_state": {
+    "remote_caps": [
+      {
+        "address": "10.0.0.122",
+        "identity": "BE65",
+        "board-name": "Qualcomm Technologies, Inc. IPQ5332/AP-MI01.6",
+        "serial": "3C64CF1BA072",
+        "version": "7.25.1",
+        "base-mac": "3C:64:CF:1B:A0:74",
+        "common-name": "Deco-BE65",
+        "state": "Ok",
+        "connected-time": "1h56m43s",
+        "uptime": "2h6m5s"
+      },
+      {
+        "address": "10.0.0.126",
+        "identity": "OpenWrt-CAP3",
+        "board-name": "Xiaomi Mi Router 4A Gigabit Edition",
+        "serial": "28D1271B2D80",
+        "version": "7.25.1",
+        "base-mac": "28:D1:27:1B:2D:82",
+        "common-name": "OpenWrt-CAP3",
+        "state": "Ok",
+        "connected-time": "1m34s",
+        "uptime": "10m56s",
+        "_match": "identity"
+      }
+    ],
+    "vaps": [
+      {
+        "name": "cap-wifi1",
+        "master": "",
+        "ssid": "cap-hidden",
+        "vlan": "99",
+        "mac": "28:D1:27:1B:2D:82",
+        "cap": "OpenWrt-CAP3@10.0.0.126"
+      },
+      {
+        "name": "cap-wifi1-virtual1",
+        "master": "cap-wifi1",
+        "ssid": "cap-test",
+        "vlan": "30",
+        "mac": "2A:D1:27:1B:2D:82",
+        "cap": "OpenWrt-CAP3@10.0.0.126"
+      },
+      {
+        "name": "cap-wifi1-virtual2",
+        "master": "cap-wifi1",
+        "ssid": "cap-guest",
+        "vlan": "10",
+        "mac": "2A:D1:27:1B:2D:83",
+        "cap": "OpenWrt-CAP3@10.0.0.126"
+      },
+      {
+        "name": "cap-wifi1-virtual3",
+        "master": "cap-wifi1",
+        "ssid": "cap-iot",
+        "vlan": "20",
+        "mac": "2A:D1:27:1B:2D:84",
+        "cap": "OpenWrt-CAP3@10.0.0.126"
+      },
+      {
+        "name": "cap-wifi2",
+        "master": "",
+        "ssid": "cap-hidden",
+        "vlan": "99",
+        "mac": "28:D1:27:1B:2D:83",
+        "cap": "OpenWrt-CAP3@10.0.0.126"
+      },
+      {
+        "name": "cap-wifi2-virtual1",
+        "master": "cap-wifi2",
+        "ssid": "cap-test",
+        "vlan": "30",
+        "mac": "2A:D1:27:1B:2D:85",
+        "cap": "OpenWrt-CAP3@10.0.0.126"
+      },
+      {
+        "name": "cap-wifi2-virtual2",
+        "master": "cap-wifi2",
+        "ssid": "cap-guest",
+        "vlan": "10",
+        "mac": "2A:D1:27:1B:2D:86",
+        "cap": "OpenWrt-CAP3@10.0.0.126"
+      },
+      {
+        "name": "cap-wifi2-virtual3",
+        "master": "cap-wifi2",
+        "ssid": "cap-iot",
+        "vlan": "20",
+        "mac": "2A:D1:27:1B:2D:87",
+        "cap": "OpenWrt-CAP3@10.0.0.126"
+      }
+    ],
+    "registration_table": [],
+    "stations": {
+      "50:8b:b9:7e:4f:e9": {
+        "mac": "50:8b:b9:7e:4f:e9",
+        "ifname": "phy0-ap1",
+        "flags": {
+          "signal": "0",
+          "authorized": "no",
+          "authenticated": "no",
+          "associated": "no"
+        }
+      },
+      "7a:50:ea:77:ba:8e": {
+        "mac": "7a:50:ea:77:ba:8e",
+        "ifname": "phy0-ap3",
+        "flags": {
+          "signal": "-32",
+          "authorized": "yes",
+          "authenticated": "yes",
+          "associated": "yes"
+        }
+      }
+    },
+    "ifaces": {
+      "phy0-ap0": {
+        "name": "phy0-ap0",
+        "ifindex": 38,
+        "operstate": "up",
+        "master": "br-vlan99",
+        "mac": "2a:d1:27:1b:2d:82",
+        "ssid": "cap-hidden",
+        "type": "AP"
+      },
+      "phy0-ap1": {
+        "name": "phy0-ap1",
+        "ifindex": 39,
+        "operstate": "up",
+        "master": "br-vlan30",
+        "mac": "2e:d1:27:1b:2d:82",
+        "ssid": "cap-test",
+        "type": "AP"
+      },
+      "phy0-ap2": {
+        "name": "phy0-ap2",
+        "ifindex": 40,
+        "operstate": "up",
+        "master": "br-vlan10",
+        "mac": "22:d1:27:1b:2d:82",
+        "ssid": "cap-guest",
+        "type": "AP"
+      },
+      "phy0-ap3": {
+        "name": "phy0-ap3",
+        "ifindex": 41,
+        "operstate": "up",
+        "master": "br-vlan20",
+        "mac": "26:d1:27:1b:2d:82",
+        "ssid": "cap-iot",
+        "type": "AP"
+      },
+      "phy1-ap0": {
+        "name": "phy1-ap0",
+        "ifindex": 37,
+        "operstate": "up",
+        "master": "br-vlan99",
+        "mac": "2a:d1:27:1b:2d:83",
+        "ssid": "cap-hidden",
+        "type": "AP"
+      },
+      "phy1-ap1": {
+        "name": "phy1-ap1",
+        "ifindex": 42,
+        "operstate": "up",
+        "master": "br-vlan30",
+        "mac": "2e:d1:27:1b:2d:83",
+        "ssid": "cap-test",
+        "type": "AP"
+      },
+      "phy1-ap2": {
+        "name": "phy1-ap2",
+        "ifindex": 43,
+        "operstate": "up",
+        "master": "br-vlan10",
+        "mac": "22:d1:27:1b:2d:83",
+        "ssid": "cap-guest",
+        "type": "AP"
+      },
+      "phy1-ap3": {
+        "name": "phy1-ap3",
+        "ifindex": 44,
+        "operstate": "up",
+        "master": "br-vlan20",
+        "mac": "26:d1:27:1b:2d:83",
+        "ssid": "cap-iot",
+        "type": "AP"
+      }
+    },
+    "bridges": {
+      "br-vlan10": [
+        "br-lan.10",
+        "phy0-ap2",
+        "phy1-ap2"
+      ],
+      "br-vlan20": [
+        "br-lan.20",
+        "phy0-ap3",
+        "phy1-ap3"
+      ],
+      "br-vlan30": [
+        "br-lan.30",
+        "phy0-ap1",
+        "phy1-ap1"
+      ],
+      "br-vlan99": [
+        "br-lan.99",
+        "phy0-ap0",
+        "phy1-ap0"
+      ]
+    },
+    "capagent": "28444 /usr/sbin/capagent"
+  },
+  "errors": []
+}

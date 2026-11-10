@@ -185,6 +185,7 @@ struct cfg {
     /* W36: in-CAP MLME for one manager-provisioned VAP (no hostapd). */
     int mlme;
     int mlme_port;
+    const char *selftest_pmap;  /* W42: diagnostic port-map refresh test */
 };
 
 static mbedtls_x509_crt g_ca;
