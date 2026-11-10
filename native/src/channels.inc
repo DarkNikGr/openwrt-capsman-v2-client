@@ -123,8 +123,11 @@ static void createvap_response(mbedtls_ssl_context *ssl, const uint8_t hdr[10],
        phy+0x30 and sets "current freq known" (phy+0x34), which chansel uses. */
     {
         uint8_t cf[4];
-        put32(cf, phy_freq_hint(phy));
-        n += put_el(body + n, 0x61, cf, 4);
+        uint32_t hf = phy_freq_hint(phy);
+        if (hf) {
+            put32(cf, hf);
+            n += put_el(body + n, 0x61, cf, 4);
+        }
     }
     size_t n61 = n;
 

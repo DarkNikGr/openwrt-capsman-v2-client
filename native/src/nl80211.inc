@@ -177,6 +177,58 @@ static int nl_cmd_open(void)
     return 0;
 }
 
+/* Supported cipher suites of a wiphy, from NL80211_CMD_GET_WIPHY
+   (NL80211_ATTR_CIPHER_SUITES, a u32 array).  Returns bytes written. */
+static int nl_get_wiphy_ciphers(int phy, uint8_t *out, int outmax)
+{
+    if (nl_cmd_open() != 0) return 0;
+    struct nl_buf m;
+    nlb_init(&m, NL80211_CMD_GET_WIPHY, 0);
+    nlb_u32(&m, NL80211_ATTR_WIPHY, (uint32_t)phy);
+    struct sockaddr_nl sa;
+    memset(&sa, 0, sizeof(sa));
+    sa.nl_family = AF_NETLINK;
+    if (sendto(g_nl_cmd_fd, m.buf, m.nlh->nlmsg_len, 0,
+               (struct sockaddr *)&sa, sizeof(sa)) < 0)
+        return 0;
+    uint8_t rbuf[NL_MAX_MSG];
+    for (;;) {
+        struct pollfd pfd = { .fd = g_nl_cmd_fd, .events = POLLIN,
+                              .revents = 0 };
+        int pr = poll(&pfd, 1, 1000);
+        if (pr <= 0) return 0;
+        int n = recv(g_nl_cmd_fd, rbuf, sizeof(rbuf), 0);
+        if (n <= 0) return 0;
+        for (struct nlmsghdr *nlh = (struct nlmsghdr *)rbuf;
+             NLMSG_OK(nlh, n); nlh = NLMSG_NEXT(nlh, n)) {
+            if (nlh->nlmsg_seq != m.nlh->nlmsg_seq) continue;
+            if (nlh->nlmsg_type == NLMSG_ERROR) return 0;
+            int alen = nlh->nlmsg_len - NLMSG_LENGTH(GENL_HDRLEN);
+            struct nlattr *at = (struct nlattr *)((uint8_t *)NLMSG_DATA(nlh) +
+                                                  GENL_HDRLEN);
+            for (struct nlattr *x = at; alen >= (int)NLA_HDRLEN &&
+                 x->nla_len >= NLA_HDRLEN && x->nla_len <= alen;
+                 alen -= NLA_ALIGN(x->nla_len),
+                 x = (struct nlattr *)((uint8_t *)x + NLA_ALIGN(x->nla_len))) {
+                if ((x->nla_type & NLA_TYPE_MASK) !=
+                    NL80211_ATTR_CIPHER_SUITES) continue;
+                int bytes = x->nla_len - NLA_HDRLEN;
+                uint32_t *v = (uint32_t *)((uint8_t *)x + NLA_HDRLEN);
+                int cnt = 0;
+                for (int i = 0; i < bytes / 4 && cnt < outmax; i++) {
+                    out[cnt * 4 + 0] = (uint8_t)(v[i] >> 24);
+                    out[cnt * 4 + 1] = (uint8_t)(v[i] >> 16);
+                    out[cnt * 4 + 2] = (uint8_t)(v[i] >> 8);
+                    out[cnt * 4 + 3] = (uint8_t)v[i];
+                    cnt++;
+                }
+                return cnt * 4;
+            }
+            return 0;
+        }
+    }
+}
+
 /* port -> netdev.  The manager addresses a VAP as (phy<<8)|vapid; the
    interface created for it is phy<N>-ap<M> (see createvap_response). */
 struct port_map {

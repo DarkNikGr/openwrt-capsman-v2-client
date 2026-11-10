@@ -218,71 +218,62 @@ static int parse_sel(const char *p, uint8_t out[4])
 }
 
 /* Ciphers, chain masks and AP-interface limit from `iw phy phyN info`. */
+static int nl_get_wiphy_ciphers(int phy, uint8_t *out, int outmax);
+
 static void read_phy_caps(int phy, struct phy_caps *pc)
 {
     char cmd[128], line[256];
     int in_ciph = 0;
     memset(pc, 0, sizeof(*pc));
-    pc->tx_chain = pc->rx_chain = 0x3;
-    pc->max_ap = 8;
     snprintf(cmd, sizeof(cmd), "/usr/sbin/iw phy phy%d info 2>/dev/null", phy);
     FILE *fp = popen(cmd, "r");
-    if (!fp) return;
-    while (fgets(line, sizeof(line), fp)) {
-        char *p;
-        unsigned tx, rx;
-        if (sscanf(line, " Available Antennas: TX 0x%x RX 0x%x", &tx, &rx) == 2 ||
-            sscanf(line, "	Available Antennas: TX 0x%x RX 0x%x", &tx, &rx) == 2) {
-            pc->tx_chain = tx;
-            pc->rx_chain = rx;
-        }
-        if (strstr(line, "Supported Ciphers:")) { in_ciph = 1; continue; }
-        if (in_ciph) {
-            if ((p = strchr(line, '(')) != NULL) {
-                uint8_t sel[4];
-                if (parse_sel(p + 1, sel)) {
-                    /* keep TKIP/CCMP/GCMP selectors (00-0f-ac-01..0a) */
-                    if (sel[0] == 0x00 && sel[1] == 0x0f && sel[2] == 0xac &&
-                        sel[3] >= 0x02 && sel[3] <= 0x0a && pc->nciphers < 8) {
+    if (fp) {
+        while (fgets(line, sizeof(line), fp)) {
+            char *p;
+            unsigned tx, rx;
+            if (sscanf(line, " Available Antennas: TX 0x%x RX 0x%x",
+                       &tx, &rx) == 2) {
+                pc->tx_chain = tx;
+                pc->rx_chain = rx;
+            }
+            if (strstr(line, "Supported Ciphers:")) { in_ciph = 1; continue; }
+            if (in_ciph) {
+                if ((p = strchr(line, '(')) != NULL) {
+                    uint8_t sel[4];
+                    if (parse_sel(p + 1, sel) && sel[0] == 0x00 &&
+                        sel[1] == 0x0f && sel[2] == 0xac &&
+                        sel[3] >= 0x02 && sel[3] <= 0x0a &&
+                        pc->nciphers < 8) {
                         memcpy(pc->ciphers + pc->nciphers * 4, sel, 4);
                         pc->nciphers++;
                     }
+                } else if (line[0] != '\t' && line[0] != ' ') {
+                    in_ciph = 0;
                 }
-            } else if (line[0] != '\t' && line[0] != ' ') {
-                in_ciph = 0;
+            }
+            p = strstr(line, "AP");
+            if (p) {
+                char *q = strstr(p, "<=");
+                if (q) {
+                    int n = atoi(q + 2);
+                    if (n > 0 && (pc->max_ap == 0 || n < pc->max_ap))
+                        pc->max_ap = n;
+                }
             }
         }
-        if ((p = strstr(line, "#{ AP")) != NULL ||
-            (p = strstr(line, "#{AP")) != NULL) {
-            char *q = strstr(p, "<=");
-            if (q) {
-                int n = atoi(q + 2);
-                if (n > 0 && n < pc->max_ap) pc->max_ap = n;
-            }
-        }
+        pclose(fp);
     }
-    pclose(fp);
     if (pc->nciphers == 0) {
-        static const uint8_t ccmp[4] = { 0x00, 0x0f, 0xac, 0x04 };
-        memcpy(pc->ciphers, ccmp, 4);
-        pc->nciphers = 1;
+        int nb = nl_get_wiphy_ciphers(phy, pc->ciphers, 8);
+        pc->nciphers = nb / 4;
     }
+    if (pc->nciphers == 0)
+        fprintf(stderr, "capagent: phy%d reports no ciphers\n", phy);
+    if (pc->tx_chain == 0)
+        fprintf(stderr, "capagent: phy%d reports no tx chains\n", phy);
+    if (pc->max_ap == 0)
+        fprintf(stderr, "capagent: phy%d reports no AP interface limit\n", phy);
 }
-
-/* 2.4 GHz channels 1-13 (channel 14 is disabled). */
-static const uint32_t freqs_2g[] = {
-    2412, 2417, 2422, 2427, 2432, 2437, 2442,
-    2447, 2452, 2457, 2462, 2467, 2472
-};
-/* 5 GHz: 36-48, 52-64 (DFS), 100-144 (DFS), 149-177.  DFS channels are
-   advertised: CAPsMAN may select them and the CAP runs CAC in hostapd. */
-static const uint32_t freqs_5g[] = {
-    5180, 5200, 5220, 5240,
-    5260, 5280, 5300, 5320,
-    5500, 5520, 5540, 5560, 5580, 5600, 5620, 5640,
-    5660, 5680, 5700, 5720,
-    5745, 5765, 5785, 5805, 5825, 5845, 5865
-};
 
 #define PHY_MAX_FREQ 96
 
@@ -318,13 +309,8 @@ static void read_phy_bands(int phy, struct phy_bands *pb)
         }
         pclose(fp);
     }
-    if (pb->nfreq == 0) {
-        const uint32_t *src = (phy == 0) ? freqs_2g : freqs_5g;
-        int n = (phy == 0) ? (int)(sizeof(freqs_2g)/sizeof(freqs_2g[0]))
-                           : (int)(sizeof(freqs_5g)/sizeof(freqs_5g[0]));
-        for (int i = 0; i < n && i < PHY_MAX_FREQ; i++)
-            pb->freq[pb->nfreq++] = src[i];
-    }
+    if (pb->nfreq == 0)
+        fprintf(stderr, "capagent: phy%d reports no frequencies\n", phy);
     for (int i = 0; i < pb->nfreq; i++) {
         uint32_t f = pb->freq[i];
         if (f < 3000) have2 = 1;
@@ -362,7 +348,7 @@ static uint32_t phy_freq_hint(int phy)
     struct phy_bands pb;
     read_phy_bands(phy, &pb);
     if (pb.nfreq) return pb.freq[0];
-    return 2437;
+    return 0;
 }
 
 static void build_newphy(uint8_t *b, const uint8_t mac[6], int phy, size_t *out)
@@ -385,12 +371,12 @@ static void build_newphy(uint8_t *b, const uint8_t mac[6], int phy, size_t *out)
 
     /* Interface/peer limits: 8 is the manager-side ceiling we advertise;
        the driver still enforces its own limit. */
-    put16(v16, (uint16_t)pc.max_ap);
-    n += put_el(b+n, 0x7e, v16, 2);
-    n += put_el(b+n, 0x7f, v16, 2);
-    n += put_el(b+n, 0x80, v16, 2);
-    put16(v16, 120);
-    n += put_el(b+n, 0x81, v16, 2);
+    if (pc.max_ap > 0) {
+        put16(v16, (uint16_t)pc.max_ap);
+        n += put_el(b+n, 0x7e, v16, 2);
+        n += put_el(b+n, 0x7f, v16, 2);
+        n += put_el(b+n, 0x80, v16, 2);
+    }
 
     /* 0x83 is a string (hw-type), not the old 8-byte capability blob. */
     n += put_el(b+n, 0x83, hw, (uint16_t)strlen(hw));
@@ -398,13 +384,18 @@ static void build_newphy(uint8_t *b, const uint8_t mac[6], int phy, size_t *out)
     put32(v32, 1);
     n += put_el(b+n, 0x8a, v32, 4);
 
-    n += put_el(b+n, 0x5e, pc.ciphers, (uint16_t)(pc.nciphers * 4));
+    if (pc.nciphers > 0)
+        n += put_el(b+n, 0x5e, pc.ciphers, (uint16_t)(pc.nciphers * 4));
     n += put_el(b+n, 0x05, fbuf, (uint16_t)(pb.nfreq * 4));
 
-    put32(v32, pc.tx_chain);
-    n += put_el(b+n, 0x4b, v32, 4);   /* tx chains */
-    put32(v32, pc.rx_chain);
-    n += put_el(b+n, 0x4c, v32, 4);   /* rx chains */
+    if (pc.tx_chain) {
+        put32(v32, pc.tx_chain);
+        n += put_el(b+n, 0x4b, v32, 4);   /* tx chains */
+    }
+    if (pc.rx_chain) {
+        put32(v32, pc.rx_chain);
+        n += put_el(b+n, 0x4c, v32, 4);   /* rx chains */
+    }
     for (int i = 0; i < pb.nband; i++) {
         uint8_t bd[5] = { pb.band[i], 0, 0, 0, 0x01 };
         if (pb.band[i] == 0x82 || pb.band[i] == 0x03) bd[4] = 0x03;

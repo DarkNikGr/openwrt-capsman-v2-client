@@ -373,12 +373,12 @@ static void send_2018(mbedtls_ssl_context *ssl, int phy, int vap,
 {
     uint8_t fr[256], b[BODY_MAX], ch[32];
     size_t fl, n = 0, cn = 0;
-    uint8_t w = (freq < 3000) ? 1 : 3, band = band_code_for_freq((uint32_t)freq);
+    uint8_t band = band_code_for_freq((uint32_t)freq);
+    if (freq <= 0) return;
     fl = mkauth(fr, bssid, sta);
     uint8_t cf[4];
     cf[0] = freq >> 24; cf[1] = freq >> 16; cf[2] = freq >> 8; cf[3] = freq;
     cn += put_el(ch + cn, 0x0b, cf, 4);
-    cn += put_el(ch + cn, 0x0c, &w, 1);
     cn += put_el(ch + cn, 0x10, &band, 1);
     n += put_el(b + n, 0x3e, fr, (uint16_t)fl);
     uint8_t sig[4] = { 0xff, 0xff, 0xff, 0xce };   /* -50 dBm */
@@ -423,7 +423,7 @@ static void maybe_inject_assoc(mbedtls_ssl_context *ssl, const struct cfg *c)
                 }
             }
             pclose(fp);
-            if (!have_bssid) continue;
+            if (!have_bssid || freq <= 0) continue;
             snprintf(cmd, sizeof(cmd), "/usr/sbin/iw dev %s station dump 2>/dev/null", ifn);
             fp = popen(cmd, "r");
             int sent_vap = 0;

@@ -152,8 +152,13 @@ static int run_once(struct cfg *c)
             put32(x27, (uint32_t)i27);
             z27 += put_el(b27 + z27, 0x48, x27, 4);
             z27 += put_el(b27 + z27, 0x49, in27, (uint16_t)strlen(in27));
-            put32(x27, phy_freq_hint(p27 >> 8));
-            z27 += put_el(b27 + z27, 0x61, x27, 4);
+            {
+                uint32_t hf = phy_freq_hint(p27 >> 8);
+                if (hf) {
+                    put32(x27, hf);
+                    z27 += put_el(b27 + z27, 0x61, x27, 4);
+                }
+            }
             send_hdr_msg(&ssl, 0xE027, hdr + 2, b27, (uint16_t)z27);
             static time_t last_stats;
             if (time(NULL) != last_stats) {
