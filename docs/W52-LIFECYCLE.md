@@ -11,9 +11,10 @@ released and in which order.
 |---|---|
 | one netdev per `(phy,vapid)` | `own_claim()` is the only creation path; `g_vmap`/`g_vap` keep the MAC→id stable; a duplicate `0x500b` returns the same id/ifindex/name |
 | one hostapd per `(phy,vapid)` | pid file + journaled pid + `/proc/<pid>/cmdline` scan matched against `/tmp/vap-<ifname>.conf`; `own_try_start()` never starts when either proves a live daemon |
-| duplicate `0x6016` | identical body → ignored; changed body → stop the old daemon, unlink pid/conf, start exactly one new one |
+| repeated `0x6016` | while a hostapd is alive the message is journalled but the daemon is left alone (the official manager re-sends with non-config bytes that used to cause a restart loop); a real profile change arrives as `0x600c` + `0x500b` + `0x6016` |
 | `0x600c` full teardown | `dp_vap_close` → extmux/ext-auth close+unlink → `dc_forget_vap` → `vchan_clear`/`pmap_del` → `own_destroy` (hostapd, files, netdev) → wait for the name to vanish → `vapid_release_slot` → `mgmt_vap_del` |
 | id release | `vapid_release_slot(phy,id)` after the netdev is gone, plus MAC release; the next `0x47` can reuse 0..15 without colliding |
+| no start race | a per-entry `starting` guard serialises `0x6016` and the 1 s ownership reconcile, so two callers cannot spawn daemons for the same BSS |
 | failure is bounded | `OWN_START_TRIES=5`, 2 s exponential backoff, each failure logged `n/5`, one final “giving up” line; a new `0x6016` resets the budget |
 | no zombie/defunct hostapd | `vap_hostapd_start()` reaps the `-B` intermediate child; `vap_stop_hostapd()` TERM→KILL→`waitpid(WNOHANG)`; the watchdog also reaps orphans |
 | no orphan objects | 5 s `vap_watchdog()` reaps pid/conf files, hostapd processes, `phyN-apM`/`capN-M` netdevs and `ext-auth-*` sockets with no live VAP or journal row — never a netifd BSS |
