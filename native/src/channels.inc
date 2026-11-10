@@ -4,6 +4,7 @@
 static void dp_vap_open(struct vap *v);
 static void mgmt_vap_add(int ifindex);
 static int ext_auth_bind(struct vap *v, const char *dir);
+static int vap_netdev_create(int phy, const char *ifname, const uint8_t mac[6]);
 
 static uint32_t ccfi80(uint32_t f)
 {
@@ -104,10 +105,15 @@ static void createvap_response(mbedtls_ssl_context *ssl, const uint8_t hdr[10],
     }
     /* U3: hostapd may own an interface with a different name; the -i
        mapping is authoritative when the conventional name does not exist. */
-    if (ifindex <= 0 && phy < MAX_RADIOS && c->ifnames[phy][0]) {
+    if (ifindex <= 0 && vapid == 0 && phy < MAX_RADIOS && c->ifnames[phy][0]) {
         snprintf(ifname, sizeof(ifname), "%s", c->ifnames[phy]);
         ifindex = read_sysfs_int(ifname, "ifindex");
     }
+
+    /* W14: the manager treats the reply's ifindex as authoritative, so the
+       netdev must exist before 0xd00b is sent. */
+    if (ifindex <= 0 && ifname[0])
+        ifindex = vap_netdev_create(phy, ifname, mac);
 
     /* P0: bind the VAP to its netdev, VLAN and channel. */
     {

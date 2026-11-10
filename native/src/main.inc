@@ -295,6 +295,7 @@ static int run_once(struct cfg *c)
                 if (find_el(body, len, 0x48, &iv, &il) && il == 4)
                     mgmt_vap_add((int)rd32(iv));
             }
+            vap_provision(port, body, len, c);
             send_hdr_msg(&ssl, TYPE_START_RESP, hdr + 2, NULL, 0);
         } else if (type == TYPE_ECHO) {
             const uint8_t *k = NULL, *iv = NULL;
@@ -400,6 +401,7 @@ int main(int argc, char **argv)
     c.serial = NULL;
     c.a1[0]=0x00; c.a1[1]=0x00; c.a1[2]=0x02; c.a1[3]=0x32;
     c.e70[0]=0x00; c.e70[1]=0x00; c.e70[2]=0x00; c.e70[3]=0x02;
+    c.vap_auto = 1;
     c.dc_port = DC_PORT_DEFAULT;
     c.dc_id = DC_ID_DEFAULT;
     parse_ifnames(&c, "phy0-ap0,phy1-ap0");
@@ -411,7 +413,7 @@ int main(int argc, char **argv)
            OPT_DC_COOKIE, OPT_DC_ID, OPT_DC_PEER, OPT_APPLY, OPT_NOACK,
            OPT_EAPOL_LEG, OPT_LAB_AP, OPT_LAB_SSID, OPT_LAB_CHAN, OPT_INJECT,
            OPT_PHYS, OPT_DP_BRIDGE, OPT_VAP_MTU, OPT_BCAST, OPT_MGMT_RELAY,
-           OPT_MGMT_SOURCE, OPT_EXTAUTH };
+           OPT_MGMT_SOURCE, OPT_EXTAUTH, OPT_VAPAUTO, OPT_NOVAPAUTO };
     static struct option opts[] = {
         {"manager", required_argument, 0, 'm'},
         {"port", required_argument, 0, 'p'},
@@ -448,6 +450,8 @@ int main(int argc, char **argv)
         {"mgmt-relay", no_argument, 0, OPT_MGMT_RELAY},
         {"mgmt-source", required_argument, 0, OPT_MGMT_SOURCE},
         {"ext-auth-dir", required_argument, 0, OPT_EXTAUTH},
+        {"vap-auto", no_argument, 0, OPT_VAPAUTO},
+        {"no-vap-auto", no_argument, 0, OPT_NOVAPAUTO},
         {"lab-ap", required_argument, 0, OPT_LAB_AP},
         {"lab-ssid", required_argument, 0, OPT_LAB_SSID},
         {"lab-chan", required_argument, 0, OPT_LAB_CHAN},
@@ -487,6 +491,8 @@ int main(int argc, char **argv)
         case OPT_DC_ID: c.dc_id = (uint16_t)atoi(optarg); break;
         case OPT_DC_PEER: c.dc_peer_port = (uint16_t)atoi(optarg); break;
         case OPT_APPLY: g_apply = 1; break;
+        case OPT_VAPAUTO: c.vap_auto = 1; break;
+        case OPT_NOVAPAUTO: c.vap_auto = 0; break;
         case OPT_NOACK: c.no_ack = 1; break;
         case OPT_INJECT: c.inject_assoc = 1; break;
         case OPT_DP_BRIDGE: c.datapath_bridge = 1; break;
