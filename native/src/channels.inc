@@ -19,19 +19,18 @@ static uint32_t ccfi80(uint32_t f)
    with ccfi1, band 0x03 (5ghz-ac), because the 5 GHz configs use 20/40/80. */
 static size_t add_channel_tlvs(uint8_t *b, size_t n, int phy)
 {
-    const uint32_t *freqs = (phy & 1) ? freqs_5g : freqs_2g;
-    size_t nfreq = (phy & 1) ? sizeof(freqs_5g) / sizeof(freqs_5g[0])
-                             : sizeof(freqs_2g) / sizeof(freqs_2g[0]);
-    for (size_t i = 0; i < nfreq; i++) {
-        uint8_t sub[40], f[4], c[4];
+    struct phy_bands pb;
+    read_phy_bands(phy, &pb);
+    for (int i = 0; i < pb.nfreq; i++) {
+        uint8_t sub[48], f[4], c[4];
         size_t sn = 0;
-        uint8_t width = (phy & 1) ? 3 : 1;
-        uint8_t band = (phy & 1) ? 0x03 : 0x81;
-        put32(f, freqs[i]);
+        uint8_t width = (pb.freq[i] < 3000) ? 1 : 3;
+        uint8_t band = band_code_for_freq(pb.freq[i]);
+        put32(f, pb.freq[i]);
         sn += put_el(sub + sn, 0x0b, f, 4);
         sn += put_el(sub + sn, 0x0c, &width, 1);
-        if (phy & 1) {
-            put32(c, ccfi80(freqs[i]));
+        if (width > 1) {
+            put32(c, ccfi80(pb.freq[i]));
             sn += put_el(sub + sn, 0x0d, c, 4);
         }
         sn += put_el(sub + sn, 0x10, &band, 1);
@@ -45,11 +44,11 @@ static size_t add_channel_tlvs(uint8_t *b, size_t n, int phy)
    0..15 per interface and keep it stable for the same MAC, otherwise the
    manager rejects the reply as a duplicate ("CREATEVAP bad response") and the
    virtual user stays in CreatingVap forever. */
-static struct { int used; uint8_t mac[6]; } g_vmap[2][16];
+static struct { int used; uint8_t mac[6]; } g_vmap[MAX_RADIOS][16];
 
 static int vapid_for(int phy, const uint8_t mac[6])
 {
-    int r = phy & 1;
+    int r = phy % MAX_RADIOS;
     for (int i = 0; i < 16; i++)
         if (g_vmap[r][i].used && !memcmp(g_vmap[r][i].mac, mac, 6))
             return i;
@@ -64,7 +63,7 @@ static int vapid_for(int phy, const uint8_t mac[6])
 
 static void vapid_release(int phy, const uint8_t mac[6])
 {
-    int r = phy & 1;
+    int r = phy % MAX_RADIOS;
     for (int i = 0; i < 16; i++)
         if (g_vmap[r][i].used && !memcmp(g_vmap[r][i].mac, mac, 6))
             g_vmap[r][i].used = 0;
@@ -124,7 +123,7 @@ static void createvap_response(mbedtls_ssl_context *ssl, const uint8_t hdr[10],
        phy+0x30 and sets "current freq known" (phy+0x34), which chansel uses. */
     {
         uint8_t cf[4];
-        put32(cf, (phy & 1) ? 5180u : 2437u);
+        put32(cf, phy_freq_hint(phy));
         n += put_el(body + n, 0x61, cf, 4);
     }
     size_t n61 = n;
@@ -132,16 +131,14 @@ static void createvap_response(mbedtls_ssl_context *ssl, const uint8_t hdr[10],
     /* 0x00B7 = u32 key set used by ActAp::chansel (actman+0x220).  Send the
        same frequency list as BE32 values. */
     {
-        const uint32_t *freqs = (phy & 1) ? freqs_5g : freqs_2g;
-        size_t nfreq = (phy & 1) ? sizeof(freqs_5g) / sizeof(freqs_5g[0])
-                                 : sizeof(freqs_2g) / sizeof(freqs_2g[0]);
-        uint8_t list[sizeof(freqs_5g)];
-        for (size_t i = 0; i < nfreq; i++) {
-            uint32_t ch = (phy & 1) ? (freqs[i] - 5000) / 5
-                                    : (freqs[i] - 2407) / 5;
+        struct phy_bands pb;
+        uint8_t list[PHY_MAX_FREQ * 4];
+        read_phy_bands(phy, &pb);
+        for (int i = 0; i < pb.nfreq; i++) {
+            uint32_t ch = (pb.freq[i] - chan_base_for_freq(pb.freq[i])) / 5;
             put32(list + i * 4, ch);
         }
-        n += put_el(body + n, 0xb7, list, (uint16_t)(nfreq * 4));
+        n += put_el(body + n, 0xb7, list, (uint16_t)(pb.nfreq * 4));
     }
 
     printf("d00b build base=%zu chan=%zu(delta=%zu) c61=%zu b7=%zu\n",

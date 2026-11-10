@@ -3,7 +3,7 @@
 
 static void vlan_wid_set(int phy, uint16_t vlan, int wid)
 {
-    int r = phy & 1;
+    int r = phy % MAX_RADIOS;
     for (int i = 0; i < 16; i++) {
         if (g_vw[r][i].used && g_vw[r][i].vlan == vlan) {
             g_vw[r][i].wid = wid;
@@ -22,7 +22,7 @@ static void vlan_wid_set(int phy, uint16_t vlan, int wid)
 
 static int vlan_wid_get(int phy, uint16_t vlan)
 {
-    int r = phy & 1;
+    int r = phy % MAX_RADIOS;
     for (int i = 0; i < 16; i++)
         if (g_vw[r][i].used && g_vw[r][i].vlan == vlan)
             return g_vw[r][i].wid;
@@ -61,7 +61,7 @@ struct dc_keyent {
     uint8_t cookie[DC_COOKIE_MAX];
     size_t cookie_len;
 };
-static struct dc_keyent g_dckey[2][16];
+static struct dc_keyent g_dckey[MAX_RADIOS][16];
 
 /* c2 datachan header ("cdh"), exactly as c2.ko cm_datachan_xmit() writes it:
      [0]      radio id (rid; 0x500b message port >> 8)
@@ -309,7 +309,7 @@ static void dc_service(struct dc_ctx *d)
         plen = (size_t)r - DC_PFX_LEN - DC_HDR_LEN;
         ct = buf + DC_PFX_LEN + DC_HDR_LEN;
         {
-            struct dc_keyent *ke = &g_dckey[rid & 1][wid & 0x0f];
+            struct dc_keyent *ke = &g_dckey[rid % MAX_RADIOS][wid & 0x0f];
             const uint8_t *kk = ke->used ? ke->key : d->key;
             size_t kkl = ke->used ? ke->key_len : d->key_len;
             if (!kkl || plen < DC_TAG_LEN) {
@@ -421,7 +421,7 @@ static void dc_handle_create(struct dc_ctx *d, const struct cfg *c,
             }
             if (wid < 0)
                 wid = vapid_for(rid, m);
-            struct dc_keyent *e = &g_dckey[rid & 1][wid & 0x0f];
+            struct dc_keyent *e = &g_dckey[rid % MAX_RADIOS][wid & 0x0f];
             e->used = 1;
             memcpy(e->key, key, key_len);
             e->key_len = key_len;

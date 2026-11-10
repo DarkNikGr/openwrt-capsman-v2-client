@@ -373,7 +373,7 @@ static void send_2018(mbedtls_ssl_context *ssl, int phy, int vap,
 {
     uint8_t fr[256], b[BODY_MAX], ch[32];
     size_t fl, n = 0, cn = 0;
-    uint8_t w = (phy & 1) ? 3 : 1, band = (phy & 1) ? 0x03 : 0x81;
+    uint8_t w = (freq < 3000) ? 1 : 3, band = band_code_for_freq((uint32_t)freq);
     fl = mkauth(fr, bssid, sta);
     uint8_t cf[4];
     cf[0] = freq >> 24; cf[1] = freq >> 16; cf[2] = freq >> 8; cf[3] = freq;
@@ -407,7 +407,7 @@ static void maybe_inject_assoc(mbedtls_ssl_context *ssl, const struct cfg *c)
         for (int vap = 0; vap < 8; vap++) {
             char ifn[32], cmd[96], line[256], ssid[33] = "test";
             uint8_t bssid[6] = {0};
-            int freq = (phy & 1) ? 5180 : 2437, have_bssid = 0;
+            int freq = (int)phy_freq_hint(phy), have_bssid = 0;
             snprintf(ifn, sizeof(ifn), "phy%d-ap%d", phy, vap);
             snprintf(cmd, sizeof(cmd), "/usr/sbin/iw dev %s info 2>/dev/null", ifn);
             FILE *fp = popen(cmd, "r");

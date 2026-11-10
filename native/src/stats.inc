@@ -81,7 +81,7 @@ static void emit_station(mbedtls_ssl_context *ssl, int phy, int vap,
     uint16_t port = (uint16_t)((phy << 8) | vap);
     time_t now = time(NULL);
 
-    if (!freq) freq = (phy & 1) ? 5180 : 2437;          /* fallback */
+    if (!freq) freq = phy_freq_hint(phy);               /* fallback */
     if (!width) width = (freq < 3000) ? 20 : 80;        /* fallback */
 
     /* 0x200E: station appeared/updated; this is the signal source. */
@@ -90,7 +90,7 @@ static void emit_station(mbedtls_ssl_context *ssl, int phy, int vap,
     cn += put_el(ch + cn, 0x0b, v2, 2);
     w = (uint8_t)chan_width_code(width);
     cn += put_el(ch + cn, 0x0c, &w, 1);
-    w = (freq < 3000) ? 0x81 : 0x03;
+    w = band_code_for_freq(freq);
     cn += put_el(ch + cn, 0x10, &w, 1);
     n += put_el(b + n, 0x0a, ch, (uint16_t)cn);
     {   /* opaque station-info blob (24 dwords) copied into sta+0x18 */

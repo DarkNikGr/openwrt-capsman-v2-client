@@ -197,7 +197,7 @@ static const char *phy_hwtype(int phy)
                  base ? base + 1 : link);
         return name;
     }
-    return (phy & 1) ? "mt76x2e" : "mt7603e";
+    return "unknown";
 }
 
 /* 2.4 GHz channels 1-13 (channel 14 is disabled). */
@@ -215,6 +215,87 @@ static const uint32_t freqs_5g[] = {
     5745, 5765, 5785, 5805, 5825, 5845, 5865
 };
 
+#define PHY_MAX_FREQ 96
+
+struct phy_bands {
+    uint32_t freq[PHY_MAX_FREQ];
+    int nfreq;
+    uint8_t band[8];
+    int nband;
+};
+
+static void iface_chan(const char *ifn, unsigned *freq, unsigned *width);
+
+/* Supported frequencies/bands of a radio, from `iw phy phyN info`.  Falls
+   back to the legacy 2.4/5 GHz tables only when iw gives nothing. */
+static void read_phy_bands(int phy, struct phy_bands *pb)
+{
+    char cmd[128], line[256];
+    int have2 = 0, have5 = 0, have6 = 0;
+    memset(pb, 0, sizeof(*pb));
+    snprintf(cmd, sizeof(cmd), "/usr/sbin/iw phy phy%d info 2>/dev/null", phy);
+    FILE *fp = popen(cmd, "r");
+    if (fp) {
+        while (fgets(line, sizeof(line), fp)) {
+            unsigned f;
+            if (strstr(line, "disabled")) continue;
+            if (sscanf(line, " * %u MHz", &f) == 1) {
+                int dup = 0;
+                for (int i = 0; i < pb->nfreq; i++)
+                    if (pb->freq[i] == f) dup = 1;
+                if (!dup && pb->nfreq < PHY_MAX_FREQ)
+                    pb->freq[pb->nfreq++] = f;
+            }
+        }
+        pclose(fp);
+    }
+    if (pb->nfreq == 0) {
+        const uint32_t *src = (phy == 0) ? freqs_2g : freqs_5g;
+        int n = (phy == 0) ? (int)(sizeof(freqs_2g)/sizeof(freqs_2g[0]))
+                           : (int)(sizeof(freqs_5g)/sizeof(freqs_5g[0]));
+        for (int i = 0; i < n && i < PHY_MAX_FREQ; i++)
+            pb->freq[pb->nfreq++] = src[i];
+    }
+    for (int i = 0; i < pb->nfreq; i++) {
+        uint32_t f = pb->freq[i];
+        if (f < 3000) have2 = 1;
+        else if (f < 5925) have5 = 1;
+        else have6 = 1;
+    }
+    if (have2) { pb->band[pb->nband++] = 0x81; pb->band[pb->nband++] = 0x82; }
+    if (have5) { pb->band[pb->nband++] = 0x01; pb->band[pb->nband++] = 0x03; }
+    if (have6) { pb->band[pb->nband++] = 0x06; }
+}
+
+static uint8_t band_code_for_freq(uint32_t f)
+{
+    if (f < 3000) return 0x81;      /* 2ghz-g */
+    if (f < 5925) return 0x03;      /* 5ghz-ac */
+    return 0x06;                    /* 6ghz */
+}
+
+static uint32_t chan_base_for_freq(uint32_t f)
+{
+    if (f < 3000) return 2407;
+    if (f < 5925) return 5000;
+    return 5950;
+}
+
+/* Current operating frequency of a radio (first VAP), else its first
+   supported frequency, else a safe default. */
+static uint32_t phy_freq_hint(int phy)
+{
+    char ifn[32];
+    unsigned f = 0, w = 0;
+    snprintf(ifn, sizeof(ifn), "phy%d-ap0", phy);
+    iface_chan(ifn, &f, &w);
+    if (f) return f;
+    struct phy_bands pb;
+    read_phy_bands(phy, &pb);
+    if (pb.nfreq) return pb.freq[0];
+    return 2437;
+}
+
 static void build_newphy(uint8_t *b, const uint8_t mac[6], int phy, size_t *out)
 {
     uint8_t v16[2], v32[4];
@@ -224,34 +305,20 @@ static void build_newphy(uint8_t *b, const uint8_t mac[6], int phy, size_t *out)
         0x00,0x0f,0xac,0x02,   /* TKIP */
         0x00,0x0f,0xac,0x04    /* CCMP-128 */
     };
-    /* 0x4d = band id (1 byte) + supported-width bitmask (4-byte BE).
-       mask: 1=20, 3=20/40, 7=20/40/80. */
-    static const uint8_t bands_2g[][5] = {
-        {0x81,0,0,0,0x01},     /* 2ghz-g: 20 MHz */
-        {0x82,0,0,0,0x03}      /* 2ghz-n: 20/40 */
-    };
-    static const uint8_t bands_5g[][5] = {
-        {0x01,0,0,0,0x01},     /* 5ghz-a: 20 MHz */
-        {0x03,0,0,0,0x07}      /* 5ghz-ac: 20/40/80 */
-    };
-    const uint32_t *freqs = (phy & 1) ? freqs_5g : freqs_2g;
-    size_t nfreq = (phy & 1) ? sizeof(freqs_5g)/sizeof(freqs_5g[0])
-                             : sizeof(freqs_2g)/sizeof(freqs_2g[0]);
-    const uint8_t (*bands)[5] = (phy & 1) ? bands_5g : bands_2g;
-    size_t nbands = (phy & 1) ? sizeof(bands_5g)/sizeof(bands_5g[0])
-                              : sizeof(bands_2g)/sizeof(bands_2g[0]);
-    uint8_t fbuf[sizeof(freqs_5g) / sizeof(freqs_5g[0]) * 4];
+    struct phy_bands pb;
+    uint8_t fbuf[PHY_MAX_FREQ * 4];
     const char *hw = phy_hwtype(phy);
     size_t n = 0;
 
-    for (size_t i = 0; i < nfreq; i++)
-        put32(fbuf + i * 4, freqs[i]);
+    read_phy_bands(phy, &pb);
+    for (int i = 0; i < pb.nfreq; i++)
+        put32(fbuf + i * 4, pb.freq[i]);
 
     n += put_el(b+n, 0x08, mac, 6);
 
-    /* phy0 (MT7603E) allows 4 AP interfaces, phy1 (MT7612E) 8; max-peers
-       defaults to 120 on both. */
-    put16(v16, (phy & 1) ? 8 : 4);
+    /* Interface/peer limits: 8 is the manager-side ceiling we advertise;
+       the driver still enforces its own limit. */
+    put16(v16, 8);
     n += put_el(b+n, 0x7e, v16, 2);
     n += put_el(b+n, 0x7f, v16, 2);
     n += put_el(b+n, 0x80, v16, 2);
@@ -265,14 +332,18 @@ static void build_newphy(uint8_t *b, const uint8_t mac[6], int phy, size_t *out)
     n += put_el(b+n, 0x8a, v32, 4);
 
     n += put_el(b+n, 0x5e, ciphers, sizeof(ciphers));
-    n += put_el(b+n, 0x05, fbuf, (uint16_t)(nfreq * 4));
+    n += put_el(b+n, 0x05, fbuf, (uint16_t)(pb.nfreq * 4));
 
-    /* Both radios are 2x2: chains 0 and 1. */
+    /* 2x2 chains (driver-dependent; this is the common mt76 value). */
     put32(v32, 0x00000003);
     n += put_el(b+n, 0x4b, v32, 4);   /* tx chains */
     n += put_el(b+n, 0x4c, v32, 4);   /* rx chains */
-    for (size_t i = 0; i < nbands; i++)
-        n += put_el(b+n, 0x4d, bands[i], 5);
+    for (int i = 0; i < pb.nband; i++) {
+        uint8_t bd[5] = { pb.band[i], 0, 0, 0, 0x01 };
+        if (pb.band[i] == 0x82 || pb.band[i] == 0x03) bd[4] = 0x03;
+        if (pb.band[i] == 0x03 || pb.band[i] == 0x06) bd[4] = 0x07;
+        n += put_el(b+n, 0x4d, bd, 5);
+    }
 
     /* 0x84 = little-endian capability bitset.  Bit 6 (0x40) tells the
        manager the CAP supports the data channel; without it a

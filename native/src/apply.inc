@@ -211,7 +211,30 @@ static void apply_vaps(void)
         return;
     }
     char line[512];
+    char devs[8][32];
+    int ndev = 0;
     while (fgets(line, sizeof(line), p)) {
+        /* wireless.<dev>=wifi-device -> collect for reconf */
+        if (strncmp(line, "wireless.", 9) == 0) {
+            char *eqd = strchr(line, '=');
+            if (eqd && strstr(eqd + 1, "wifi-device")) {
+                *eqd = 0;
+                char *nm = line + 9;
+                if (!strchr(nm, '.') && ndev < 8) {
+                    size_t nl = strlen(nm);
+                    int okd = (nl > 0 && nl < 32);
+                    for (size_t k = 0; k < nl; k++)
+                        if (!isalnum((unsigned char)nm[k]) && nm[k] != '_')
+                            okd = 0;
+                    if (okd) {
+                        memcpy(devs[ndev], nm, nl);
+                        devs[ndev][nl] = 0;
+                        ndev++;
+                    }
+                }
+                continue;
+            }
+        }
         /* wireless.<sec>.network='wifi<vlan>' */
         char *d1 = strchr(line, '.');
         if (!d1) continue;
@@ -255,13 +278,15 @@ static void apply_vaps(void)
     run_argv(del2);
     char *commit[] = { "uci", "-q", "commit", "wireless", NULL };
     run_argv(commit);
-    char *r0[] = { "ubus", "call", "network.wireless", "reconf",
-                   "{\"device\":\"radio0\"}", NULL };
-    char *r1[] = { "ubus", "call", "network.wireless", "reconf",
-                   "{\"device\":\"radio1\"}", NULL };
-    run_argv(r0);
-    run_argv(r1);
-    printf("apply: wifi-iface sections updated (argv, no shell)\n");
+    for (int i = 0; i < ndev; i++) {
+        char json[64];
+        snprintf(json, sizeof(json), "{\"device\":\"%s\"}", devs[i]);
+        char *av[] = { "ubus", "call", "network.wireless", "reconf",
+                       json, NULL };
+        run_argv(av);
+    }
+    printf("apply: %d wifi-iface sections updated, %d radios reconfigured\n",
+           g_nvap, ndev);
 }
 
 static void handle_c029(const uint8_t *body, uint16_t len)
@@ -319,5 +344,5 @@ static int vapid_for(int phy, const uint8_t mac[6]);
    datachan creates carry the master MAC for every VLAN, so the MAC alone
    cannot identify the VAP. */
 struct vlan_wid { int used; uint16_t vlan; int wid; };
-static struct vlan_wid g_vw[2][16];
+static struct vlan_wid g_vw[MAX_RADIOS][16];
 

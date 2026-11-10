@@ -152,7 +152,7 @@ static int run_once(struct cfg *c)
             put32(x27, (uint32_t)i27);
             z27 += put_el(b27 + z27, 0x48, x27, 4);
             z27 += put_el(b27 + z27, 0x49, in27, (uint16_t)strlen(in27));
-            put32(x27, (p27 & 1) ? 5180u : 2437u);
+            put32(x27, phy_freq_hint(p27 >> 8));
             z27 += put_el(b27 + z27, 0x61, x27, 4);
             send_hdr_msg(&ssl, 0xE027, hdr + 2, b27, (uint16_t)z27);
             static time_t last_stats;
@@ -246,7 +246,7 @@ static void usage(const char *p)
         "  --dc-key HEX                 16/32-byte datachan key (test override)\n"
         "  --dc-cookie HEX              <=16-byte datachan cookie (test override)\n"
         "  --dc-id N                    datachan id (default: 428)\n"
-        "  --apply                      write 0x77 SSID/VLAN/key to UCI (radio1)\n"
+        "  --apply                      write 0x77 SSID/VLAN/key to UCI (all radios)\n"
         "  --eapol-leg tls|datachan|both\n"
         "                               STA EAPOL -> manager leg (default tls = 0x201B)\n"
         "  --lab-ap IFACE               lab only: bring up a minimal AP on IFACE\n"
