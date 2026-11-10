@@ -1349,7 +1349,7 @@ static void cap_extmux_start(struct cfg *c, mbedtls_ssl_context *ssl,
     };
     struct extmux_stats st;
 
-    if (!c->ext_auth_dir || g_extmux) return;
+    if (!c->ext_auth_dir || g_extmux || c->no_extmux) return;
     memset(&g_xmctx, 0, sizeof(g_xmctx));
     g_xmctx.ssl = ssl;
     g_xmctx.dc = dc;

@@ -133,6 +133,16 @@ static int net_connect_timeout(mbedtls_net_context *fd, const char *host,
     return -1;
 }
 
+/* W45: one label for logs, matching the real policy.  There is no silent
+ * third state: either verification is required with a configured CA, or it
+ * was explicitly disabled with --dont-verify-certificate. */
+static const char *tls_verify_label(const struct cfg *c)
+{
+    if (c->dont_verify) return "none (--dont-verify-certificate)";
+    if (c->ca_cert && *c->ca_cert) return "required (ca)";
+    return "fail-closed (no CA configured)";
+}
+
 static int connect_tls(mbedtls_net_context *fd, mbedtls_ssl_context *ssl,
                        mbedtls_ssl_config *conf, mbedtls_entropy_context *ent,
                        mbedtls_ctr_drbg_context *ctr, mbedtls_x509_crt *crt,
@@ -160,6 +170,23 @@ static int connect_tls(mbedtls_net_context *fd, mbedtls_ssl_context *ssl,
         fprintf(stderr, "cert %s: %s\n", c->cert, err);
         return -1;
     }
+    /* W45: an expired client certificate is an enrolment error, not a reason
+     * to present a dead identity silently.  Fail closed and let the operator
+     * (or a future enrolment path) replace it. */
+    if (mbedtls_x509_time_is_past(&crt->valid_to)) {
+        fprintf(stderr, "cert %s: expired at %04d-%02d-%02d %02d:%02d:%02d; "
+                "refusing to join (fail closed)\n", c->cert,
+                crt->valid_to.year, crt->valid_to.mon, crt->valid_to.day,
+                crt->valid_to.hour, crt->valid_to.min, crt->valid_to.sec);
+        return -1;
+    }
+    if (mbedtls_x509_time_is_future(&crt->valid_from)) {
+        fprintf(stderr, "cert %s: not valid yet (valid_from %04d-%02d-%02d); "
+                "refusing to join (fail closed)\n", c->cert,
+                crt->valid_from.year, crt->valid_from.mon,
+                crt->valid_from.day);
+        return -1;
+    }
     if ((r = mbedtls_pk_parse_keyfile(pk, c->key, NULL,
                                       mbedtls_ctr_drbg_random, ctr)) != 0) {
         mbedtls_strerror(r, err, sizeof(err));
@@ -173,22 +200,30 @@ static int connect_tls(mbedtls_net_context *fd, mbedtls_ssl_context *ssl,
         fprintf(stderr, "ssl_config_defaults: %s\n", err);
         return -1;
     }
+    /* W45: never fail open.  A configured CA that is missing, unreadable or
+     * invalid is a fatal configuration error; it must not silently become
+     * VERIFY_NONE while the log still says "verify=ca".  A deployment that
+     * really wants no verification has one explicit switch. */
     int verify = 0;
-    if (!c->dont_verify && c->ca_cert && *c->ca_cert) {
-        FILE *cf = fopen(c->ca_cert, "r");
-        if (cf) {
-            fclose(cf);
-            if (!g_ca_loaded) {
-                mbedtls_x509_crt_init(&g_ca);
-                if ((r = mbedtls_x509_crt_parse_file(&g_ca, c->ca_cert)) != 0) {
-                    mbedtls_strerror(r, err, sizeof(err));
-                    fprintf(stderr, "ca %s: %s\n", c->ca_cert, err);
-                    return -1;
-                }
-                g_ca_loaded = 1;
-            }
-            verify = 1;
+    if (!c->dont_verify) {
+        if (!c->ca_cert || !*c->ca_cert) {
+            fprintf(stderr, "TLS: certificate verification is enabled but no "
+                    "CA is configured; refusing to connect (fail closed). "
+                    "Use --ca-cert FILE or --dont-verify-certificate.\n");
+            return -1;
         }
+        if (!g_ca_loaded) {
+            mbedtls_x509_crt_init(&g_ca);
+            if ((r = mbedtls_x509_crt_parse_file(&g_ca, c->ca_cert)) != 0) {
+                mbedtls_strerror(r, err, sizeof(err));
+                mbedtls_x509_crt_free(&g_ca);
+                fprintf(stderr, "ca %s: %s; refusing to disable verification "
+                        "(fail closed)\n", c->ca_cert, err);
+                return -1;
+            }
+            g_ca_loaded = 1;
+        }
+        verify = 1;
     }
     if (verify) {
         mbedtls_ssl_conf_ca_chain(conf, &g_ca, NULL);
