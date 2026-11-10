@@ -246,9 +246,11 @@ static void vap_write_channel(FILE *f, uint32_t freq, int wcode)
      * written for a DFS primary.  The stock OpenWrt hostapd already ships
      * this option (300-noscan.patch) and netifd sets ht_coex=0. */
     if (width >= 80 && !vap_is_dfs_chan(chan)) fprintf(f, "noscan=1\n");
-    if (g_vap_country && g_vap_country[0])
-        fprintf(f, "country_code=%s\nieee80211d=1\n%s\n", g_vap_country,
-                vap_is_dfs_chan(chan) ? "ieee80211h=1" : "");
+    /* Regulatory domain is set once by vap_set_regdomain(); per-BSS
+     * country_code stalls in COUNTRY_UPDATE.  11d/11h are only needed for
+     * DFS channels. */
+    if (g_vap_country && g_vap_country[0] && vap_is_dfs_chan(chan))
+        fprintf(f, "ieee80211d=1\nieee80211h=1\n");
     fprintf(f, "ieee80211n=1\nieee80211ac=1\n");
 
     if (width >= 40)
@@ -260,6 +262,29 @@ static void vap_write_channel(FILE *f, uint32_t freq, int wcode)
     } else {
         fprintf(f, "vht_oper_chwidth=0\n");
     }
+}
+
+/* Program the regulatory domain once, before the first hostapd.  CAPsMAN v2
+ * does not deliver a country, so it is a CAP setting (--country/COUNTRY=).
+ * hostapd's own country_code makes it wait in COUNTRY_UPDATE for a regdomain
+ * event that may never arrive when another interface already set the same
+ * country; doing it here keeps the per-BSS start deterministic. */
+static int vap_set_regdomain(void)
+{
+    static int done;
+    if (done) return 0;
+    done = 1;
+    if (!g_vap_country || !g_vap_country[0]) return 0;
+    if (nl_cmd_open() != 0) return -1;
+    struct nl_buf m;
+    nlb_init(&m, NL80211_CMD_REQ_SET_REG, NLM_F_ACK);
+    nlb_put(&m, NL80211_ATTR_REG_ALPHA2, g_vap_country,
+            strlen(g_vap_country) + 1);
+    int rc = nl_send_ack(g_nl_cmd_fd, &m);
+    printf("vap: regulatory country=%s %s\n", g_vap_country,
+           rc ? strerror(rc < 0 ? -rc : rc) : "set");
+    fflush(stdout);
+    return rc;
 }
 
 /* Create an AP netdev on the wiphy.  Returns the ifindex or <= 0. */
@@ -472,6 +497,11 @@ static int vap_hostapd_start_one(int port, const char *ifname, int phy, int vapi
         fprintf(f, "logger_syslog=-1\nlogger_stdout_level=3\n");
     fclose(f);
 
+    {   /* a killed hostapd leaves its per-BSS ctrl socket behind */
+        char ctrl[128];
+        snprintf(ctrl, sizeof(ctrl), "/var/run/hostapd/%s", ifname);
+        unlink(ctrl);
+    }
     pid_t pid = fork();
     if (pid == 0) {
         int fd = open(logf, O_CREAT | O_WRONLY | O_TRUNC, 0600);
@@ -528,6 +558,7 @@ static int vap_hostapd_start_one(int port, const char *ifname, int phy, int vapi
         if (hpid > 0) kill((pid_t)hpid, SIGKILL);
         return -1;
     }
+    usleep(1000 * 1000);    /* let the chanctx settle before the next VAP */
     printf("vap: hostapd %s ssid=%s freq=%u akm=%s%s%s mfp=%d vlan=%u pid=%d\n",
            ifname, (const char *)ssid, freq,
            ri.akm_psk ? "psk" : "", ri.akm_psk256 ? ",psk256" : "",
@@ -896,6 +927,7 @@ static void vap_provision(int port, const uint8_t *body, uint16_t len,
 {
     int phy = (port >> 8) & 0xff;
     int vapid = port & 0xff;
+    vap_set_regdomain();
     if (phy >= MAX_RADIOS || vapid > 15) {
         fprintf(stderr, "vap: 0x6016 for invalid port 0x%04x, ignored\n", port);
         fflush(stderr);
