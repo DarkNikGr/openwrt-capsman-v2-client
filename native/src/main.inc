@@ -1,6 +1,32 @@
 /* main.inc — run loop, options, main
  * Part of capagent.c (single translation unit; included in order). */
 
+/* W14: every connection starts from a clean session.  A manager reboot or a
+ * CAP reconnect must not keep the previous vapid/ifindex/key map, otherwise
+ * the manager's fresh 0x500b/0x6016 sequence lands on stale state.  Kernel
+ * objects (netdevs, hostapd, keys) are untouched; they are re-adopted. */
+static void cap_reset_session(void)
+{
+    if (g_extmux) {
+        extmux_free(g_extmux);
+        g_extmux = NULL;
+    }
+    for (int r = 0; r < MAX_RADIOS; r++)
+        for (int w = 0; w < 16; w++)
+            if (g_vap[r][w].used && g_vap[r][w].extfd >= 0)
+                close(g_vap[r][w].extfd);
+    memset(g_vap, 0, sizeof(g_vap));
+    for (int r = 0; r < MAX_RADIOS; r++)
+        for (int w = 0; w < 16; w++) {
+            g_vap[r][w].extfd = -1;
+            g_vap[r][w].l2fd = -1;
+        }
+    memset(g_pmap, 0, sizeof(g_pmap));
+    memset(g_vchan, 0, sizeof(g_vchan));
+    memset(g_vmap, 0, sizeof(g_vmap));
+    g_sta_ident = 0;
+}
+
 static int run_once(struct cfg *c)
 {
     mbedtls_net_context fd;
@@ -14,6 +40,7 @@ static int run_once(struct cfg *c)
     size_t join_len;
     uint8_t hdr[14];
     struct dc_ctx dc;
+    char mgr[160];
 
     memset(&dc, 0, sizeof(dc));
     dc.fd = -1;
@@ -31,8 +58,26 @@ static int run_once(struct cfg *c)
     g_bcast_flood = c->bcast_flood;
     g_msrc_cfg = c->mgmt_source;
 
+    /* W14: discover on every attempt.  At boot S95 runs ~130 s before the
+     * WAN lease, so a single discovery can only cache an empty address. */
+    cap_reset_session();
+    c->manager = choose_manager(c, mgr, sizeof(mgr));
+    if (!c->manager || !*c->manager) {
+        fprintf(stderr, "capagent: no manager available; retrying\n");
+        return -1;
+    }
+    printf("capagent: manager=%s:%s radios=%d discovery=%s verify=%s\n",
+           c->manager, c->port, c->nradios,
+           c->discovery_if ? c->discovery_if : "-",
+           (c->dont_verify || !c->ca_cert) ? "no" : "ca");
+    fflush(stdout);
+
     if (connect_tls(&fd, &ssl, &conf, &ent, &ctr, &crt, &pk, c) != 0)
         goto out;
+
+    /* W8: bind one ext-auth socket per BSS before the manager provisions any
+     * VAP, and adopt anything that survived the previous connection. */
+    cap_extmux_start(c, &ssl, &dc);
 
     /* Test override: listen before the manager sends a create. */
     if (c->datachan && c->dc_key_len) {
@@ -122,7 +167,8 @@ static int run_once(struct cfg *c)
             pfd[nfd].revents = 0;
             mon_i[i] = nfd++;
         }
-        int pr = poll(pfd, (nfds_t)nfd, have_tls ? 0 : 200);
+        int pr = poll(pfd, (nfds_t)nfd,
+                      have_tls ? 0 : (g_extmux ? 50 : 200));
         if (pr < 0) {
             if (errno == EINTR) continue;
             break;
@@ -152,7 +198,10 @@ static int run_once(struct cfg *c)
             }
             if (mon_hit) mgmt_monitor_service(&ssl);
         }
-        if (ext_any) {
+        if (g_extmux) {
+            /* Drives per-BSS ext-auth RX, ctrl replies and the 4-way timers */
+            extmux_service(g_extmux, 0);
+        } else if (ext_any) {
             for (int i = 0; i < nfd; i++)
                 if (pfd[i].revents & POLLIN) { ext_auth_service(&ssl, &dc, c);
                                                break; }
@@ -264,11 +313,18 @@ static int run_once(struct cfg *c)
             dump_raw("assoc2018", type, port, body, len);
             printf("RX 0x2018 from manager (ignored)\n");
             fflush(stdout);
-        } else if (type == TYPE_ASSOC_RESP || type == TYPE_ASSOC_RESP2) {
-            /* P4: hostapd already answered Auth/Assoc on air. */
+        } else if (type == TYPE_ASSOC_RESP2) {  /* 0x2019 auth/deauth/action */
+            /* W6: subtype 11 is the Auth response (discard, hostapd already
+             * answered); subtypes 12/13 are manager commands (transmit). */
+            dump_raw("mgmt2019", type, port, body, len);
+            handle_2019(&ssl, port, body, len, c);
+            send_hdr_msg(&ssl, TYPE_MGMT_TX_RESP, hdr + 2, NULL, 0);
+        } else if (type == TYPE_ASSOC_RESP) {   /* 0x6019 assoc-resp template */
+            /* The template has capab 0 / AID 0 / no RSN IE and must never be
+             * sent verbatim; hostapd answered the real AssocResp on air. */
             dump_raw("assocresp", type, port, body, len);
-            printf("0x%04x from manager (discarded, hostapd answered on "
-                   "air)\n", type);
+            printf("0x6019 from manager (template discarded, hostapd answered "
+                   "on air)\n");
             fflush(stdout);
             send_hdr_msg(&ssl, TYPE_MGMT_TX_RESP, hdr + 2, NULL, 0);
         } else if (type == TYPE_DEL_STA) {
@@ -334,6 +390,7 @@ static int run_once(struct cfg *c)
     }
 
 out:
+    cap_extmux_stop(c);
     dp_close_all();
 #ifdef CAPAGENT_LAB
     lab_shutdown();
@@ -381,6 +438,10 @@ static void usage(const char *p)
         "                               Auth/AssocReq source (auto: nl80211 when we\n"
         "                               own the AP, monitor when hostapd owns it)\n"
         "  --ext-auth-dir DIR           hostapd external-RSN dgram dir (P5)\n"
+        "  --ext-ctrl-dir DIR           hostapd ctrl_interface dir (default: dir above)\n"
+        "  --state-file FILE            key-free extmux restart journal\n"
+        "  --fourway-timeout MS         CAP-side 4-way deadline (default 10000)\n"
+        "  --m1-retry MS                M1 retransmit interval (default 3000)\n"
         "  --lab-ap IFACE               lab only: bring up a minimal AP on IFACE\n"
         "  --lab-ssid SSID              lab SSID (default T14-CAP)\n"
         "  --lab-chan N                 lab channel (default 1)\n",
@@ -404,6 +465,8 @@ int main(int argc, char **argv)
     c.vap_auto = 1;
     c.dc_port = DC_PORT_DEFAULT;
     c.dc_id = DC_ID_DEFAULT;
+    c.fourway_ms = 10000;
+    c.m1_retry_ms = 3000;
     parse_ifnames(&c, "phy0-ap0,phy1-ap0");
     parse_macs(&c, "auto");
 
@@ -413,7 +476,8 @@ int main(int argc, char **argv)
            OPT_DC_COOKIE, OPT_DC_ID, OPT_DC_PEER, OPT_APPLY, OPT_NOACK,
            OPT_EAPOL_LEG, OPT_LAB_AP, OPT_LAB_SSID, OPT_LAB_CHAN, OPT_INJECT,
            OPT_PHYS, OPT_DP_BRIDGE, OPT_VAP_MTU, OPT_BCAST, OPT_MGMT_RELAY,
-           OPT_MGMT_SOURCE, OPT_EXTAUTH, OPT_VAPAUTO, OPT_NOVAPAUTO };
+           OPT_MGMT_SOURCE, OPT_EXTAUTH, OPT_VAPAUTO, OPT_NOVAPAUTO,
+           OPT_EXTCTRL, OPT_STATE, OPT_FOURWAY, OPT_M1RETRY };
     static struct option opts[] = {
         {"manager", required_argument, 0, 'm'},
         {"port", required_argument, 0, 'p'},
@@ -450,6 +514,10 @@ int main(int argc, char **argv)
         {"mgmt-relay", no_argument, 0, OPT_MGMT_RELAY},
         {"mgmt-source", required_argument, 0, OPT_MGMT_SOURCE},
         {"ext-auth-dir", required_argument, 0, OPT_EXTAUTH},
+        {"ext-ctrl-dir", required_argument, 0, OPT_EXTCTRL},
+        {"state-file", required_argument, 0, OPT_STATE},
+        {"fourway-timeout", required_argument, 0, OPT_FOURWAY},
+        {"m1-retry", required_argument, 0, OPT_M1RETRY},
         {"vap-auto", no_argument, 0, OPT_VAPAUTO},
         {"no-vap-auto", no_argument, 0, OPT_NOVAPAUTO},
         {"lab-ap", required_argument, 0, OPT_LAB_AP},
@@ -507,6 +575,10 @@ int main(int argc, char **argv)
             else { usage(argv[0]); return 1; }
             break;
         case OPT_EXTAUTH: c.ext_auth_dir = optarg; break;
+        case OPT_EXTCTRL: c.ext_ctrl_dir = optarg; break;
+        case OPT_STATE: c.state_file = optarg; break;
+        case OPT_FOURWAY: c.fourway_ms = atoi(optarg); break;
+        case OPT_M1RETRY: c.m1_retry_ms = atoi(optarg); break;
         case OPT_PHYS: {
             char *tmp = strdup(optarg), *save = NULL, *tok;
             int i = 0;
@@ -545,36 +617,11 @@ int main(int argc, char **argv)
         fprintf(stderr, "no valid radio MACs\n");
         return 1;
     }
-    char mgr[64];
-    const char *orig_manager = c.manager;
-    int auto_mgr = (!orig_manager || !*orig_manager ||
-                    !strcmp(orig_manager, "auto"));
-    c.manager = choose_manager(&c, mgr, sizeof(mgr));
-    printf("capagent: manager=%s:%s radios=%d discovery=%s verify=%s\n",
-           c.manager, c.port, c.nradios,
-           c.discovery_if ? c.discovery_if : "-",
-           (c.dont_verify || !c.ca_cert) ? "no" : "ca");
-    fflush(stdout);
-    unsigned attempt = 0;
+    /* W14: discovery and session setup are per attempt; run_once() owns both
+     * so an early failure (no WAN lease yet) is never permanent. */
+    c.manager_spec = c.manager;
     for (;;) {
-        /* W14: discovery used to run exactly once, so a CAP that booted
-           before its WAN lease was ready never found the manager again.
-           Re-resolve the address periodically while in auto mode. */
-        if (auto_mgr && c.manager && !*c.manager) {
-            c.manager = orig_manager;
-            const char *m = choose_manager(&c, mgr, sizeof(mgr));
-            if (m && *m) {
-                c.manager = m;
-                printf("capagent: manager re-resolved %s\n", m);
-                fflush(stdout);
-            }
-        }
         run_once(&c);
-        if (auto_mgr && (++attempt % 3) == 0) {
-            c.manager = orig_manager;
-            const char *m = choose_manager(&c, mgr, sizeof(mgr));
-            if (m && *m) c.manager = m;
-        }
         fprintf(stderr, "reconnect in 5s\n");
         sleep(5);
     }

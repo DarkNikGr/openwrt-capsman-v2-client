@@ -166,7 +166,7 @@ static void vap_bridge_if_present(const char *ifname, unsigned vlan,
 /* Build and start a hostapd instance for one provisioned VAP. */
 static int vap_hostapd_start(int port, const char *ifname, int phy, int vapid,
                              const uint8_t *body, uint16_t len,
-                             const struct vap *vp)
+                             const struct vap *vp, const struct cfg *c)
 {
     const uint8_t *ssid = NULL, *ie = NULL, *chv = NULL;
     uint16_t sl = 0, il = 0, cl = 0;
@@ -196,6 +196,9 @@ static int vap_hostapd_start(int port, const char *ifname, int phy, int vapid,
         return -1;
     }
     fprintf(f, "interface=%s\ndriver=nl80211\n", ifname);
+    if (c->ext_ctrl_dir || c->ext_auth_dir)
+        fprintf(f, "ctrl_interface=%s\n",
+                c->ext_ctrl_dir ? c->ext_ctrl_dir : c->ext_auth_dir);
     fprintf(f, "ssid=%s\n", (const char *)ssid);
     if (vp) {
         fprintf(f, "bssid=%02x:%02x:%02x:%02x:%02x:%02x\n",
@@ -223,7 +226,9 @@ static int vap_hostapd_start(int port, const char *ifname, int phy, int vapid,
         fprintf(f, "rsn_pairwise=CCMP\nwpa_group_rekey=0\nwpa_ptk_rekey=0\n");
         fprintf(f, "ieee80211w=%d\n", ri.mfpr ? 2 : (ri.mfpc ? 1 : 0));
         fprintf(f, "external_rsn_auth=1\n");
-        fprintf(f, "ext_auth_socket=/var/run/hostapd/ext-auth-%s\n", ifname);
+        if (c->ext_auth_dir)
+            fprintf(f, "ext_auth_socket=%s/ext-auth-%s\n", c->ext_auth_dir,
+                    ifname);
     } else {
         /* open / SAE / OWE: the manager drives the handshake or none exists */
         fprintf(f, "wpa=0\n");
@@ -266,6 +271,20 @@ static int vap_hostapd_start(int port, const char *ifname, int phy, int vapid,
     return 0;
 }
 
+/* True when the pid file points at a live hostapd. */
+static int vap_hostapd_running(const char *ifname)
+{
+    char pidf[96];
+    long pid = 0;
+    FILE *pf;
+    snprintf(pidf, sizeof(pidf), "/var/run/vap-%s.pid", ifname);
+    pf = fopen(pidf, "r");
+    if (!pf) return 0;
+    if (fscanf(pf, "%ld", &pid) != 1) pid = 0;
+    fclose(pf);
+    return pid > 0 && kill((pid_t)pid, 0) == 0;
+}
+
 /* Called from the 0x6016 handler.  Only acts when the netdev is missing, i.e.
  * when the manager is the only owner of the wireless configuration. */
 static void vap_provision(int port, const uint8_t *body, uint16_t len,
@@ -288,29 +307,22 @@ static void vap_provision(int port, const uint8_t *body, uint16_t len,
     vp->ifindex = ifindex;
     snprintf(vp->ifname, sizeof(vp->ifname), "%s", ifname);
 
-    /* Bind the ext-auth dgram socket under the name hostapd will use. */
-    if (c->ext_auth_dir) {
-        if (vp->extfd >= 0) { close(vp->extfd); vp->extfd = -1; }
-        ext_auth_bind(vp, c->ext_auth_dir);
-    }
+    /* Bind (or re-bind) the per-BSS ext-auth relay socket before hostapd
+     * starts accepting clients.  Also seeds the port/channel map. */
+    cap_vap_ready(phy, vapid, ifindex, ifname, vp->bssid, c);
 
     if (!c->vap_auto) return;
 
-    char pidf[96];
-    snprintf(pidf, sizeof(pidf), "/var/run/vap-%s.pid", ifname);
     if (!created && wireless_has_bss()) {
         /* A legacy UCI file owns this interface: leave it alone. */
-        if (access(pidf, F_OK) != 0) return;
-        FILE *pf = fopen(pidf, "r");
-        if (pf) {
-            long pid = 0;
-            if (fscanf(pf, "%ld", &pid) == 1 && pid > 0 &&
-                kill((pid_t)pid, 0) == 0) {
-                fclose(pf);
-                return;                     /* already running */
-            }
-            fclose(pf);
-        }
+        if (!vap_hostapd_running(ifname)) return;
     }
-    vap_hostapd_start(port, ifname, phy, vapid, body, len, vp);
+    if (vap_hostapd_running(ifname)) {
+        /* Survived an agent restart / manager reconnect: do not spawn a
+         * second hostapd on the same BSS. */
+        printf("vap: %s already running, not restarted\n", ifname);
+        fflush(stdout);
+        return;
+    }
+    vap_hostapd_start(port, ifname, phy, vapid, body, len, vp, c);
 }

@@ -47,6 +47,8 @@ static int discover_manager(const char *iface, int port, char *out, size_t outle
 
 static const char *choose_manager(struct cfg *c, char *buf, size_t n)
 {
+    const char *spec = c->manager_spec ? c->manager_spec : c->manager;
+
     if (c->lock_to_manager) {
         FILE *f = fopen("/etc/cap/manager.lock", "r");
         if (f) {
@@ -57,7 +59,7 @@ static const char *choose_manager(struct cfg *c, char *buf, size_t n)
             } else fclose(f);
         }
     }
-    if (!c->manager || !*c->manager || !strcmp(c->manager, "auto")) {
+    if (!spec || !*spec || !strcmp(spec, "auto")) {
         if (discover_manager(c->discovery_if, atoi(c->port), buf, n) == 0) {
             if (c->lock_to_manager) {
                 FILE *f = fopen("/etc/cap/manager.lock", "w");
@@ -70,10 +72,65 @@ static const char *choose_manager(struct cfg *c, char *buf, size_t n)
         buf[0] = 0;
         return buf;
     }
-    snprintf(buf, n, "%s", c->manager);
+    snprintf(buf, n, "%s", spec);
     char *comma = strchr(buf, ',');
     if (comma) *comma = 0;
     return buf;
+}
+
+/* Bounded TCP connect (W14): mbedtls_net_connect() has no timeout, so a
+ * black-holed manager would stall the whole agent before the retry loop. */
+static int net_connect_timeout(mbedtls_net_context *fd, const char *host,
+                               const char *port, int ms)
+{
+    struct addrinfo hints, *res = NULL, *ai;
+    int rc;
+
+    memset(&hints, 0, sizeof(hints));
+    hints.ai_family = AF_UNSPEC;
+    hints.ai_socktype = SOCK_STREAM;
+    rc = getaddrinfo(host, port, &hints, &res);
+    if (rc != 0) {
+        errno = EADDRNOTAVAIL;
+        return -1;
+    }
+    for (ai = res; ai; ai = ai->ai_next) {
+        int s = socket(ai->ai_family, ai->ai_socktype | SOCK_CLOEXEC,
+                       ai->ai_protocol);
+        if (s < 0) continue;
+        int fl = fcntl(s, F_GETFL, 0);
+        fcntl(s, F_SETFL, fl | O_NONBLOCK);
+        rc = connect(s, ai->ai_addr, ai->ai_addrlen);
+        if (rc != 0 && errno == EINPROGRESS) {
+            struct pollfd p = { .fd = s, .events = POLLOUT, .revents = 0 };
+            rc = poll(&p, 1, ms);
+            if (rc > 0) {
+                int err = 0;
+                socklen_t el = sizeof(err);
+                getsockopt(s, SOL_SOCKET, SO_ERROR, &err, &el);
+                rc = err ? -1 : 0;
+                if (err) errno = err;
+            } else {
+                rc = -1;
+                errno = ETIMEDOUT;
+            }
+        } else if (rc != 0) {
+            rc = -1;
+        }
+        if (rc == 0) {
+            struct timeval tv = { .tv_sec = 10, .tv_usec = 0 };
+            fcntl(s, F_SETFL, fl);
+            /* Bound every blocking read/write of the handshake too. */
+            setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+            setsockopt(s, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
+            fd->fd = s;
+            freeaddrinfo(res);
+            return 0;
+        }
+        close(s);
+    }
+    freeaddrinfo(res);
+    return -1;
 }
 
 static int connect_tls(mbedtls_net_context *fd, mbedtls_ssl_context *ssl,
@@ -144,10 +201,9 @@ static int connect_tls(mbedtls_net_context *fd, mbedtls_ssl_context *ssl,
     mbedtls_ssl_conf_min_tls_version(conf, MBEDTLS_SSL_VERSION_TLS1_2);
     mbedtls_ssl_conf_max_tls_version(conf, MBEDTLS_SSL_VERSION_TLS1_2);
 
-    if ((r = mbedtls_net_connect(fd, c->manager, c->port,
-                                 MBEDTLS_NET_PROTO_TCP)) != 0) {
-        mbedtls_strerror(r, err, sizeof(err));
-        fprintf(stderr, "connect %s:%s: %s\n", c->manager, c->port, err);
+    if (net_connect_timeout(fd, c->manager, c->port, 5000) != 0) {
+        fprintf(stderr, "connect %s:%s: %s\n", c->manager, c->port,
+                strerror(errno));
         return -1;
     }
 
@@ -169,9 +225,16 @@ static int connect_tls(mbedtls_net_context *fd, mbedtls_ssl_context *ssl,
     }
     mbedtls_ssl_set_bio(ssl, fd, mbedtls_net_send, mbedtls_net_recv, NULL);
 
+    time_t hs_end = time(NULL) + 15;
     while ((r = mbedtls_ssl_handshake(ssl)) != 0) {
-        if (r == MBEDTLS_ERR_SSL_WANT_READ || r == MBEDTLS_ERR_SSL_WANT_WRITE)
+        if (r == MBEDTLS_ERR_SSL_WANT_READ || r == MBEDTLS_ERR_SSL_WANT_WRITE) {
+            if (time(NULL) >= hs_end) {
+                fprintf(stderr, "handshake: timeout\n");
+                return -1;
+            }
+            usleep(1000);
             continue;
+        }
         mbedtls_strerror(r, err, sizeof(err));
         fprintf(stderr, "handshake: %s\n", err);
         return -1;

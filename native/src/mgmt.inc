@@ -10,6 +10,11 @@ static void lab_monitor_frame(mbedtls_ssl_context *ssl, const uint8_t *f,
                               size_t len);
 #endif
 
+/* Defined with the extmux glue at the bottom of this module. */
+static uint16_t xm_canon_port(int port);
+static int  cap_hostapd_ctrl(const struct cfg *c, const char *ifname,
+                             const char *cmd, char *reply, size_t rlen);
+
 static void eapol_strip(const uint8_t **fr, size_t *len)
 {
     const uint8_t *p = *fr;
@@ -68,6 +73,18 @@ static void handle_201c(mbedtls_ssl_context *ssl, int port,
     eapol_strip(&eapol, &elen);
     eapol_log("TX", mac, eapol, elen);
 
+    if (g_extmux) {
+        /* Single TX owner: hostapd performs the control-port TX and checks
+         * the reply; direct nl80211 injection is only its fallback. */
+        uint16_t xp = xm_canon_port(port);
+        int r = extmux_tx(g_extmux, xp, mac, eapol, elen, 0);
+        printf("0x201c: relay -> %02x:%02x:%02x:%02x:%02x:%02x port=0x%04x "
+               "len=%zu ret=%d\n", mac[0], mac[1], mac[2], mac[3], mac[4],
+               mac[5], xp, elen, r);
+        fflush(stdout);
+        return;
+    }
+
     uint8_t bssid[6] = {0};
     int ifindex = vap_ifindex(port, bssid);
     if (ifindex <= 0 || nl_cmd_open() != 0) {
@@ -118,15 +135,18 @@ static void eapol_relay(mbedtls_ssl_context *ssl, struct dc_ctx *dc,
 
 /* ---- P4: 0x2018 Auth/AssocReq relay ------------------------------- */
 
-/* Exact body required by ActAp::receiveC2 case 0x2018 (T13 §2):
+/* Exact body required by ActAp::receiveC2 case 0x2018 (W6 §2):
      0x003e <raw 802.11 frame, FC first, no FCS>
      0x000a { 0x000b u32 freq, 0x000c u8 width, 0x0010 u8 band }
-     0x003f u32 freq
-   The manager compares 0x0a's frequency with the VAP's and drops the
-   message when 0x0a is missing, so this is not optional. */
+     0x003f i32 RSSI in dBm (optional)
+   The manager compares 0x0a's 0x0b with the VAP's provisioned frequency and
+   silently drops the message when it is missing or unequal.  0x3f is RSSI,
+   not frequency (W6 corrected the older T13 note); a wrong value is only
+   cosmetic, so omit it when the driver did not report a signal. */
 static void mgmt_send_2018(mbedtls_ssl_context *ssl, int port,
                            const uint8_t *fr, size_t flen, uint32_t freq,
-                           uint8_t width, uint8_t band, const char *kind)
+                           uint8_t width, uint8_t band, int32_t rssi,
+                           const char *kind)
 {
     uint8_t b[BODY_MAX], ch[32], cf[4];
     size_t n = 0, cn = 0;
@@ -140,12 +160,15 @@ static void mgmt_send_2018(mbedtls_ssl_context *ssl, int port,
     cn += put_el(ch + cn, 0x10, &band, 1);
     n += put_el(b + n, 0x3e, fr, (uint16_t)flen);
     n += put_el(b + n, 0x0a, ch, (uint16_t)cn);
-    n += put_el(b + n, 0x3f, cf, 4);
+    if (rssi != 0) {
+        put32(cf, (uint32_t)rssi);
+        n += put_el(b + n, 0x3f, cf, 4);
+    }
     if (send_msg(ssl, TYPE_ASSOC_FRAME, (uint16_t)port, b, (uint16_t)n) == 0) {
         printf("0x2018 %s %02x:%02x:%02x:%02x:%02x:%02x -> manager "
-               "(port=0x%04x freq=%u len=%zu)\n", kind,
+               "(port=0x%04x freq=%u rssi=%d len=%zu)\n", kind,
                fr[10], fr[11], fr[12], fr[13], fr[14], fr[15],
-               port, freq, flen);
+               port, freq, (int)rssi, flen);
     } else {
         printf("0x2018 %s: send failed\n", kind);
     }
@@ -154,10 +177,10 @@ static void mgmt_send_2018(mbedtls_ssl_context *ssl, int port,
 
 static void send_2018_frame(mbedtls_ssl_context *ssl, int phy, int wid,
                             const uint8_t *fr, size_t flen, uint32_t freq,
-                            const char *kind)
+                            int32_t rssi, const char *kind)
 {
     mgmt_send_2018(ssl, (phy << 8) | (wid & 0xff), fr, flen, freq, 1,
-                   band_code_for_freq(freq), kind);
+                   band_code_for_freq(freq), rssi, kind);
 }
 
 /* One NL80211_CMD_FRAME event -> 0x2018. */
@@ -165,7 +188,7 @@ static void mgmt_handle_frame(mbedtls_ssl_context *ssl,
                               struct nlattr *at, int alen, int have_ifindex,
                               int ifindex)
 {
-    struct nlattr *fa = NULL, *ma = NULL;
+    struct nlattr *fa = NULL, *ma = NULL, *sa = NULL;
     for (struct nlattr *a = at; alen >= (int)sizeof(struct nlattr) &&
          a->nla_len >= sizeof(struct nlattr) && a->nla_len <= alen;
          alen -= NLA_ALIGN(a->nla_len),
@@ -173,6 +196,7 @@ static void mgmt_handle_frame(mbedtls_ssl_context *ssl,
         int t = a->nla_type & NLA_TYPE_MASK;
         if (t == NL80211_ATTR_FRAME) fa = a;
         else if (t == NL80211_ATTR_MAC) ma = a;
+        else if (t == NL80211_ATTR_RX_SIGNAL_DBM) sa = a;
     }
     (void)ma;
     if (!fa) return;
@@ -188,14 +212,31 @@ static void mgmt_handle_frame(mbedtls_ssl_context *ssl,
     else if (stype == 2) kind = "reassoc";
     else return;
 
+    /* W6 C7: addr1 must be the BSSID (addr3).  A frame for another BSS can
+     * only be silently dropped by the manager, so do not send it. */
+    if (memcmp(fr + 4, fr + 16, 6) != 0) {
+        printf("0x2018 %s: addr1 != addr3, dropped\n", kind);
+        fflush(stdout);
+        return;
+    }
+
+    int32_t rssi = 0;
+    if (sa && sa->nla_len >= NLA_HDRLEN + 4)
+        memcpy(&rssi, (uint8_t *)sa + NLA_HDRLEN, 4);
+
     struct vap *v = have_ifindex ? vap_by_ifindex(ifindex) : NULL;
     if (!v) v = vap_by_bssid(fr + 16);          /* addr3 = BSSID */
     if (!v) {
-        send_2018_frame(ssl, 0, 0, fr, fl, 2437u, kind);
+        /* No provisioned VAP: 0x0a cannot carry the right frequency, and the
+         * manager would drop it anyway.  Do not invent 2437. */
+        printf("0x2018 %s: no VAP for bssid %02x:%02x:%02x:%02x:%02x:%02x, "
+               "dropped\n", kind, fr[16], fr[17], fr[18], fr[19], fr[20],
+               fr[21]);
+        fflush(stdout);
         return;
     }
     /* Use the VAP's configured frequency, not the RX frequency (T13 §6). */
-    send_2018_frame(ssl, v->rid, v->wid, fr, fl, v->freq, kind);
+    send_2018_frame(ssl, v->rid, v->wid, fr, fl, v->freq, rssi, kind);
 }
 
 /* Resolve ifindex from a NL80211 event. */
@@ -430,6 +471,46 @@ static int mon_is_dup(const uint8_t *fr, size_t len)
     return 0;
 }
 
+/* Minimal radiotap walker: report the FCS-present flag and the antenna
+ * signal (dBm).  Only fields before the first namespace bit are decoded. */
+static void radiotap_meta(const uint8_t *rt, size_t rlen, int *fcs,
+                          int *rssi)
+{
+    static const struct { uint8_t align, size; } f[29] = {
+        {8,8}, {1,1}, {1,1}, {2,4}, {2,2}, {1,1}, {1,1}, {2,2}, {2,2},
+        {2,2}, {1,1}, {1,1}, {1,1}, {1,1}, {2,2}, {2,2}, {1,1}, {1,1},
+        {4,8}, {1,3}, {4,8}, {2,12}, {8,12}, {2,12}, {2,12}, {2,12},
+        {1,1}, {2,4}, {2,4}
+    };
+    uint32_t w[8];
+    int nw = 0;
+    size_t off = 4, p;
+
+    *fcs = 0;
+    *rssi = 0;
+    if (rlen < 8) return;
+    while (nw < 8 && off + 4 <= rlen) {
+        w[nw] = (uint32_t)rt[off] | ((uint32_t)rt[off + 1] << 8) |
+                ((uint32_t)rt[off + 2] << 16) | ((uint32_t)rt[off + 3] << 24);
+        off += 4;
+        if (!(w[nw++] & 0x80000000u)) break;
+    }
+    p = off;
+    for (int wi = 0; wi < nw; wi++) {
+        for (int bit = 0; bit < 29; bit++) {
+            int idx;
+            if (!(w[wi] & (1u << bit))) continue;
+            if (bit == 29 || bit == 30) return;   /* namespace: stop */
+            idx = bit;
+            p = (p + f[idx].align - 1) / f[idx].align * f[idx].align;
+            if (p + f[idx].size > rlen) return;
+            if (idx == 1) *fcs = (rt[p] & 0x10) != 0;
+            else if (idx == 5) *rssi = (int8_t)rt[p];
+            p += f[idx].size;
+        }
+    }
+}
+
 static void mgmt_monitor_service(mbedtls_ssl_context *ssl)
 {
     for (int i = 0; i < g_mon_n; i++) {
@@ -448,8 +529,11 @@ static void mgmt_monitor_service(mbedtls_ssl_context *ssl)
             if (n < 24) continue;
             int it = (int)(buf[2] | (buf[3] << 8));   /* radiotap length */
             if (it < 8 || it > n - 24) continue;
+            int fcs = 0, rt_rssi = 0;
+            radiotap_meta(buf, (size_t)it, &fcs, &rt_rssi);
             const uint8_t *fr = buf + it;
             size_t len = (size_t)(n - it);
+            if (fcs && len > 4) len -= 4;             /* strip trailing FCS */
             if ((fr[0] & 0x0c) != 0) continue;        /* management only */
             int st = (fr[0] >> 4) & 0xf;
             if (st != 0 && st != 2 && st != 11) continue;
@@ -472,9 +556,15 @@ static void mgmt_monitor_service(mbedtls_ssl_context *ssl)
                     band = band_code_for_freq(freq);
                 }
             }
-            if (!freq) freq = 2437;
+            if (!freq) {
+                printf("0x2018 monitor: no channel for port 0x%04x, dropped\n",
+                       port);
+                fflush(stdout);
+                continue;
+            }
             if (!band) band = band_code_for_freq(freq);
-            mgmt_send_2018(ssl, port, fr, len, freq, width, band, "monitor");
+            mgmt_send_2018(ssl, port, fr, len, freq, width, band, rt_rssi,
+                           "monitor");
 #ifdef CAPAGENT_LAB
             lab_monitor_frame(ssl, fr, len);
 #endif
@@ -766,7 +856,9 @@ static void handle_201f(mbedtls_ssl_context *ssl, int port,
 {
     (void)ssl;
     struct key_desc kd[8];
-    int nkd = 0, class_kind = 0, class_idx = -1;
+    int dkind[8] = {0}, didx[8] = {-1, -1, -1, -1, -1, -1, -1, -1};
+    int dset[8] = {0};
+    int nkd = 0, pending_kind = 0, pending_idx = -1;
     const uint8_t *top_mac = NULL;
 
     struct tlv_it it = { body, len };
@@ -775,12 +867,28 @@ static void handle_201f(mbedtls_ssl_context *ssl, int port,
     size_t vl;
     while (tlv_next(&it, &tag, &v, &vl)) {
         if (tag == 0x0050) {
-            if (nkd < (int)(sizeof(kd)/sizeof(kd[0])))
+            if (nkd < (int)(sizeof(kd)/sizeof(kd[0]))) {
+                /* W8: class applies per descriptor, not per message.  The
+                 * class tag is emitted after the descriptor on the wire, but
+                 * accept it before one as well. */
+                dkind[nkd] = pending_kind;
+                didx[nkd] = pending_idx;
+                dset[nkd] = pending_kind || pending_idx >= 0;
+                pending_kind = 0;
+                pending_idx = -1;
                 parse_key_desc(v, vl, &kd[nkd++]);
+            }
         } else if (tag == 0x005a || tag == 0x005b) {
-            class_kind = (tag == 0x005b) ? 2 : 1;
+            int kind = (tag == 0x005b) ? 2 : 1;
             int ci = class_idx_from(v, vl);
-            if (ci >= 0) class_idx = ci;
+            if (nkd > 0 && !dset[nkd - 1]) {
+                dkind[nkd - 1] = kind;
+                didx[nkd - 1] = ci;
+                dset[nkd - 1] = 1;
+            } else {
+                pending_kind = kind;
+                pending_idx = ci;
+            }
         } else if (tag == 0x0008 && vl == 6) {
             top_mac = v;
         }
@@ -792,7 +900,7 @@ static void handle_201f(mbedtls_ssl_context *ssl, int port,
     }
 
     uint8_t mac[6] = {0};
-    int ifindex = vap_ifindex(port, mac);
+    int ifindex = vap_ifindex(xm_canon_port(port), mac);
     if (ifindex <= 0 || nl_cmd_open() != 0) {
         printf("0x201f: no ifindex/nl80211 for port 0x%04x\n", port);
         fflush(stdout);
@@ -806,10 +914,11 @@ static void handle_201f(mbedtls_ssl_context *ssl, int port,
             continue;
         }
         const uint8_t *smac = d->maclen == 6 ? d->mac : top_mac;
-        int pairwise = (smac && class_kind == 0);
-        int is_igtk = (class_kind == 2);
+        int ck = dkind[i], ci = didx[i];
+        int pairwise = (smac && ck == 0);
+        int is_igtk = (ck == 2);
         int idx = d->idx;
-        if (class_kind && class_idx >= 0) idx = class_idx;
+        if (ck && ci >= 0) idx = ci;
         uint32_t cipher = d->cipher;
         if (is_igtk && cipher == 0x000fac04u)
             cipher = 0x000fac06u;      /* BIP-CMAC-128 (T4 §3.4) */
@@ -827,15 +936,385 @@ static void handle_201f(mbedtls_ssl_context *ssl, int port,
                    is_igtk ? (idx >= 6 ? "beacon" : "mgmt") : "group",
                    r2, r2 ? strerror(-r2) : "ok");
         } else if (r == 0 || r == -EEXIST) {
-            int ra = nl_sta_authorize(ifindex, smac);
-            printf("0x201f: SET_STATION AUTHORIZED %02x:%02x:%02x:%02x:%02x:%02x "
-                   "ret=%d (%s)\n", smac[0], smac[1], smac[2], smac[3],
-                   smac[4], smac[5], ra, ra ? strerror(-ra) : "ok");
-            if (ra == 0 || ra == -EEXIST)
-                ext_auth_authorize(c, ifindex, smac);
+            if (g_extmux) {
+                /* extmux sends EXT_AUTH_AUTHORIZE, checks the reply, retries,
+                 * and drives the CAP-side 4-way timeout on failure. */
+                uint16_t xp = xm_canon_port(port);
+                printf("0x201f: PTK installed, authorize via extmux "
+                       "port=0x%04x\n", xp);
+                extmux_ptk_installed(g_extmux, xp, smac);
+            } else {
+                int ra = nl_sta_authorize(ifindex, smac);
+                printf("0x201f: SET_STATION AUTHORIZED %02x:%02x:%02x:%02x:%02x:%02x "
+                       "ret=%d (%s)\n", smac[0], smac[1], smac[2], smac[3],
+                       smac[4], smac[5], ra, ra ? strerror(-ra) : "ok");
+                if (ra == 0 || ra == -EEXIST)
+                    ext_auth_authorize(c, ifindex, smac);
+            }
         } else {
             printf("0x201f: PTK install failed, station not authorized\n");
         }
     }
+    fflush(stdout);
+}
+
+/* ---- W6: 0x2019 manager Auth/Deauth/Action ------------------------- */
+/* 0x2019 subtype 11 is the manager's Auth response.  With hostapd owning the
+ * air it has already answered, so it is discarded.  Subtypes 12 (Deauth) and
+ * 13 (Action/BTM/SA-query) are manager *commands*: they are not responses to
+ * anything hostapd sent and must be transmitted. */
+static void handle_2019(mbedtls_ssl_context *ssl, int port,
+                        const uint8_t *body, size_t len, const struct cfg *c)
+{
+    const uint8_t *fr = NULL;
+    uint16_t fl = 0;
+    (void)ssl;
+
+    if (!find_el(body, len, 0x3e, &fr, &fl) || fl < 24) {
+        printf("0x2019: no usable 0x3e frame (len=%zu)\n", len);
+        fflush(stdout);
+        return;
+    }
+    int st = (fr[0] >> 4) & 0xf;
+    if (st == 11) {
+        printf("0x2019 auth-resp: discarded (hostapd answered on air)\n");
+        fflush(stdout);
+        return;
+    }
+    if (st != 12 && st != 13) {
+        printf("0x2019 subtype %d: not transmitted (unsupported)\n", st);
+        fflush(stdout);
+        return;
+    }
+
+    uint16_t xp = xm_canon_port(port);
+    uint8_t bssid[6] = {0};
+    int ifindex = vap_ifindex(xp, bssid);
+    uint32_t freq = 0;
+    uint8_t width = 1, band = 0;
+    if (!vchan_get(xp, &freq, &width, &band) || !freq) {
+        struct vap *v = vap_by_ifindex(ifindex);
+        if (v) freq = v->freq;
+    }
+    if (ifindex <= 0) {
+        printf("0x2019 subtype %d: no ifindex for port 0x%04x\n", st, xp);
+        fflush(stdout);
+        return;
+    }
+    const uint8_t *sta = fr + 4;                 /* addr1 */
+    int r = nl_cmd_open() == 0 ? nl_mgmt_tx(ifindex, freq, fr, fl) : -1;
+    printf("0x2019 %s -> %02x:%02x:%02x:%02x:%02x:%02x port=0x%04x "
+           "ifindex=%d freq=%u len=%u ret=%d (%s)\n",
+           st == 12 ? "deauth" : "action", sta[0], sta[1], sta[2], sta[3],
+           sta[4], sta[5], xp, ifindex, freq, fl, r,
+           r ? strerror(-r) : "ok");
+    if (st == 12) {
+        /* The manager has already removed the peer; drop local state too.
+         * Do not send 0x201a back for a manager-initiated deauth. */
+        if (g_extmux) {
+            struct extmux_vap *v = extmux_vap_by_port(g_extmux, xp);
+            extmux_forget(g_extmux, xp, sta, 0);
+            if (r && v) {
+                char cmd[96], reply[64];
+                snprintf(cmd, sizeof(cmd),
+                         "DEAUTHENTICATE %02x:%02x:%02x:%02x:%02x:%02x 15\n",
+                         sta[0], sta[1], sta[2], sta[3], sta[4], sta[5]);
+                if (cap_hostapd_ctrl(c, v->ifname, cmd, reply,
+                                     sizeof(reply)) == 0)
+                    printf("0x2019 deauth: hostapd fallback -> %s\n", reply);
+            }
+        }
+    }
+    fflush(stdout);
+}
+
+/* ======================================================================
+ * W8: extmux glue — one AF_UNIX ext-auth socket per BSS, sessions keyed
+ * by (port, STA MAC), hostapd ctrl transaction checking, CAP-side 4-way
+ * deadline/retry, restart journal and resync.
+ * ==================================================================== */
+
+struct xm_ctx {
+    mbedtls_ssl_context *ssl;
+    struct dc_ctx *dc;
+    const struct cfg *c;
+};
+static struct xm_ctx g_xmctx;
+
+static void xm_log(void *ctx, const char *msg)
+{
+    (void)ctx;
+    printf("EXTMUX: %s\n", msg);
+    fflush(stdout);
+}
+
+/* Blocking one-shot hostapd ctrl command, used only on timeout/deauth and
+ * resync paths — never in the EAPOL hot path. */
+static int cap_hostapd_ctrl(const struct cfg *c, const char *ifname,
+                            const char *cmd, char *reply, size_t rlen)
+{
+    struct sockaddr_un sa, src;
+    char path[108], aname[80];
+    int fd, n, r = -1;
+    const char *dir = c->ext_ctrl_dir ? c->ext_ctrl_dir : c->ext_auth_dir;
+
+    if (!dir || !ifname || !cmd || !reply || rlen < 2) return -1;
+    snprintf(path, sizeof(path), "%s/%s", dir, ifname);
+    fd = socket(AF_UNIX, SOCK_DGRAM, 0);
+    if (fd < 0) return -1;
+    memset(&src, 0, sizeof(src));
+    src.sun_family = AF_UNIX;
+    n = snprintf(aname, sizeof(aname), "capagent.%ld.%s", (long)getpid(),
+                 ifname);
+    if (n < 0 || (size_t)n >= sizeof(aname)) goto out;
+    src.sun_path[0] = 0;
+    memcpy(src.sun_path + 1, aname, (size_t)n);
+    if (bind(fd, (struct sockaddr *)&src,
+             (socklen_t)(offsetof(struct sockaddr_un, sun_path) + 1 + n)) != 0)
+        goto out;
+    memset(&sa, 0, sizeof(sa));
+    sa.sun_family = AF_UNIX;
+    snprintf(sa.sun_path, sizeof(sa.sun_path), "%s", path);
+    if (sendto(fd, cmd, strlen(cmd), 0, (struct sockaddr *)&sa,
+               (socklen_t)(offsetof(struct sockaddr_un, sun_path) +
+                           strlen(path) + 1)) < 0)
+        goto out;
+    {
+        struct pollfd pf = { .fd = fd, .events = POLLIN, .revents = 0 };
+        if (poll(&pf, 1, 300) <= 0) goto out;
+        n = (int)recv(fd, reply, rlen - 1, 0);
+        if (n < 0) goto out;
+        reply[n] = 0;
+        reply[strcspn(reply, "\r\n")] = 0;
+        r = 0;
+    }
+out:
+    close(fd);
+    return r;
+}
+
+static int xm_on_eapol(void *ctx, const struct extmux_vap *v,
+                       const uint8_t mac[6], const uint8_t *eapol, size_t len,
+                       int encrypted)
+{
+    struct xm_ctx *x = ctx;
+    eapol_relay(x->ssl, x->dc, x->c, v->port, mac, eapol, len);
+    (void)encrypted;
+    return 0;
+}
+
+static int xm_on_delsta(void *ctx, const struct extmux_vap *v,
+                        const uint8_t mac[6])
+{
+    struct xm_ctx *x = ctx;
+    uint8_t b[BODY_MAX];
+    size_t z = put_el(b, 0x08, mac, 6);
+    printf("EXTMUX: 0x201a DELSTA %02x:%02x:%02x:%02x:%02x:%02x "
+           "port=0x%04x\n", mac[0], mac[1], mac[2], mac[3], mac[4], mac[5],
+           v->port);
+    fflush(stdout);
+    return send_msg(x->ssl, TYPE_DEL_STA, v->port, b, (uint16_t)z);
+}
+
+static int xm_on_deauth(void *ctx, const struct extmux_vap *v,
+                        const uint8_t mac[6], int reason)
+{
+    struct xm_ctx *x = ctx;
+    char cmd[96], reply[64];
+    snprintf(cmd, sizeof(cmd),
+             "DEAUTHENTICATE %02x:%02x:%02x:%02x:%02x:%02x %d\n",
+             mac[0], mac[1], mac[2], mac[3], mac[4], mac[5], reason);
+    if (cap_hostapd_ctrl(x->c, v->ifname, cmd, reply, sizeof(reply)) == 0)
+        printf("EXTMUX: DEAUTH %02x:%02x:%02x:%02x:%02x:%02x -> %s\n",
+               mac[0], mac[1], mac[2], mac[3], mac[4], mac[5], reply);
+    fflush(stdout);
+    return 0;
+}
+
+static int xm_on_direct(void *ctx, const struct extmux_vap *v,
+                        const uint8_t mac[6], const uint8_t *eapol, size_t len)
+{
+    (void)ctx;
+    if (nl_cmd_open() != 0) return -1;
+    return nl_control_port_tx(v->ifindex, mac, eapol, len);
+}
+
+static void xm_on_authorized(void *ctx, const struct extmux_vap *v,
+                             const uint8_t mac[6])
+{
+    (void)ctx;
+    printf("EXTMUX: authorized port=0x%04x %02x:%02x:%02x:%02x:%02x:%02x "
+           "if=%s\n", v->port, mac[0], mac[1], mac[2], mac[3], mac[4], mac[5],
+           v->ifname);
+    fflush(stdout);
+}
+
+/* Map any manager-side port alias for a VAP onto extmux's canonical port. */
+static uint16_t xm_canon_port(int port)
+{
+    struct extmux_vap *v;
+    if (!g_extmux) return (uint16_t)port;
+    v = extmux_vap_by_port(g_extmux, (uint16_t)port);
+    if (v) return v->port;
+    {
+        int ifindex = 0;
+        char name[IF_NAMESIZE];
+        pmap_get(port, &ifindex, NULL);
+        if (ifindex > 0 && if_indextoname((unsigned)ifindex, name)) {
+            v = extmux_vap_by_ifname(g_extmux, name);
+            if (v) return v->port;
+        }
+    }
+    return (uint16_t)port;
+}
+
+/* Register one provisioned VAP with the relay (idempotent).  Called from
+ * 0x500b (netdev created) and 0x6016 (start). */
+static void cap_vap_ready(int phy, int vapid, int ifindex, const char *ifname,
+                          const uint8_t mac[6], const struct cfg *c)
+{
+    struct vap *vp;
+    uint16_t port;
+    unsigned freq = 0, width = 0;
+
+    if (ifindex <= 0 || !ifname || !*ifname) return;
+    port = (uint16_t)((phy << 8) | (vapid & 0xff));
+    pmap_set(port, ifindex, mac);
+    if (!vchan_get(port, NULL, NULL, NULL)) {
+        iface_chan(ifname, &freq, &width);
+        if (freq)
+            vchan_set(port, freq, (uint8_t)(width ? width : 1),
+                      band_code_for_freq(freq));
+    }
+    vp = vap_get(phy, vapid);
+    if (g_extmux) {
+        if (extmux_vap_by_port(g_extmux, port) ||
+            extmux_vap_by_ifname(g_extmux, ifname))
+            return;
+        if (extmux_add_vap(g_extmux, port, ifname, ifindex,
+                           mac ? mac : (vp ? vp->bssid : NULL)) == 0) {
+            printf("EXTMUX: registered %s port=0x%04x ifindex=%d\n",
+                   ifname, port, ifindex);
+            fflush(stdout);
+        }
+    } else if (c->ext_auth_dir && vp) {
+        ext_auth_bind(vp, c->ext_auth_dir);
+    }
+}
+
+/* Re-adopt interfaces that survived an agent restart/reconnect before the
+ * manager re-sends 0x500b.  Names are the ones vap_provision created. */
+static void cap_extmux_restore(void)
+{
+    for (int phy = 0; phy < MAX_RADIOS; phy++) {
+        for (int vapid = 0; vapid < 16; vapid++) {
+            char ifname[32];
+            unsigned freq = 0, width = 0;
+            uint8_t mac[6];
+            int ifindex;
+            uint16_t port;
+            snprintf(ifname, sizeof(ifname), "phy%d-ap%d", phy, vapid);
+            ifindex = read_sysfs_int(ifname, "ifindex");
+            if (ifindex <= 0) continue;
+            if (read_sysfs_mac(ifname, mac) != 0) continue;
+            port = (uint16_t)((phy << 8) | vapid);
+            pmap_set(port, ifindex, mac);
+            iface_chan(ifname, &freq, &width);
+            if (freq)
+                vchan_set(port, freq, (uint8_t)(width ? width : 1),
+                          band_code_for_freq(freq));
+            if (extmux_add_vap(g_extmux, port, ifname, ifindex, mac) == 0)
+                printf("EXTMUX: restored %s port=0x%04x\n", ifname, port);
+        }
+    }
+    fflush(stdout);
+}
+
+/* Enumerate the stations hostapd still has and adopt them.  Authorized
+ * stations keep the data path; the rest are forced to reauthenticate. */
+static void cap_extmux_resync(void)
+{
+    for (int i = 0; i < EXTMUX_MAX_VAPS; i++) {
+        struct extmux_vap *v = extmux_vap_at(g_extmux, i);
+        char cmd[160], line[256], macs[40];
+        uint8_t pending[6];
+        int have = 0, auth = 0;
+        FILE *p;
+
+        if (!v) continue;
+        snprintf(cmd, sizeof(cmd), "iw dev %s station dump 2>/dev/null",
+                 v->ifname);
+        p = popen(cmd, "r");
+        if (!p) continue;
+        while (fgets(line, sizeof(line), p)) {
+            unsigned m[6];
+            if (sscanf(line, "Station %39s", macs) == 1 &&
+                sscanf(macs, "%x:%x:%x:%x:%x:%x", &m[0], &m[1], &m[2],
+                       &m[3], &m[4], &m[5]) == 6) {
+                if (have)
+                    extmux_adopt(g_extmux, v->port, pending, v->ifindex, auth);
+                for (int k = 0; k < 6; k++) pending[k] = (uint8_t)m[k];
+                have = 1;
+                auth = 0;
+                continue;
+            }
+            if (strstr(line, "authorized:"))
+                auth = strstr(line, "yes") != NULL;
+        }
+        if (have)
+            extmux_adopt(g_extmux, v->port, pending, v->ifindex, auth);
+        pclose(p);
+    }
+}
+
+static void cap_extmux_start(struct cfg *c, mbedtls_ssl_context *ssl,
+                             struct dc_ctx *dc)
+{
+    struct extmux_cb cb = {
+        .ctx = &g_xmctx,
+        .log = xm_log,
+        .on_eapol = xm_on_eapol,
+        .on_delsta = xm_on_delsta,
+        .on_deauth = xm_on_deauth,
+        .on_direct_tx = xm_on_direct,
+        .on_authorized = xm_on_authorized,
+    };
+    struct extmux_stats st;
+
+    if (!c->ext_auth_dir || g_extmux) return;
+    memset(&g_xmctx, 0, sizeof(g_xmctx));
+    g_xmctx.ssl = ssl;
+    g_xmctx.dc = dc;
+    g_xmctx.c = c;
+    g_extmux = extmux_new(c->ext_auth_dir,
+                          c->ext_ctrl_dir ? c->ext_ctrl_dir
+                                          : c->ext_auth_dir, &cb);
+    if (!g_extmux) {
+        printf("EXTMUX: init failed for %s\n", c->ext_auth_dir);
+        fflush(stdout);
+        return;
+    }
+    extmux_set_timeouts(g_extmux,
+                        (unsigned)(c->fourway_ms > 0 ? c->fourway_ms : 10000),
+                        (unsigned)(c->m1_retry_ms > 0 ? c->m1_retry_ms : 3000),
+                        1000);
+    if (c->state_file) extmux_load(g_extmux, c->state_file);
+    cap_extmux_restore();
+    extmux_resync_begin(g_extmux);
+    cap_extmux_resync();
+    extmux_resync_finish(g_extmux);
+    extmux_stats(g_extmux, &st);
+    printf("EXTMUX: ready vaps=%u sessions=%u authorized=%u dir=%s\n",
+           st.vaps, st.sessions, st.authorized, c->ext_auth_dir);
+    fflush(stdout);
+}
+
+static void cap_extmux_stop(const struct cfg *c)
+{
+    if (!g_extmux) return;
+    if (c->state_file) extmux_save(g_extmux, c->state_file);
+    extmux_free(g_extmux);
+    g_extmux = NULL;
+    printf("EXTMUX: stopped\n");
     fflush(stdout);
 }

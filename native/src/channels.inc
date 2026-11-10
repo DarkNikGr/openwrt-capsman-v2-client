@@ -5,6 +5,8 @@ static void dp_vap_open(struct vap *v);
 static void mgmt_vap_add(int ifindex);
 static int ext_auth_bind(struct vap *v, const char *dir);
 static int vap_netdev_create(int phy, const char *ifname, const uint8_t mac[6]);
+static void cap_vap_ready(int phy, int vapid, int ifindex, const char *ifname,
+                          const uint8_t mac[6], const struct cfg *c);
 
 static uint32_t ccfi80(uint32_t f)
 {
@@ -152,7 +154,7 @@ static void createvap_response(mbedtls_ssl_context *ssl, const uint8_t hdr[10],
         fflush(stdout);
         if (c->datapath_bridge) dp_vap_open(vp);
         if (c->mgmt_relay || c->mgmt_source) mgmt_vap_add(ifindex);
-        if (c->ext_auth_dir) ext_auth_bind(vp, c->ext_auth_dir);
+        cap_vap_ready(phy, vapid, ifindex, ifname, mac, c);
     }
 
     if (c->no_ack) {

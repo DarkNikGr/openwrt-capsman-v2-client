@@ -496,6 +496,24 @@ static int nl_control_port_tx(int ifindex, const uint8_t mac[6],
     return nl_send_ack(g_nl_cmd_fd, &m);
 }
 
+/* Transmit one management frame on an AP netdev (manager-initiated Deauth /
+ * Action from 0x2019).  No ACK wait: a Deauth is fire-and-forget and we must
+ * not stall the TLS loop for a missing ack. */
+static int nl_mgmt_tx(int ifindex, uint32_t freq, const uint8_t *fr, size_t len)
+{
+    if (ifindex <= 0 || !fr || len < 24 || len > 2048) return -EINVAL;
+    struct nl_buf m;
+    nlb_init(&m, NL80211_CMD_FRAME, NLM_F_ACK);
+    nlb_u32(&m, NL80211_ATTR_IFINDEX, (uint32_t)ifindex);
+    if (freq) {
+        nlb_u32(&m, NL80211_ATTR_WIPHY_FREQ, freq);
+        nlb_u32(&m, NL80211_ATTR_DURATION, 0);
+    }
+    nlb_put(&m, NL80211_ATTR_FRAME, fr, len);
+    nlb_flag(&m, NL80211_ATTR_DONT_WAIT_FOR_ACK);
+    return nl_send_ack(g_nl_cmd_fd, &m);
+}
+
 /* ---------------- TLV iterator (u16 tag | u16 len | value) ------------- */
 struct tlv_it { const uint8_t *p; size_t len; };
 static int tlv_next(struct tlv_it *it, uint16_t *tag,

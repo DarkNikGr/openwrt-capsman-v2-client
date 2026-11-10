@@ -24,6 +24,7 @@
 #include <dirent.h>
 #include <arpa/inet.h>
 #include <net/if.h>
+#include <netdb.h>
 #include <netinet/in.h>
 #include <sys/ioctl.h>
 #include <linux/netlink.h>
@@ -38,6 +39,8 @@
 #ifndef NLA_TYPE_MASK
 #define NLA_TYPE_MASK (~(NLA_F_NESTED | NLA_F_NET_BYTEORDER))
 #endif
+
+#include "extmux.h"        /* W8: per-BSS hostapd external-RSN relay */
 
 #include "mbedtls/net_sockets.h"
 #include "mbedtls/ssl.h"
@@ -111,6 +114,7 @@
 #define MAX_RADIOS   8
 
 static uint64_t g_sta_ident;   /* last manager station-level ident */
+static struct extmux *g_extmux; /* W8 multi-VAP ext-auth relay, or NULL */
 static int g_phy_map[MAX_RADIOS] = { 0,1,2,3,4,5,6,7 };
 static int real_phy(int phy)
 {
@@ -160,6 +164,11 @@ struct cfg {
     int bcast_flood;            /* --bcast flood */
     int mgmt_relay;             /* --mgmt-relay */
     const char *ext_auth_dir;   /* --ext-auth-dir */
+    const char *ext_ctrl_dir;   /* hostapd ctrl_interface dir (W8) */
+    const char *state_file;     /* key-free extmux journal (W8) */
+    int fourway_ms;             /* CAP-side 4-way deadline (W8) */
+    int m1_retry_ms;            /* M1 retransmit interval (W8) */
+    const char *manager_spec;   /* --manager as given, before discovery */
     int mgmt_source;            /* 0 auto, 1 nl80211, 2 monitor, 3 off */
     /* Lab/hwsim harness: bring up a minimal AP and drive the MLME locally. */
     const char *lab_iface;
