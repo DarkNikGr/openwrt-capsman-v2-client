@@ -1,22 +1,28 @@
 #!/bin/sh /etc/rc.common
 # Native MikroTik CAPsMAN v2 CAP agent for OpenWrt
+#
+# START=95 is intentionally after netifd (S20) and wpad/hostapd (S19): the
+# agent cannot join before the WAN has a lease and cannot create a BSS before
+# hostapd's control socket exists.  Discovery/session setup is repeated on
+# every retry inside the agent, so an early boot failure is not permanent.
 USE_PROCD=1
 START=95
 STOP=10
 
 PROG=/usr/sbin/capagent
+PREFLIGHT=/usr/sbin/capagent-preflight
 CONF=/etc/cap/capagent.conf
 
 start_service() {
 	[ -x "$PROG" ] || { logger -t capagent "binary $PROG missing"; return 1; }
 	[ -f "$CONF" ] && . "$CONF"
 
-	# Optional recovery address; normally the management IP is already
-	# configured in /etc/config/network.
-	[ -n "${CAP_ADDR:-}" ] && ip addr add "${CAP_ADDR}" dev "${CAP_DEV:-br-lan}" 2>/dev/null
+	# Optional recovery address; use "replace" so repeated starts are
+	# idempotent.
+	[ -n "${CAP_ADDR:-}" ] && \
+		ip addr replace "${CAP_ADDR}" dev "${CAP_DEV:-br-lan}" 2>/dev/null
 
 	# Build the command line from the optional /interface wifi cap settings.
-	# Only CERT and KEY are required; everything else has a working default.
 	set -- "$PROG" \
 		--manager "${MANAGER:-auto}" \
 		--discovery-interfaces "${DISCOVERY_INTERFACES:-br-lan}" \
@@ -36,13 +42,31 @@ start_service() {
 	[ -n "${SERIAL:-}" ] && set -- "$@" --serial "${SERIAL}"
 	[ -n "${A1:-}" ] && set -- "$@" --a1 "${A1}"
 	[ -n "${E70:-}" ] && set -- "$@" --e70 "${E70}"
-	[ -n "${A7:-}" ] && set -- "$@" --a7 "${A7}"
-	[ -n "${A1:-}" ] && set -- "$@" --a1 "${A1}"
-	[ -n "${E70:-}" ] && set -- "$@" --e70 "${E70}"
+	[ -n "${EAPOL_LEG:-}" ] && set -- "$@" --eapol-leg "${EAPOL_LEG}"
+
+	# Split-MAC / hostapd external-RSN (W8) and Auth/Assoc relay (W6).
+	[ "${MGMT_RELAY:-no}" = yes ] && set -- "$@" --mgmt-relay
+	[ -n "${MGMT_SOURCE:-}" ] && set -- "$@" --mgmt-source "${MGMT_SOURCE}"
+	[ -n "${EXT_AUTH_DIR:-}" ] && set -- "$@" --ext-auth-dir "${EXT_AUTH_DIR}"
+	[ -n "${EXT_CTRL_DIR:-}" ] && set -- "$@" --ext-ctrl-dir "${EXT_CTRL_DIR}"
+	[ -n "${STATE_FILE:-}" ] && set -- "$@" --state-file "${STATE_FILE}"
+	[ -n "${FOURWAY_TIMEOUT:-}" ] && set -- "$@" --fourway-timeout "${FOURWAY_TIMEOUT}"
+	[ -n "${M1_RETRY:-}" ] && set -- "$@" --m1-retry "${M1_RETRY}"
+	[ "${DATAPATH_BRIDGE:-no}" = yes ] && set -- "$@" --datapath-bridge
+	[ -n "${BCAST:-}" ] && set -- "$@" --bcast "${BCAST}"
+	[ -n "${VAP_MTU:-}" ] && set -- "$@" --vap-mtu "${VAP_MTU}"
 
 	procd_open_instance
-	procd_set_param command "$@"
+	# The preflight is a thin wait-and-exec wrapper.  It stays in the
+	# foreground, so procd still supervises the real capagent PID.
+	if [ -x "$PREFLIGHT" ]; then
+		procd_set_param command "$PREFLIGHT" "$@"
+	else
+		procd_set_param command "$@"
+	fi
+	# Infinite respawn: 3600/5 with retry=0 means "no crash-loop limit".
 	procd_set_param respawn 3600 5 0
+	procd_set_param term_timeout 10
 	procd_set_param stdout 1
 	procd_set_param stderr 1
 	procd_close_instance
@@ -50,4 +74,21 @@ start_service() {
 
 service_triggers() {
 	procd_add_reload_trigger "network"
+
+	# Wake the agent as soon as the interface that carries the manager comes
+	# up (or changes address), instead of waiting for the next retry.
+	local iface
+	iface="$(sed -n 's/^WAIT_IF=//p' "$CONF" 2>/dev/null | head -n1)"
+	[ -n "$iface" ] || \
+		iface="$(sed -n 's/^DISCOVERY_INTERFACES=//p' "$CONF" 2>/dev/null | head -n1 | awk '{print $1}')"
+	[ -n "$iface" ] || iface=wan
+	procd_add_reload_interface_trigger "$iface"
+}
+
+reload_service() {
+	# A reload means "drop the session and re-discover".  There is no SIGHUP
+	# handler yet, so do a clean stop/start: run_once() rebuilds all state
+	# from scratch anyway.
+	stop
+	start
 }

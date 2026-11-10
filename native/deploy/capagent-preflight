@@ -1,0 +1,92 @@
+#!/bin/sh
+# capagent-preflight — wait for the OpenWrt dependencies a genuine CAP gets
+# "for free" from RouterOS, then exec capagent (W14).
+#
+# Gates, in order:
+#   1. at least one ieee80211 phy is registered (driver/module loaded)
+#   2. ubus/netifd are answering
+#   3. the discovery interface has carrier and (by default) an IPv4 address,
+#      i.e. DHCP has completed — on the measured mt7621 boot the WAN lease
+#      can arrive ~130 s after S95
+#   4. hostapd's global control socket exists (split-MAC / external RSN)
+#
+# procd runs this in the background, so rcS is never blocked.  On timeout it
+# still execs capagent: a wrong WAIT_IF must not brick the AP, and the agent
+# re-discovers on every retry.
+
+CONF=/etc/cap/capagent.conf
+[ -f "$CONF" ] && . "$CONF"
+
+if [ -z "${WAIT_IF:-}" ]; then
+	WAIT_IF=$(printf '%s\n' "${DISCOVERY_INTERFACES:-wan}" | awk '{print $1}')
+fi
+WAIT_IF=${WAIT_IF:-wan}
+WAIT_TIMEOUT=${WAIT_TIMEOUT:-300}
+WAIT_ADDR=${WAIT_ADDR:-yes}
+WAIT_HOSTAPD=${WAIT_HOSTAPD:-yes}
+WAIT_PHY=${WAIT_PHY:-yes}
+WAIT_PHYS=${WAIT_PHYS:-0}
+POLL=${POLL:-1}
+
+log() { logger -t capagent "$*"; }
+
+have_phy() {
+	[ "$WAIT_PHY" = no ] && return 0
+	n=0
+	for p in /sys/class/ieee80211/phy*; do
+		[ -e "$p" ] && n=$((n + 1))
+	done
+	[ "$n" -gt 0 ] || return 1
+	# WAIT_PHYS=0 means "at least one"; set 2/3 to wait for every radio.
+	[ "$WAIT_PHYS" -eq 0 ] || [ "$n" -ge "$WAIT_PHYS" ]
+}
+
+have_ubus() {
+	command -v ubus >/dev/null 2>&1 || return 1
+	ubus list network.interface >/dev/null 2>&1
+}
+
+have_iface() {
+	if [ -r "/sys/class/net/$WAIT_IF/carrier" ] && \
+	   [ "$(cat "/sys/class/net/$WAIT_IF/carrier" 2>/dev/null)" = 0 ]; then
+		return 1
+	fi
+	st=$(ubus call "network.interface.$WAIT_IF" status 2>/dev/null) || return 1
+	printf '%s\n' "$st" | grep -q '"up": true' || return 1
+	[ "$WAIT_ADDR" = no ] && return 0
+	printf '%s\n' "$st" | grep -q '"address"' || return 1
+	return 0
+}
+
+have_hostapd() {
+	[ "$WAIT_HOSTAPD" = no ] && return 0
+	[ -S "${EXT_AUTH_DIR:-/var/run/hostapd}/global" ] && return 0
+	[ -S /var/run/hostapd/global ] && return 0
+	[ -S /var/run/hostapd-global ] && return 0
+	return 1
+}
+
+start=$(cut -d. -f1 /proc/uptime)
+deadline=$((start + WAIT_TIMEOUT))
+announced=0
+
+while :; do
+	if have_phy && have_ubus && have_iface && have_hostapd; then
+		break
+	fi
+
+	now=$(cut -d. -f1 /proc/uptime)
+	if [ "$now" -ge "$deadline" ]; then
+		log "preflight timeout after ${WAIT_TIMEOUT}s (iface=$WAIT_IF); starting anyway"
+		break
+	fi
+
+	if [ "$announced" -eq 0 ]; then
+		log "waiting for phy/netifd/$WAIT_IF/hostapd before join"
+		announced=1
+	fi
+	sleep "$POLL"
+done
+
+log "preflight ok after $(( $(cut -d. -f1 /proc/uptime) - start ))s; exec $1"
+exec "$@"
