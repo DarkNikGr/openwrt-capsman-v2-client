@@ -19,3 +19,7 @@ __pycache__/
 *.log
 *.pcap
 *.qcow2
+
+# local raw captures / reports (never uploaded)
+.evidence/
+.archive/
