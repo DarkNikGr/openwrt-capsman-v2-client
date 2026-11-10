@@ -64,6 +64,9 @@ start_service() {
 	[ "${DATAPATH_BRIDGE:-no}" = yes ] && set -- "$@" --datapath-bridge
 	[ -n "${BCAST:-}" ] && set -- "$@" --bcast "${BCAST}"
 	[ -n "${VAP_MTU:-}" ] && set -- "$@" --vap-mtu "${VAP_MTU}"
+	# CAPsMAN v2 does not deliver a regulatory country; hostapd needs one
+	# for 5 GHz AP channels (especially in a zero-local-config boot).
+	[ -n "${COUNTRY:-}" ] && set -- "$@" --country "${COUNTRY}"
 	# W36: in-CAP MLME (no hostapd) for one manager-provisioned VAP.
 	[ "${MLME:-no}" = yes ] && set -- "$@" --mlme
 	[ -n "${MLME_PORT:-}" ] && set -- "$@" --mlme-port "${MLME_PORT}"
