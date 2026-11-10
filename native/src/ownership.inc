@@ -80,6 +80,8 @@ struct own_entry {
     int active;                 /* manager sent 0x6016 for this port */
     int fail_count;             /* hostapd start backoff */
     int start_given_up;         /* bounded retries exhausted, reported */
+    int starting;               /* a start is in flight (serialises callers) */
+    uint64_t starting_at;
     uint64_t retry_at;
     uint8_t bssid[6];
     uint16_t vlan;
@@ -811,6 +813,14 @@ static void own_try_start(const struct cfg *c, struct own_entry *e)
     }
     if (e->retry_at && now < e->retry_at)
         return;
+    /* 0x6016 and own_service() can race on the same entry; a start takes up
+       to 3 s, during which e->pid is still 0.  Without this lock both would
+       spawn a daemon and the loser would take the interface down. */
+    if (e->starting) {
+        if (now - e->starting_at < 15000)
+            return;
+        e->starting = 0;
+    }
     if (own_nd_has(e->ifname, NULL, 0)) {
         own_detach(e, "netifd claimed the name before start");
         e->owner = OWN_NETIFD;
@@ -846,8 +856,11 @@ static void own_try_start(const struct cfg *c, struct own_entry *e)
     vp.extfd = -1;
     vp.l2fd = -1;
 
+    e->starting = 1;
+    e->starting_at = now;
     pid = vap_hostapd_start(e->port, e->ifname, e->port >> 8, e->port & 0x0f,
                             e->start, e->start_len, &vp, c);
+    e->starting = 0;
     if (pid > 0) {
         e->pid = pid;
         e->fail_count = 0;
@@ -1288,19 +1301,18 @@ static void own_note_start(const struct cfg *c, int port, const uint8_t *body,
         return;
     }
     if (e->pid && own_pid_alive(e->pid)) {
-        if (same_body) {
-            printf("vap: %s already running pid=%d, duplicate 0x6016 "
-                   "ignored\n", e->ifname, e->pid);
-            own_save();
-            return;
-        }
-        /* Profile/channel changed: replace the daemon, never stack a second
-         * one on the same BSS. */
-        printf("vap: %s profile changed, restarting hostapd pid=%d\n",
-               e->ifname, e->pid);
-        own_stop_pid(e->pid);
-        own_files_remove(e->ifname);
-        e->pid = 0;
+        /* The official manager re-sends 0x6016 with a body that differs in
+         * non-configuration bytes; restarting on every repeat killed the
+         * daemon in a tight loop and left the BSS unusable.  A live daemon
+         * wins: journal the newest body for a future cold start, but do not
+         * touch the running process.  A real profile change arrives as
+         * 0x600c + 0x500b + 0x6016. */
+        printf("vap: %s already running pid=%d, repeated 0x6016 ignored "
+               "(body %s)\n", e->ifname, e->pid,
+               same_body ? "identical" : "updated");
+        g_own_dirty = 1;
+        own_save();
+        return;
     }
     /* A new start request gets a fresh bounded retry budget. */
     e->fail_count = 0;
