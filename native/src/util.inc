@@ -163,7 +163,8 @@ static size_t parse_hex(const char *s, uint8_t *out, size_t max)
     return n;
 }
 
-static void build_join(uint8_t *b, const struct cfg *c, size_t *out)
+static void build_join(uint8_t *b, const struct cfg *c, size_t *out,
+                       const uint8_t *csr, size_t csrlen)
 {
     static const uint8_t e6e[2] = {0x00,0x01};
     char identity[64] = "";
@@ -195,6 +196,10 @@ static void build_join(uint8_t *b, const struct cfg *c, size_t *out)
     n += put_el(b+n, 0x74, c74, sizeof(c74));
     n += put_el(b+n, 0x75, c->macs[0], 6);
     n += put_el(b+n, 0xa1, c->a1, 4);
+    /* W16: 0x76 = PKCS#10 CSR (DER).  The manager answers with 0x77/0x78.
+       It is accepted at any position; keep it last, as a genuine CAP does. */
+    if (csr && csrlen)
+        n += put_el(b+n, 0x76, csr, (uint16_t)csrlen);
     *out = n;
 }
 

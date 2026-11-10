@@ -42,7 +42,13 @@ the **hardware/factory-reset proof** — see `docs/MANAGER-ONLY.md`.
    (W25/W28).
 4. **Station-side M3 acceptance** with the patched `wpad` on real hardware
    (one `wpa_supplicant -dd` connect); the IE bytes are already equal.
-5. **No manual fallback allowed** — no SSH-driven bootstrap, no local
+5. **Zero-touch boot** — the client and hostapd must live in ROM (custom
+   image). The certificate no longer does: since W43 the agent generates its
+   key + CSR and enrols on first boot when `/etc/cap` is empty, then re-joins
+   with the stored certificate (manager `require-peer-certificate=no`, the
+   default). Still open: client + hostapd in ROM, and the manager-only BSS
+   path below.
+6. **No manual fallback allowed** — no SSH-driven bootstrap, no local
    `wireless` file, no second daemon on the manager.
 
 ## Research tracks (20)
@@ -79,7 +85,10 @@ the **hardware/factory-reset proof** — see `docs/MANAGER-ONLY.md`.
     `wpad` in ROM); the first-boot join and factory-reset acceptance run are
     still pending on hardware.
 16. Certificate lifecycle: enrolment (`0x76`/`0x77`/`0x78`), renewal, and what
-    happens when the manager rotates its CA.
+    happens when the manager rotates its CA — **done in W43**
+    (`native/src/cert.inc`, `scripts/lab-cert-lifecycle.sh`). Remaining:
+    `require-peer-certificate=yes` has no protocol-level recovery after a
+    factory reset, by design.
 17. Regression harness: one command that joins, waits for 8/8 VAPs, associates
     a STA, completes the 4-way, DHCPs and pings — pass/fail JSON.
 18. Interop matrix: wpa2-psk / wpa2-eap / SAE / OWE × on-cap / on-capsman /

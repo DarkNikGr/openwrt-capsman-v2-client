@@ -4,7 +4,18 @@ CAPsMAN v2 authenticates the CAP with an X.509 client certificate. The manager
 issues it after a join that carries a CSR (TLV `0x76`); the response `0x77` is
 the DER certificate and `0x78` the CA chain.
 
-## Using the helper
+## Automatic (default, zero-touch)
+
+Nothing has to be done by hand. If `/etc/cap/client.pem` and `client.key` are
+missing at startup (first boot / factory reset), `capagent` generates an EC
+P-256 key, sends a CSR with a fresh CN, stores the issued leaf/CA under
+`/etc/cap` and re-joins with them. A stored expired certificate, a rotated
+manager CA and a duplicate-CN rejection are recovered automatically. This
+needs `require-peer-certificate=no` (the RouterOS default) on the manager.
+
+Force it with `capagent --enroll`, disable it with `--no-enroll`.
+
+## Manual (pre-provisioning or `require-peer-certificate=yes`)
 
 `native/enroll.py` performs a join with a CSR and writes the issued certificate:
 

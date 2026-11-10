@@ -136,11 +136,13 @@ static int net_connect_timeout(mbedtls_net_context *fd, const char *host,
 static int connect_tls(mbedtls_net_context *fd, mbedtls_ssl_context *ssl,
                        mbedtls_ssl_config *conf, mbedtls_entropy_context *ent,
                        mbedtls_ctr_drbg_context *ctr, mbedtls_x509_crt *crt,
-                       mbedtls_pk_context *pk, const struct cfg *c)
+                       mbedtls_pk_context *pk, const struct cfg *c,
+                       int bootstrap, int *verify_failed)
 {
     char err[128];
     int r;
 
+    if (verify_failed) *verify_failed = 0;
     mbedtls_net_init(fd);
     mbedtls_ssl_init(ssl);
     mbedtls_ssl_config_init(conf);
@@ -155,16 +157,31 @@ static int connect_tls(mbedtls_net_context *fd, mbedtls_ssl_context *ssl,
         fprintf(stderr, "ctr_drbg_seed: %s\n", err);
         return -1;
     }
-    if ((r = mbedtls_x509_crt_parse_file(crt, c->cert)) != 0) {
-        mbedtls_strerror(r, err, sizeof(err));
-        fprintf(stderr, "cert %s: %s\n", c->cert, err);
-        return -1;
-    }
-    if ((r = mbedtls_pk_parse_keyfile(pk, c->key, NULL,
-                                      mbedtls_ctr_drbg_random, ctr)) != 0) {
-        mbedtls_strerror(r, err, sizeof(err));
-        fprintf(stderr, "key %s: %s\n", c->key, err);
-        return -1;
+    /* W16/W43: bootstrap mode is a certificate-less join used only to obtain
+     * 0x77/0x78.  A pre-provisioned certificate (the current device) follows
+     * the original mTLS path unchanged. */
+    int have_own = 0;
+    if (!bootstrap && cert_key_ok(c)) {
+        if ((r = mbedtls_x509_crt_parse_file(crt, c->cert)) != 0) {
+            mbedtls_strerror(r, err, sizeof(err));
+            fprintf(stderr, "cert %s: %s\n", c->cert, err);
+            return -1;
+        }
+        if ((r = mbedtls_pk_parse_keyfile(pk, c->key, NULL,
+                                          mbedtls_ctr_drbg_random, ctr)) != 0) {
+            mbedtls_strerror(r, err, sizeof(err));
+            fprintf(stderr, "key %s: %s\n", c->key, err);
+            return -1;
+        }
+        have_own = 1;
+    } else if (bootstrap) {
+        printf("cert: bootstrap join without a client certificate "
+               "(enrolling)\n");
+        fflush(stdout);
+    } else {
+        printf("cert: %s or %s missing; joining without a client "
+               "certificate\n", c->cert, c->key);
+        fflush(stdout);
     }
     if ((r = mbedtls_ssl_config_defaults(conf, MBEDTLS_SSL_IS_CLIENT,
                                          MBEDTLS_SSL_TRANSPORT_STREAM,
@@ -174,7 +191,7 @@ static int connect_tls(mbedtls_net_context *fd, mbedtls_ssl_context *ssl,
         return -1;
     }
     int verify = 0;
-    if (!c->dont_verify && c->ca_cert && *c->ca_cert) {
+    if (!bootstrap && !c->dont_verify && c->ca_cert && *c->ca_cert) {
         FILE *cf = fopen(c->ca_cert, "r");
         if (cf) {
             fclose(cf);
@@ -197,7 +214,7 @@ static int connect_tls(mbedtls_net_context *fd, mbedtls_ssl_context *ssl,
         mbedtls_ssl_conf_authmode(conf, MBEDTLS_SSL_VERIFY_NONE);
     }
     mbedtls_ssl_conf_rng(conf, mbedtls_ctr_drbg_random, ctr);
-    mbedtls_ssl_conf_own_cert(conf, crt, pk);
+    if (have_own) mbedtls_ssl_conf_own_cert(conf, crt, pk);
     mbedtls_ssl_conf_min_tls_version(conf, MBEDTLS_SSL_VERSION_TLS1_2);
     mbedtls_ssl_conf_max_tls_version(conf, MBEDTLS_SSL_VERSION_TLS1_2);
 
@@ -237,11 +254,32 @@ static int connect_tls(mbedtls_net_context *fd, mbedtls_ssl_context *ssl,
         }
         mbedtls_strerror(r, err, sizeof(err));
         fprintf(stderr, "handshake: %s\n", err);
+        /* Only an X.509 verification failure means the manager CA may have
+         * rotated; a plain network/alert error must not trigger enrolment. */
+        if (verify && verify_failed &&
+            (r == MBEDTLS_ERR_X509_CERT_VERIFY_FAILED ||
+             r == MBEDTLS_ERR_SSL_BAD_CERTIFICATE))
+            *verify_failed = 1;
         return -1;
     }
     printf("joined TLS to %s:%s\n", c->manager, c->port);
     fflush(stdout);
     return 0;
+}
+
+/* Release a failed TLS attempt so connect_tls() can be retried (bootstrap). */
+static void tls_free_all(mbedtls_net_context *fd, mbedtls_ssl_context *ssl,
+                         mbedtls_ssl_config *conf, mbedtls_entropy_context *ent,
+                         mbedtls_ctr_drbg_context *ctr, mbedtls_x509_crt *crt,
+                         mbedtls_pk_context *pk)
+{
+    mbedtls_net_free(fd);
+    mbedtls_ssl_free(ssl);
+    mbedtls_ssl_config_free(conf);
+    mbedtls_x509_crt_free(crt);
+    mbedtls_pk_free(pk);
+    mbedtls_ctr_drbg_free(ctr);
+    mbedtls_entropy_free(ent);
 }
 
 static void parse_macs(struct cfg *c, const char *s)

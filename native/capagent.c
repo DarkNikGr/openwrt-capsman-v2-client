@@ -132,6 +132,9 @@ struct cfg {
     const char *key;
     const char *ca_cert;        /* ca-certificate */
     const char *manager_cn;     /* caps-man-certificate-common-names */
+    const char *cert_cn;        /* --cert-cn: fixed enrolment subject CN */
+    int enroll;                 /* --enroll: force a new CSR this run */
+    int no_enroll;              /* --no-enroll: never generate a CSR */
     const char *identity;       /* CAP identity (WinBox "identity") */
     const char *serial;         /* CAP serial (WinBox "serial") */
     const char *discovery_if;   /* discovery-interfaces */
@@ -221,6 +224,7 @@ static void put32(uint8_t *p, uint32_t v) { p[0]=v>>24; p[1]=v>>16; p[2]=v>>8; p
 
 /* ---- modules (included in dependency order) ------------------------- */
 #include "src/util.inc"   /* TLV/hex/sysfs helpers, join/NEWPHY builders */
+#include "src/cert.inc"   /* 0x76 CSR enrolment, 0x77/0x78, CA pinning (W16) */
 #include "src/nl80211.inc"   /* generic netlink: control-port EAPOL, NEW_KEY/SET_KEY, authorize */
 #include "src/policy.inc"   /* W33: legacy-vs-own ownership + AP-only netdev lookup */
 #include "src/apply.inc"   /* 0x77/M2 config parse and UCI apply (argv, no shell) */
