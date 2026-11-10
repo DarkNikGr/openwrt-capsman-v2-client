@@ -1,0 +1,53 @@
+#!/bin/sh /etc/rc.common
+# Native MikroTik CAPsMAN v2 CAP agent for OpenWrt
+USE_PROCD=1
+START=95
+STOP=10
+
+PROG=/usr/sbin/capagent
+CONF=/etc/cap/capagent.conf
+
+start_service() {
+	[ -x "$PROG" ] || { logger -t capagent "binary $PROG missing"; return 1; }
+	[ -f "$CONF" ] && . "$CONF"
+
+	# Optional recovery address; normally the management IP is already
+	# configured in /etc/config/network.
+	[ -n "${CAP_ADDR:-}" ] && ip addr add "${CAP_ADDR}" dev "${CAP_DEV:-br-lan}" 2>/dev/null
+
+	# Build the command line from the optional /interface wifi cap settings.
+	# Only CERT and KEY are required; everything else has a working default.
+	set -- "$PROG" \
+		--manager "${MANAGER:-auto}" \
+		--discovery-interfaces "${DISCOVERY_INTERFACES:-br-lan}" \
+		--port "${PORT:-5246}" \
+		--cert "${CERT:-/etc/cap/client.pem}" \
+		--key "${KEY:-/etc/cap/client.key}" \
+		--macs "${MACS:-auto}"
+	[ -f "${CA_CERT:-/etc/cap/ca.pem}" ] && set -- "$@" --ca-cert "${CA_CERT:-/etc/cap/ca.pem}"
+	[ "${DONT_VERIFY_CERTIFICATE:-no}" = yes ] && set -- "$@" --dont-verify-certificate
+	[ -n "${CAPS_MAN_CERT_CN:-}" ] && set -- "$@" --caps-man-certificate-common-names "${CAPS_MAN_CERT_CN}"
+	[ "${LOCK_TO_CAPS_MAN:-no}" = yes ] && set -- "$@" --lock-to-caps-man
+	[ -n "${SLAVES_DATAPATH:-}" ] && set -- "$@" --slaves-datapath "${SLAVES_DATAPATH}"
+	[ "${SLAVES_STATIC:-no}" = yes ] && set -- "$@" --slaves-static
+	[ "${APPLY:-no}" = yes ] && set -- "$@" --apply
+	[ "${DATACHAN:-no}" = yes ] && set -- "$@" --datachan
+	[ -n "${IDENTITY:-}" ] && set -- "$@" --identity "${IDENTITY}"
+	[ -n "${SERIAL:-}" ] && set -- "$@" --serial "${SERIAL}"
+	[ -n "${A1:-}" ] && set -- "$@" --a1 "${A1}"
+	[ -n "${E70:-}" ] && set -- "$@" --e70 "${E70}"
+	[ -n "${A7:-}" ] && set -- "$@" --a7 "${A7}"
+	[ -n "${A1:-}" ] && set -- "$@" --a1 "${A1}"
+	[ -n "${E70:-}" ] && set -- "$@" --e70 "${E70}"
+
+	procd_open_instance
+	procd_set_param command "$@"
+	procd_set_param respawn 3600 5 0
+	procd_set_param stdout 1
+	procd_set_param stderr 1
+	procd_close_instance
+}
+
+service_triggers() {
+	procd_add_reload_trigger "network"
+}

@@ -1,0 +1,21 @@
+# secrets / certificates
+*.key
+*.pem
+!dist/capagent.conf.example
+certs/
+secrets/
+
+# build artefacts
+*.o
+*.a
+native/capagent-mipsel
+*.bak-*
+*.orig
+__pycache__/
+*.pyc
+
+# local / OS
+.DS_Store
+*.log
+*.pcap
+*.qcow2

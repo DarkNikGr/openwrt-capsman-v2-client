@@ -1,0 +1,29 @@
+# capagent runtime configuration
+# Installed as /etc/cap/capagent.conf
+
+# Required: the CAP certificate and key (enrolled with the manager).
+CERT=/etc/cap/client.pem
+KEY=/etc/cap/client.key
+
+# Manager address. "auto" uses UDP discovery on DISCOVERY_INTERFACES.
+MANAGER=auto
+PORT=5246
+DISCOVERY_INTERFACES=br-lan
+
+# Skip TLS verification or verify against the manager CA.
+DONT_VERIFY_CERTIFICATE=yes
+# CA_CERT=/etc/cap/ca.pem
+# CAPS_MAN_CERT_CN=WiFi-CAPsMAN-XXXXXXXXXXXX
+
+# CAP identity / serial shown on the manager.
+# IDENTITY=OpenWrt-CAP3
+# SERIAL=28D1271B2D80
+
+# Radio MACs (default: /sys/class/ieee80211/phy*).
+MACS=auto
+
+# Apply the configuration pushed by CAPsMAN to OpenWrt UCI.
+APPLY=yes
+
+# Enable the CAPsMAN c2 datachan (UDP 5248).
+DATACHAN=yes
