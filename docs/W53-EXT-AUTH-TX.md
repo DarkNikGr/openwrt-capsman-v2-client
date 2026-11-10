@@ -93,12 +93,21 @@ forever today because `txn_start()` reset `txn_retries` on every retry.
 
 `native/src/mgmt.inc`: wire `xm_on_direct_authz()` into the extmux callbacks.
 
-### hostapd (`patches/9990-external-rsn-tx-parse.patch`)
+### hostapd (`patches/9999a-…` reused from W46 + `9999b-…`)
 
-For a *new* build the parser is fixed properly: CR/LF/space/tab at the end of
-the hex field are trimmed, and only a negative driver return is an error.  The
-patch is part of the normal series (`999` → `9990` → `9997` → `9998` →
-`9999`), so a rebuilt `wpad` needs neither the capagent fallback nor a retry.
+The trailing-newline trim is **not duplicated here**: W46's
+`patches/9999a-external-rsn-sae.patch` already adds it (together with
+`external_rsn_sae=1` and `EXT_AUTH_MGMT_TX`), and that patch applies cleanly on
+top of this branch's series.  W53 only adds the piece that is still missing:
+
+`patches/9999b-external-rsn-tx-retval.patch` — only a **negative**
+`hostapd_wpa_auth_send_eapol()` return is an error.  The nl80211 driver
+returns the number of bytes sent on its `PF_PACKET` EAPOL path (the common
+mac80211 AP case), so a frame that was transmitted still answered `FAIL`; the
+call site now tests `< 0`.
+
+Series: `999` → `9997` → `9998` → `9999` → `9999a` → `9999b`
+(`scripts/patches-check.sh`: 6 patches, 59 hunks, 0 fuzz).
 
 ### Capability-driven, not build-fatal
 

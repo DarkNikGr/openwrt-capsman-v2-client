@@ -138,14 +138,16 @@ lexicographic order:
 | patch | hunks | what it does | offset | fuzz |
 |---|---|---|---|---|
 | `999-external-rsn-auth.patch` | 28 | `external_rsn_auth=1`, `ext_auth_socket=`, `src/ap/ext_auth.c`, EAPOL relay to a UNIX dgram socket | 0 | 0 |
-| `9990-external-rsn-tx-parse.patch` | 4 | `EXT_AUTH_TX` tolerates the control-wire newline and treats a positive driver return as success (W53) | 0 | 0 |
 | `9997-external-rsn-ie.patch` | 7 | `external_rsn_ie=<hex>` replaces the generated RSN IE with the manager's bytes | 0 | 0 |
 | `9998-external-rsn-eapol-rx.patch` | 2 | relay STA EAPOL from `ieee802_1x_receive()` (the mac80211 path) | +4 | 0 |
 | `9999-external-rsn-no-psk.patch` | 4 | external mode drops every PSK field, allows a passphrase-free BSS, rejects SAE/OWE/802.1X | +1..+17 | 0 |
+| `9999a-external-rsn-sae.patch` | 16 | W46: `external_rsn_sae=1`, `EXT_AUTH_MGMT_TX`, and the `EXT_AUTH_TX` trailing-CR/LF trim | 0 | 0 |
+| `9999b-external-rsn-tx-retval.patch` | 2 | W53: a positive `hostapd_wpa_auth_send_eapol()` return is success (nl80211 byte count) | 0 | 0 |
 
-Total: 45 hunks, **0 fuzz**.  `scripts/patches-check.sh` reproduces this table
+Total: 59 hunks, **0 fuzz**.  `scripts/patches-check.sh` reproduces this table
 from the tarball (see §6).  The capture in §6 is the W47 four-patch series;
-W53 added `9990-…` with the same 0 offset / 0 fuzz result.
+W46 added `9999a-…` (SAE, mgmt TX, TX newline trim) and W53 added `9999b-…`
+(TX return-value test), both with 0 offset / 0 fuzz.
 
 The first patch is `999-…`, **not** `0999-…`: OpenWrt applies the whole
 `package/network/services/hostapd/patches/` directory in one `$(sort)` pass
