@@ -1,0 +1,26 @@
+--- a/src/ap/ieee802_1x.c
++++ b/src/ap/ieee802_1x.c
+@@ -37,6 +37,7 @@
+ /* FIX: Not really a good thing to require ieee802_11.h here.. (FILS) */
+ #include "ieee802_11.h"
+ #include "ieee802_1x.h"
++#include "ext_auth.h"
+ #include "wpa_auth_kay.h"
+ 
+ 
+@@ -1136,9 +1137,12 @@
+ 	int key_mgmt;
+ 
+ 	if (hapd->conf->external_rsn_auth) {
+-		/* EAPOL is relayed to the external RSN authenticator. */
+-		wpa_printf(MSG_DEBUG,
+-			   "IEEE 802.1X: external RSN authenticator - ignore local RX");
++		/*
++		 * EAPOL is relayed to the external RSN authenticator.
++		 * This is the path used on mac80211 APs (l2_packet RX).
++		 */
++		ext_auth_notify_eapol(hapd, sa, buf, len,
++				      encrypted == FRAME_ENCRYPTED);
+ 		return;
+ 	}
+ 

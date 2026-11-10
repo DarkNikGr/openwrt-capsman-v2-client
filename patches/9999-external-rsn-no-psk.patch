@@ -1,0 +1,92 @@
+--- a/src/ap/ap_config.c
++++ b/src/ap/ap_config.c
+@@ -532,6 +532,24 @@
+ {
+ 	struct hostapd_ssid *ssid = &conf->ssid;
+ 
++	if (conf->external_rsn_auth) {
++		/*
++		 * The RSN authenticator (and therefore the PSK) is external.
++		 * Never derive, read or cache PSK material in the CAP: this
++		 * keeps the real PSK off the device even if it was mistakenly
++		 * copied into the configuration, and removes the offline
++		 * dictionary-attack target from the CAP's memory/storage.
++		 */
++		os_free(ssid->wpa_passphrase);
++		ssid->wpa_passphrase = NULL;
++		ssid->wpa_passphrase_set = 0;
++		hostapd_config_clear_wpa_psk(&ssid->wpa_psk);
++		ssid->wpa_psk_set = 0;
++		wpa_printf(MSG_DEBUG,
++			   "EXT-AUTH: ignoring local PSK material (external RSN authenticator)");
++		return 0;
++	}
++
+ 	if (hostapd_setup_sae_pt(conf) < 0)
+ 		return -1;
+ 
+@@ -1257,6 +1275,32 @@
+ 				    struct hostapd_config *conf,
+ 				    int full_config)
+ {
++	if (full_config && bss->external_rsn_auth) {
++		/*
++		 * The external authenticator only implements the RSN 4-way
++		 * handshake for PSK AKMs. SAE/OWE need the password (or the
++		 * SAE state machine) on the CAP and WPA-Enterprise/FILS/FT
++		 * need local state that is not relayed today; reject those
++		 * instead of silently advertising a BSS that cannot work.
++		 */
++		if (bss->wpa != WPA_PROTO_RSN || bss->osen) {
++			wpa_printf(MSG_ERROR,
++				   "external_rsn_auth requires WPA2/RSN (wpa=2)");
++			return -1;
++		}
++		if (bss->ieee802_1x) {
++			wpa_printf(MSG_ERROR,
++				   "external_rsn_auth does not support IEEE 802.1X");
++			return -1;
++		}
++		if (bss->wpa_key_mgmt &
++		    ~(WPA_KEY_MGMT_PSK | WPA_KEY_MGMT_PSK_SHA256)) {
++			wpa_printf(MSG_ERROR,
++				   "external_rsn_auth supports only WPA-PSK and WPA-PSK-SHA256");
++			return -1;
++		}
++	}
++
+ 	if (full_config && is_6ghz_op_class(conf->op_class) &&
+ 	    !hostapd_config_check_bss_6g(bss))
+ 		return -1;
+@@ -1298,6 +1342,7 @@
+ 	}
+ 
+ 	if (full_config && bss->wpa &&
++	    !bss->external_rsn_auth &&
+ 	    wpa_key_mgmt_wpa_psk_no_sae(bss->wpa_key_mgmt) &&
+ 	    bss->ssid.wpa_psk == NULL && bss->ssid.wpa_passphrase == NULL &&
+ 	    bss->ssid.wpa_psk_file == NULL &&
+--- a/src/ap/ieee802_1x.c
++++ b/src/ap/ieee802_1x.c
+@@ -145,11 +145,21 @@
+ 
+ 
+ #ifdef CONFIG_EXTERNAL_RSN_AUTH
++static void ieee802_1x_ml_set_sta_authorized(struct hostapd_data *hapd,
++					     struct sta_info *sta,
++					     bool authorized);
++
+ void ieee802_1x_external_rsn_set_authorized(struct hostapd_data *hapd,
+ 					    struct sta_info *sta,
+ 					    int authorized)
+ {
+ 	ieee802_1x_set_authorized(hapd, sta, authorized, false);
++	/*
++	 * Mirror ieee802_1x_set_sta_authorized(): authorize every valid link
++	 * of an MLD, not just the link that carried the 4-way handshake.
++	 * No-op for non-MLO stations.
++	 */
++	ieee802_1x_ml_set_sta_authorized(hapd, sta, !!authorized);
+ }
+ #endif /* CONFIG_EXTERNAL_RSN_AUTH */
+ 
