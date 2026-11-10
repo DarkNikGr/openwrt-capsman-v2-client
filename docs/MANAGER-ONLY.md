@@ -89,7 +89,7 @@ must not claim the goal is achieved.
 * OpenWrt 24.10 on the CAP, with the stock `wpad` replaced by a build carrying
   `CONFIG_EXTERNAL_RSN_AUTH=y`, `999-external-rsn-auth.patch`,
   `9997-external-rsn-ie.patch`, `9998-external-rsn-eapol-rx.patch`,
-  `9999-external-rsn-no-psk.patch`.
+  `9999-external-rsn-no-psk.patch` (see [`BUILD.md`](BUILD.md)).
 * A CAP certificate trusted by the manager (`/etc/cap/client.pem`,
   `/etc/cap/client.key`, optional `/etc/cap/ca.pem`).
 * Manager reachable over TLS 5246, CAPsMAN enabled, provisioning rules for the
