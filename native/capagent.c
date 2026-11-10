@@ -113,6 +113,12 @@
 
 #define MAX_RADIOS   8
 
+/* W45: control-plane liveness.  One complete frame must arrive within this
+ * many seconds; a quiet manager makes the session unusable after
+ * MANAGER_SILENCE_SEC and forces a reconnect. */
+#define FRAME_READ_TIMEOUT_SEC  5
+#define MANAGER_SILENCE_SEC     20
+
 /* Release version, reported by --version and recorded in the release notes. */
 #define CAPAGENT_VERSION "0.4.0"
 
@@ -178,6 +184,14 @@ struct cfg {
     const char *wireless_conf;  /* --wireless-config (default /etc/config/wireless) */
     int wireless_mode;          /* -1 auto, 0 own, 1 legacy */
     int vap_teardown;           /* 0 = leave our netdev/hostapd on 0x600c */
+    /* W45: control-plane liveness / procd hang watchdog. */
+    int watchdog_secs;          /* SIGALRM budget, 0 = disabled */
+    const char *heartbeat;      /* optional progress file */
+    int silence_secs;           /* manager silence before reconnect */
+    /* W45 compatibility: use the per-BSS ext-auth socket + direct nl80211
+     * EAPOL TX instead of the extmux ctrl relay (needed with hostapd builds
+     * that reject EXT_AUTH_TX before the WPA state is initialized). */
+    int no_extmux;
     /* Lab/hwsim harness: bring up a minimal AP and drive the MLME locally. */
     const char *lab_iface;
     const char *lab_ssid;
@@ -193,6 +207,11 @@ static int g_ca_loaded = 0;
 /* ---- W34 netdev ownership (src/ownership.inc, included after vap.inc) ----
  * Declared here because nl80211/policy/apply/mgmt/vap are included before it. */
 struct vap;
+#define OWN_PROBE_UNKNOWN  0
+#define OWN_PROBE_OK       1
+#define OWN_PROBE_BUSY     2
+static int  own_probe(int force);
+static int  own_nd_has(const char *ifname, char *section, size_t section_len);
 static int  own_has_entry(int port);
 static int  own_created_port(int port);
 static int  own_managed_strict(int port);

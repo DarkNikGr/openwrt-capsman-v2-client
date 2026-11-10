@@ -25,14 +25,24 @@ mbedTLS and nl80211 so it can also be unit-tested on a host.
 | `main.inc` | run loop, per-attempt discovery/session reset, options, `main` |
 | `extmux.c` / `extmux.h` | per-BSS external-RSN relay: sessions keyed by (port, MAC), 4-way deadline/retry, ctrl reply checking, journal/resync |
 
-## Ownership invariant (W33 API, W34 model)
+## Ownership invariant (W33 API, W34 model, W51 source chain)
 
 `policy.inc` keeps the W33 API (`wl_legacy()`, `wl_own()`,
 `vap_should_start_bss()`, `vap_port_alias_ok()`, `--check-wireless`,
-`--selftest-policy`) but the production decision now comes from
-`ubus call network.wireless status` parsed by `netifd_status.inc`, reconciled
-into the one table in `ownership.inc` (journal:
-`/var/run/capagent-vaps.state`, `--vap-state FILE`).
+`--selftest-policy`).  **W51** resolves the ownership source explicitly:
+
+1. `ubus call network.wireless status` (parsed by `netifd_status.inc`);
+2. `uci -q show wireless`;
+3. `/etc/config/wireless`;
+4. none usable → **refuse to adopt: read-only session**.
+
+Results are reconciled into the one table in `ownership.inc` (journal:
+`/var/run/capagent-vaps.state`, `--vap-state FILE`).  Whenever ubus is
+unusable the session is hard read-only even with `--vap-auto`: nothing is
+created, adopted, stolen, started, stopped or deleted.  MLD companion
+netdevs (`mld-*`) and any netdev named by the netifd/vendor status are never
+adoptable.  `--wireless-owner own` is the explicit opt-in out of the
+fail-safe; `legacy` forces the read-only contract.
 
 | Netdev state | Owner | capagent may |
 |---|---|---|
@@ -40,12 +50,12 @@ into the one table in `ownership.inc` (journal:
 | in the journal / our `vap-*.pid` | `capagent` | create, start hostapd, install keys, tear down on `0x600c` |
 | exists, neither | `foreign` | never touch; manager VAP gets an alternate name |
 | manager asked, probe unusable | `pending` | retry when the probe recovers |
+| `mld-*` (MLD companion) | never a BSS | never adopt, start, delete or resolve by MAC |
 
-`wl_legacy()` remains the coarse "netifd owns at least one wireless ifname"
+`wl_legacy()` remains the coarse "the wireless stack owns at least one BSS"
 predicate for global UCI/apply decisions.  Per-netdev effects use
-`wl_port_managed()` / `own_claim()`.  `--wireless-owner legacy` forces the old
-fully read-only contract.  `--check-wireless` is read-only (journal + ubus
-probe, no reconcile/cleanup).
+`wl_port_managed()` / `own_claim()`.  `--check-wireless` is read-only
+(source chain + journal, no reconcile/cleanup).
 
 ## Build
 

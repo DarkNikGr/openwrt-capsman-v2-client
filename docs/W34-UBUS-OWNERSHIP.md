@@ -1,5 +1,12 @@
 # W34 — ubus ownership on top of the W33 policy surface
 
+> **W51 update:** on images that do not export `network.wireless` (vendor
+> WiFi stacks, e.g. the Deco BE65) ubus is no longer treated as "netifd owns
+> nothing".  The source chain is ubus → `uci show wireless` →
+> `/etc/config/wireless` → **unknown = refuse to adopt (read-only)**.  See
+> `docs/W51-OWNERSHIP-FALLBACK.md`.  The table and states below are unchanged;
+> the W51 fail-safe only narrows what `own_claim()` may do.
+
 W34 keeps the W33 API (`src/policy.inc`) and replaces the config-file
 heuristic with live netifd detection and one ownership table.  There is
 exactly one mechanism and one journal now.
@@ -9,11 +16,12 @@ exactly one mechanism and one journal now.
 | Source | Question it answers |
 |---|---|
 | `ubus call network.wireless status` (`src/netifd_status.inc`) | which netdev names does netifd own right now? |
+| `uci -q show wireless` / `/etc/config/wireless` (**W51 fallback**) | how many vendor/netifd BSS sections exist when ubus cannot be read? |
 | `g_own[]` / `/var/run/capagent-vaps.state` (`src/ownership.inc`) | which port did capagent create/adopt, with which ifname/ifindex/pid? |
 | `/proc/<pid>` + `/var/run/vap-<if>.pid` | is the journaled hostapd still alive? |
 
-The config file is **not** consulted in production.  `--wireless-config FILE`
-is an offline diagnostic/selftest input only.
+The config file is **not** the authority when ubus answers.  `--wireless-config
+FILE` is an offline diagnostic/selftest input.
 
 ## States
 
@@ -28,12 +36,18 @@ Probe states: `ok` (full reconcile), `busy` (`"pending": true`), `unknown`
 (ubus failed/timeout).  `busy`/`unknown` disable creation, deletion and name
 stealing; only hostapd restart on an already-proven netdev is allowed.
 
+W51: `unknown` additionally triggers the source fallback.  If uci/the config
+file reports any `wifi-iface` section, or nothing is readable at all, the
+whole session is **read-only** (`g_wl_readonly`), regardless of `--vap-auto`.
+Only an explicit `--wireless-owner own` leaves the fail-safe.
+
 ## W33 API mapping
 
 | W33 API | W34 behaviour |
 |---|---|
 | `wl_legacy()` | coarse session predicate: netifd owns ≥1 wireless ifname; still gates global UCI apply |
 | `--wireless-owner legacy` / env | forces full read-only; `own_claim()` refuses to create |
+| `--wireless-owner own` (W51) | explicit opt-in; leaves the unknown-source fail-safe |
 | `vap_should_start_bss()` | unchanged and still selftested; called with `legacy = !managed` |
 | `vap_port_alias_ok()` | unchanged |
 | `ifindex_by_mac_ap()` | used as a deterministic AP-only candidate inside `own_claim()` |
@@ -67,10 +81,12 @@ make SDK=... check
 Runs under `qemu-mipsel`:
 
 * `--crypto-selftest` — 4 checks;
-* `--selftest-policy` — 27 checks (21 W33 + 6 ubus payload checks);
-* `tests/test_ownership.c` — 52 state-machine checks (pure manager, pure
+* `--selftest-policy` — 27 checks (21 W33 + 6 ubus payload checks; W51 folds
+  the zero/multicast/broadcast MAC and live `mld-*` regression into the
+  existing zero-MAC check, so the total stays 27);
+* `tests/test_ownership.c` — 61 state-machine checks (pure manager, pure
   legacy/read-only, mixed, netifd takeover, agent restart, busy/unknown,
-  stale cleanup, wifi reload, forced legacy);
+  stale cleanup, wifi reload, forced legacy, W51 read-only source + MLD);
 * `tests/test_netifd_status.c` — 21 parser checks.
 
-Combined: **104 checks, 0 failures.**
+Combined: **113 checks, 0 failures.**

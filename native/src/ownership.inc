@@ -52,6 +52,13 @@
 #ifndef OWN_PROBE_MS
 #define OWN_PROBE_MS       1500
 #endif
+/* Defined in capagent.c for policy.inc; also needed when this file is
+ * compiled stand-alone by tests/test_ownership.c. */
+#ifndef OWN_PROBE_UNKNOWN
+#define OWN_PROBE_UNKNOWN  0
+#define OWN_PROBE_OK       1
+#define OWN_PROBE_BUSY     2
+#endif
 
 #define OWN_MAX            128
 #define OWN_NAME_MAX       32
@@ -60,9 +67,7 @@
 #define OWN_DEFAULT_STATE  OWN_RUN_DIR "/capagent-vaps.state"
 #define OWN_FALLBACK_STATE OWN_TMP_DIR "/capagent-vaps.state"
 
-#define OWN_PROBE_UNKNOWN  0
-#define OWN_PROBE_OK       1
-#define OWN_PROBE_BUSY     2
+/* OWN_PROBE_* live in capagent.c: policy.inc needs them before this file. */
 
 #define OWN_NONE      0
 #define OWN_NETIFD    1
@@ -148,6 +153,20 @@ static int own_forced_readonly(const struct cfg *c)
     if (c && c->wireless_mode == 1)
         return 1;
     return env && *env && !strcmp(env, "legacy");
+}
+
+/* W51: the session contract.  In addition to the forced legacy switch this
+ * is true whenever policy.inc could not prove the ownership source (vendor
+ * image without network.wireless) or netifd is unusable.  Under this
+ * predicate capagent never creates, adopts, steals, deletes or starts a
+ * netdev/hostapd: only its own bookkeeping is updated.  The one exception is
+ * an already-journaled hostapd whose name netifd claims; it is stopped to
+ * resolve the conflict. */
+static int own_readonly_session(const struct cfg *c)
+{
+    if (own_forced_readonly(c))
+        return 1;
+    return wl_readonly();
 }
 
 static struct own_entry *own_by_port(uint16_t port)
@@ -281,14 +300,17 @@ static int own_probe(int force)
             ub = "/usr/bin/ubus";
         g_own_ubus_missing = (ub == NULL);
         if (g_own_ubus_missing) {
-            printf("own: ubus not found; netifd ownership unavailable\n");
+            printf("own: ubus not found; netifd ownership unavailable, "
+                   "falling back to uci/config\n");
             fflush(stdout);
         }
     }
     if (g_own_ubus_missing) {
+        /* W51: no ubus is an UNKNOWN probe, not "netifd owns nothing".  The
+         * caller falls back to uci/the config file and stays read-only; only
+         * an explicit --wireless-owner own leaves the fail-safe. */
         memset(&g_own_nd, 0, sizeof(g_own_nd));
-        g_own_nd.ok = 1;
-        g_own_probe_state = OWN_PROBE_OK;
+        g_own_probe_state = OWN_PROBE_UNKNOWN;
         return g_own_probe_state;
     }
 
@@ -606,6 +628,8 @@ static void own_adopt_pidfiles(void)
         ifname[len - 4 - 4] = 0;
         if (!own_name_ok(ifname))
             continue;
+        if (wl_netdev_ignored(ifname))
+            continue;                  /* W51: MLD is never a BSS */
         pid = own_hostapd_pid(ifname);
         if (!pid)
             continue;
@@ -664,6 +688,8 @@ static void own_cleanup_stale(void)
         ifname[len - 5 - 4] = 0;
         if (!own_name_ok(ifname))
             continue;
+        if (wl_netdev_ignored(ifname))
+            continue;                  /* W51: never touch MLD files */
         struct own_entry *e = own_by_name(ifname);
         int alive = own_hostapd_pid(ifname);
         if (e && e->owner == OWN_CAPAGENT)
@@ -792,8 +818,8 @@ static void own_try_start(const struct cfg *c, struct own_entry *e)
 
     if (!e->active || !e->start_len || e->ifindex <= 0)
         return;
-    if (own_forced_readonly(c))
-        return;                    /* forced legacy: never spawn hostapd */
+    if (own_readonly_session(c))
+        return;                    /* W51 read-only: never spawn hostapd */
     if (e->port != 0xffff && mlme_owns_port(e->port))
         return;                    /* W36: in-CAP MLME, never hostapd */
     if (e->retry_at && now < e->retry_at)
@@ -956,7 +982,7 @@ static void own_reconcile(const struct cfg *c)
                    "waiting for the manager\n", e->ifname);
             continue;
         }
-        if (own_forced_readonly(c))
+        if (own_readonly_session(c))
             continue;
         ifindex = vap_netdev_create(e->port >> 8, e->ifname, e->bssid);
         if (ifindex > 0) {
@@ -1031,7 +1057,7 @@ static int own_claim(const struct cfg *c, int phy, int vapid,
     do {                                                                   \
         const char *nm_ = (nm);                                            \
         int dup = 0;                                                       \
-        if (nm_ && own_name_ok(nm_)) {                                     \
+        if (nm_ && own_name_ok(nm_) && !wl_netdev_ignored(nm_)) {          \
             for (int ci_ = 0; ci_ < nc; ci_++)                             \
                 if (!strcmp(cand[ci_].name, nm_)) { dup = 1; break; }      \
             if (!dup && nc < 5) {                                          \
@@ -1079,8 +1105,13 @@ static int own_claim(const struct cfg *c, int phy, int vapid,
                 continue;
             }
             pid = own_hostapd_pid(nm);
+            /* W51: in a read-only session only a netdev we provably created
+             * (journal created=1) or one our own hostapd pid file names may
+             * be adopted.  Everything else is netifd/vendor and is reported
+             * read-only, never stolen. */
             ours = pid > 0 ||
-                   (e && !strcmp(e->ifname, nm) && e->owner == OWN_CAPAGENT);
+                   (e && !strcmp(e->ifname, nm) && e->owner == OWN_CAPAGENT &&
+                    (!own_readonly_session(c) || e->created));
             if (!ours) {
                 if (!fb_idx) {
                     fb_idx = idx;
@@ -1109,8 +1140,8 @@ static int own_claim(const struct cfg *c, int phy, int vapid,
             return 1;
         }
 
-        if (own_forced_readonly(c))
-            continue;                  /* forced legacy: read-only */
+        if (own_readonly_session(c))
+            continue;                  /* W51: read-only, never create */
         idx = vap_netdev_create(phy, nm, mac);
         if (idx > 0) {
             created = 1;
@@ -1242,7 +1273,7 @@ static void own_note_start(const struct cfg *c, int port, const uint8_t *body,
 
     if (!managed || !c->vap_auto || e->owner != OWN_CAPAGENT)
         return;
-    if (own_forced_readonly(c))
+    if (own_readonly_session(c))
         return;
     if (own_nd_has(e->ifname, NULL, 0)) {
         printf("own: %s appeared in netifd status, not starting\n", e->ifname);
@@ -1287,16 +1318,27 @@ static void own_restore_vaps(const struct cfg *c)
             continue;
         if (e->owner != OWN_CAPAGENT)
             continue;
+        /* W51: a journal row that names an MLD companion device is stale or
+         * poisoned; drop the claim, never mirror/start/delete it. */
+        if (wl_netdev_ignored(e->ifname)) {
+            printf("own: %s is an MLD netdev, dropping our stale row\n",
+                   e->ifname);
+            own_unmirror(e);
+            own_free(e);
+            continue;
+        }
         if (state == OWN_PROBE_OK && own_nd_has(e->ifname, NULL, 0)) {
             own_detach(e, "netifd owns the name at restore");
             e->owner = OWN_NETIFD;
             continue;
         }
+        if (own_readonly_session(c))
+            continue;                  /* W51: read-only, no touch */
         ifindex = read_sysfs_int(e->ifname, "ifindex");
         if (ifindex <= 0) {
             if (!e->active || !e->start_len || state != OWN_PROBE_OK)
                 continue;              /* wait for a usable probe */
-            if (own_forced_readonly(c))
+            if (own_readonly_session(c))
                 continue;
             ifindex = vap_netdev_create(e->port >> 8, e->ifname, e->bssid);
             if (ifindex <= 0)
@@ -1346,8 +1388,8 @@ static void own_destroy(const struct cfg *c, int port)
         return;
     }
     printf("own: destroy port=0x%04x %s (manager request)\n", port, e->ifname);
-    if ((c && c->vap_teardown == 0) || own_forced_readonly(c)) {
-        /* W33 --no-vap-teardown / forced legacy: keep the netdev/hostapd,
+    if ((c && c->vap_teardown == 0) || own_readonly_session(c)) {
+        /* W33 --no-vap-teardown / W51 read-only: keep the netdev/hostapd,
          * drop our claim. */
         printf("own: %s kept (no-vap-teardown), forgetting the row\n",
                e->ifname);

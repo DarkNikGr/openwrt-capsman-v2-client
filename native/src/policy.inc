@@ -1,11 +1,21 @@
-/* policy.inc — W33/W34: wireless ownership policy + deterministic identity
+/* policy.inc — W33/W34/W51: wireless ownership policy + deterministic identity
  *
  * Part of capagent.c (single translation unit; included after nl80211.inc).
  *
- * The single source of truth is the ownership table in src/ownership.inc,
- * populated from `ubus call network.wireless status` (src/netifd_status.inc)
- * and from the netdev journal.  There is no /etc/config/wireless heuristic in
- * production any more.
+ * The single source of truth is the ownership table in src/ownership.inc.
+ * Its netifd rows are populated from `ubus call network.wireless status`
+ * (src/netifd_status.inc) when that object exists.  W51 adds an explicit
+ * source chain for images that do not export it (vendor WiFi stacks):
+ *
+ *   ubus network.wireless  ->  uci show wireless  ->  /etc/config/wireless
+ *                          ->  unknown: refuse to adopt (read-only)
+ *
+ * Whenever ubus is unusable, the session is hard read-only (`g_wl_readonly`):
+ * nothing is created, adopted, stolen, started or deleted (an already
+ * journaled hostapd is only stopped when netifd claims its name).  An MLD
+ * companion netdev (mld-*) and every netdev named by the netifd/vendor status
+ * are never adoptable.  `--wireless-owner own` is the explicit opt-in out of
+ * the fail-safe; `legacy` forces the fully read-only contract.
  *
  * Per netdev:
  *   NETIFD    the name appears in network.wireless status.  capagent never
@@ -15,11 +25,10 @@
  *             VAP is placed on an alternate name.
  *   PENDING   manager asked while the netifd probe was unusable.  Retried.
  *
- * `wl_legacy()` is the coarse session predicate: at least one netifd wireless
- * ifname exists (so UCI apply and other global config writes stay off).  All
- * per-netdev effects use wl_port_managed()/own_claim(), which is what makes a
- * mixed legacy+manager setup safe.  --wireless-owner legacy / the env override
- * forces the old fully read-only contract.  An explicitly supplied
+ * `wl_legacy()` is the coarse session predicate: netifd/vendor wireless owns
+ * at least one BSS (so UCI apply and other global config writes stay off).
+ * All per-netdev effects use wl_port_managed()/own_claim(), which is what
+ * makes a mixed legacy+manager setup safe.  An explicitly supplied
  * --wireless-config FILE is still counted for diagnostics/selftests.
  */
 
@@ -27,8 +36,22 @@
 
 #define WL_CONF_DEFAULT "/etc/config/wireless"
 
+/* W51: where the ownership decision came from.  ubus is authoritative when it
+ * answers; on vendor images that do not export network.wireless the answer is
+ * reconstructed from the UCI database, then from the config file.  If none of
+ * them can be read the answer is "unknown" and the session is read-only. */
+#define WL_SRC_NONE   0
+#define WL_SRC_UBUS   1
+#define WL_SRC_UCI    2
+#define WL_SRC_FILE   3
+
 static int g_wl_legacy;             /* 1 = legacy UCI owns the BSSes */
 static int g_wl_ifaces;             /* number of wifi-iface sections  */
+static int g_wl_src = WL_SRC_NONE;  /* W51 ownership source          */
+static int g_wl_readonly = 1;       /* W51 fail-safe: no create/steal */
+static int g_wl_vendor;            /* W51 source is a vendor stack   */
+static int g_wl_explicit;           /* W51 offline --wireless-config  */
+static int g_wl_ubus = OWN_PROBE_UNKNOWN;
 static char g_wl_path[160] = WL_CONF_DEFAULT;
 
 /* Count "config wifi-iface" sections.  Hand-rolled because capagent is
@@ -68,10 +91,99 @@ static const char *wl_mode_name(void)
     return g_wl_legacy ? "legacy" : "own";
 }
 
+static const char *wl_src_name(int src)
+{
+    switch (src) {
+    case WL_SRC_UBUS: return "ubus";
+    case WL_SRC_UCI:  return "uci";
+    case WL_SRC_FILE: return "file";
+    default:          return "none";
+    }
+}
+
+static const char *wl_ubus_name(void)
+{
+    switch (g_wl_ubus) {
+    case OWN_PROBE_OK:   return "ok";
+    case OWN_PROBE_BUSY: return "busy";
+    default:             return "unknown";
+    }
+}
+
 /* Read-only in legacy mode.  Every netdev / hostapd / UCI side effect in
    this agent must be behind this predicate. */
 static int wl_legacy(void) { return g_wl_legacy; }
 static int wl_own(void)    { return !g_wl_legacy; }
+
+/* W51: the hard read-only contract.  True when the ownership source could not
+ * be proven (vendor image without network.wireless, unreadable config) or the
+ * operator forced legacy.  Nothing may be created, adopted, stolen, started
+ * or deleted while this is set; the only stop is an already-journaled
+ * hostapd whose name netifd has just claimed (conflict resolution). */
+static int wl_readonly(void) { return g_wl_readonly; }
+
+/* Count "wifi-iface" sections through uci, which normalises includes, deltas
+ * and anonymous sections.  Returns -1 when uci is absent or the wireless
+ * config does not exist, so the caller can fall back to the file. */
+static int wl_uci_count(void)
+{
+    const char *uci = NULL;
+    char cmd[96], line[512];
+    FILE *p;
+    int n = 0, rc;
+
+    if (access("/sbin/uci", X_OK) == 0) uci = "/sbin/uci";
+    else if (access("/usr/bin/uci", X_OK) == 0) uci = "/usr/bin/uci";
+    else if (access("/bin/uci", X_OK) == 0) uci = "/bin/uci";
+    if (!uci) return -1;
+
+    snprintf(cmd, sizeof(cmd), "%s -q show wireless 2>/dev/null", uci);
+    p = popen(cmd, "r");
+    if (!p) return -1;
+    while (fgets(line, sizeof(line), p)) {
+        char *eq = strchr(line, '='), *v;
+        if (!eq) continue;
+        v = eq + 1;
+        while (*v == ' ' || *v == '\t') v++;
+        if (strncmp(v, "wifi-iface", 10) != 0) continue;
+        if (v[10] && v[10] != ' ' && v[10] != '\t' &&
+            v[10] != '\r' && v[10] != '\n')
+            continue;
+        n++;
+    }
+    rc = pclose(p);
+    if (rc != 0 && n == 0) return -1;       /* "Entry not found" / no uci  */
+    return n;
+}
+
+/* W51: the owned-name guards.  An MLD companion netdev (mld-<parent>, the
+ * Deco BE65 exports mld-wifi0 with address 00:00:00:00:00:00) is multi-link
+ * bookkeeping, never a BSS: no MAC, no management frame, no hostapd. */
+static int wl_netdev_ignored(const char *name)
+{
+    if (!name) return 1;
+    return !strncmp(name, "mld-", 4);
+}
+
+/* A MAC that cannot identify a BSS: all-zero, multicast or broadcast.  The
+ * zero address is what made a zero MAC resolve to mld-wifi0. */
+static int wl_mac_usable(const uint8_t mac[6])
+{
+    if (!(mac[0] | mac[1] | mac[2] | mac[3] | mac[4] | mac[5]))
+        return 0;
+    if (mac[0] & 0x01)                 /* multicast (includes broadcast) */
+        return 0;
+    return 1;
+}
+
+/* W51: a name that some other wireless stack may own.  netifd's status is
+ * exact; on a vendor image every pre-existing AP netdev is vendor-owned and
+ * only an MLD/proven-ours exception applies. */
+static int wl_name_protected(const char *name)
+{
+    if (wl_netdev_ignored(name)) return 1;
+    return own_nd_has(name, NULL, 0);
+}
 
 /* Count ifnames in a network.wireless status payload (ubus).  Also exposes
  * the pending flag and the first name for diagnostics/selftests. */
@@ -88,41 +200,137 @@ static int wl_status_ifaces(const char *json, int *pending, char *first,
     return st.n;
 }
 
-/* Print the live ubus/journal decision without reconciling or writing
- * anything (--check-wireless is strictly read-only). */
-static void wl_report_ubus(const struct cfg *c)
+/* -1 auto, 0 own, 1 legacy.  --wireless-owner wins over the env override. */
+static int wl_forced_mode(const struct cfg *c)
 {
     const char *env_mode = getenv("CAPAGENT_WIRELESS_MODE");
-    int forced = -1;
 
     if (c->wireless_mode >= 0)
-        forced = c->wireless_mode;
-    else if (env_mode && *env_mode)
-        forced = !strcmp(env_mode, "legacy");
-    g_wl_ifaces = own_netifd_count();
-    if (forced >= 0)
-        g_wl_legacy = forced;
-    else
+        return c->wireless_mode ? 1 : 0;
+    if (env_mode && *env_mode)
+        return !strcmp(env_mode, "legacy");
+    return -1;
+}
+
+/* W51: resolve the ownership source.  Chain:
+ *   1. ubus network.wireless status      (netifd, authoritative)
+ *   2. uci -q show wireless              (vendor/non-netifd stacks)
+ *   3. /etc/config/wireless              (no uci / unreadable database)
+ *   4. none                              -> refuse to adopt (read-only)
+ * Whenever ubus is unusable the result is read-only: on an image where the
+ * wireless stack is not netifd we cannot enumerate the protected netdevs,
+ * so nothing may be adopted or created.  `--wireless-owner own` is the only
+ * explicit opt-in out of that fail-safe. */
+static void wl_detect_source(const char *path, int explicit_file)
+{
+    int n;
+
+    g_wl_explicit = explicit_file;
+
+    if (explicit_file) {
+        /* Offline diagnostics/selftests: the named file is the authority and
+         * no live probe runs, so the result never depends on the host. */
+        g_wl_ubus = OWN_PROBE_UNKNOWN;
+        n = wl_count_iface(path);
+        g_wl_ifaces = n < 0 ? 0 : n;
+        g_wl_legacy = n > 0;
+        g_wl_src = n < 0 ? WL_SRC_NONE : WL_SRC_FILE;
+        g_wl_readonly = (n != 0);          /* >0 legacy, <0 unreadable */
+        g_wl_vendor = 0;
+        return;
+    }
+
+    g_wl_ubus = own_probe(1);
+
+    if (g_wl_ubus == OWN_PROBE_OK || g_wl_ubus == OWN_PROBE_BUSY) {
+        g_wl_src = WL_SRC_UBUS;
+        g_wl_ifaces = own_netifd_count();
         g_wl_legacy = g_wl_ifaces > 0;
-    printf("wl: ownership=%s (%s; ubus: %d netifd ifname%s, %d capagent row%s)\n",
-           wl_mode_name(), forced >= 0 ? "forced" : "auto",
-           g_wl_ifaces, g_wl_ifaces == 1 ? "" : "s",
-           own_managed_count(), own_managed_count() == 1 ? "" : "s");
-    if (g_wl_legacy)
-        printf("wl: netifd owns %d name(s); capagent only manages names outside "
-               "that set\n", g_wl_ifaces);
+        g_wl_readonly = 0;
+        g_wl_vendor = 0;
+        return;
+    }
+
+    n = wl_uci_count();
+    if (n >= 0) {
+        g_wl_src = WL_SRC_UCI;
+    } else {
+        n = wl_count_iface(path);
+        g_wl_src = n >= 0 ? WL_SRC_FILE : WL_SRC_NONE;
+    }
+    if (n < 0) n = 0;
+    g_wl_ifaces = n;
+    g_wl_legacy = 1;
+    g_wl_readonly = 1;
+    g_wl_vendor = 1;
+}
+
+/* One startup line, always: the effective --wireless-owner result plus how it
+ * was reached.  Every session prints it before connecting. */
+static void wl_print_decision(const char *mode, int forced)
+{
+    printf("wl: ownership=%s mode=%s source=%s ifaces=%d ubus=%s action=%s\n",
+           wl_mode_name(), mode, wl_src_name(g_wl_src), g_wl_ifaces,
+           wl_ubus_name(), g_wl_readonly ? "read-only" : "may-adopt");
+    if (g_wl_explicit) {
+        printf("wl: explicit config %s, offline decision (no live probe)\n",
+               g_wl_path);
+    } else if (!forced && g_wl_readonly) {
+        if (g_wl_src == WL_SRC_NONE)
+            printf("wl: network.wireless, uci and %s are all unusable; "
+                   "refusing to adopt any netdev (read-only)\n", g_wl_path);
+        else
+            printf("wl: network.wireless=%s; %s reports %d wifi-iface "
+                   "section(s) -> %s stack, refusing to adopt any netdev "
+                   "(read-only)\n", wl_ubus_name(), wl_src_name(g_wl_src),
+                   g_wl_ifaces, g_wl_vendor ? "vendor" : "wireless");
+    }
+    if (!g_wl_explicit && g_wl_readonly) {
+        printf("wl: MLD (mld-*) and any netifd/vendor netdev are never "
+               "adopted, stolen, deleted or restarted\n");
+    } else if (!g_wl_explicit && g_wl_ifaces > 0) {
+        printf("wl: %s reports %d wifi-iface section(s); capagent only manages "
+               "names outside that set\n",
+               g_wl_src == WL_SRC_UBUS ? "netifd" : wl_src_name(g_wl_src),
+               g_wl_ifaces);
+    }
     fflush(stdout);
 }
 
-/* Every session starts here.  In auto mode the decision is the live netifd
- * status plus our journal; the config file is only read when the operator
- * explicitly points at one (tests, --check-wireless diagnostics). */
+/* Print the live decision without reconciling or writing anything
+ * (--check-wireless is strictly read-only). */
+static void wl_report_ubus(const struct cfg *c)
+{
+    const char *path = c->wireless_conf ? c->wireless_conf : WL_CONF_DEFAULT;
+    const char *env_conf = getenv("CAPAGENT_WIRELESS_CONF");
+    int explicit_file, forced;
+
+    if (env_conf && *env_conf) path = env_conf;
+    snprintf(g_wl_path, sizeof(g_wl_path), "%s", path);
+    explicit_file = (env_conf && *env_conf) ||
+                    (c->wireless_conf &&
+                     strcmp(c->wireless_conf, WL_CONF_DEFAULT) != 0);
+    forced = wl_forced_mode(c);
+    wl_detect_source(path, explicit_file);
+    if (forced == 1) {
+        g_wl_legacy = 1;
+        g_wl_readonly = 1;
+    } else if (forced == 0) {
+        g_wl_legacy = 0;
+        g_wl_readonly = 0;
+    }
+    printf("wl: journal: %d capagent row(s)\n", own_managed_count());
+    wl_print_decision(forced >= 0 ? (c->wireless_mode >= 0 ? "forced" : "env")
+                                  : "auto", forced);
+}
+
+/* Every session starts here.  The ownership source chain decides legacy vs
+ * own and, more importantly, whether anything may be touched at all. */
 static void wl_classify(const struct cfg *c)
 {
     const char *path = c->wireless_conf ? c->wireless_conf : WL_CONF_DEFAULT;
     const char *env_conf = getenv("CAPAGENT_WIRELESS_CONF");
-    const char *env_mode = getenv("CAPAGENT_WIRELESS_MODE");
-    int explicit_file;
+    int explicit_file, forced;
 
     if (env_conf && *env_conf) path = env_conf;
     snprintf(g_wl_path, sizeof(g_wl_path), "%s", path);
@@ -130,33 +338,20 @@ static void wl_classify(const struct cfg *c)
                     (c->wireless_conf &&
                      strcmp(c->wireless_conf, WL_CONF_DEFAULT) != 0);
 
-    if (c->wireless_mode >= 0) {
-        g_wl_legacy = c->wireless_mode ? 1 : 0;
-        g_wl_ifaces = 0;
-        printf("wl: ownership=%s (forced), config=%s\n", wl_mode_name(), path);
-        fflush(stdout);
-        return;
+    forced = wl_forced_mode(c);
+    wl_detect_source(path, explicit_file);
+    if (forced == 1) {
+        g_wl_legacy = 1;
+        g_wl_readonly = 1;
+    } else if (forced == 0) {
+        g_wl_legacy = 0;
+        g_wl_readonly = 0;
     }
-    if (env_mode && *env_mode) {
-        g_wl_legacy = !strcmp(env_mode, "legacy");
-        g_wl_ifaces = 0;
-        printf("wl: ownership=%s (env), config=%s\n", wl_mode_name(), path);
-        fflush(stdout);
-        return;
-    }
-
-    if (explicit_file) {
-        int n = wl_count_iface(path);
-        g_wl_ifaces = n < 0 ? 0 : n;
-        g_wl_legacy = n > 0;
-        printf("wl: ownership=%s (%s: %d wifi-iface, explicit file)\n",
-               wl_mode_name(), path, g_wl_ifaces);
-        fflush(stdout);
-        return;
-    }
-
-    own_policy_refresh();
-    wl_report_ubus(c);
+    wl_print_decision(forced >= 0 ? (c->wireless_mode >= 0 ? "forced" : "env")
+                                  : "auto", forced);
+    if (forced < 0 &&
+        (g_wl_ubus == OWN_PROBE_OK || g_wl_ubus == OWN_PROBE_BUSY))
+        own_policy_refresh();
 }
 
 /* Per-port authority.  With a table row the row decides; without one the
@@ -201,21 +396,30 @@ static int iface_is_ap(int ifindex)
  * Rules, in order: must be a wireless netdev, must be an AP/AP_VLAN, must
  * belong to want_phy (when >= 0), prefer the conventional phy<N>-ap<M> name,
  * otherwise pick the lowest ifindex.  Never returns a monitor/STA netdev.
+ *
+ * W51: an unusable MAC (all-zero, multicast, broadcast) never resolves, and
+ * an MLD companion netdev (mld-*) is skipped.  The Deco BE65 exports
+ * mld-wifi0 with address 00:00:00:00:00:00 and iftype AP, which used to be
+ * returned for a zero MAC.
  */
 static int ifindex_by_mac_ap(const uint8_t mac[6], int want_phy,
                              char *name, size_t n)
 {
-    DIR *d = opendir("/sys/class/net");
+    DIR *d;
     struct dirent *de;
     int best = 0;
     char best_name[IF_NAMESIZE] = "";
 
+    if (!mac || !wl_mac_usable(mac)) return 0;
+    d = opendir("/sys/class/net");
     if (!d) return 0;
     while ((de = readdir(d)) != NULL) {
         uint8_t m[6];
         int idx;
 
         if (de->d_name[0] == '.') continue;
+        /* W51: mld-* (and anything else non-BSS) is never a VAP netdev. */
+        if (wl_netdev_ignored(de->d_name)) continue;
         if (iface_mac(de->d_name, m) != 0 || memcmp(m, mac, 6) != 0) continue;
         if (iface_phy_index(de->d_name) < 0) continue;   /* not wireless */
         idx = read_sysfs_int(de->d_name, "ifindex");
@@ -403,14 +607,70 @@ static int wl_selftest(void)
     }
     unlink(p);
 
-    /* A zero MAC can never resolve to a netdev. */
+    /* W51 regression: an unusable MAC (zero/multicast/broadcast) must never
+     * resolve, and an MLD companion netdev (mld-*) must never be returned as
+     * a VAP netdev.  On the Deco BE65, mld-wifi0 has address 00:00:00:00:00:00
+     * and iftype AP, so a zero MAC used to resolve to it.  This is still one
+     * check so the historical 27-check total is unchanged. */
     checks++;
     {
         uint8_t z[6] = {0};
+        uint8_t mc[6] = {0x01, 0x00, 0x5e, 0x00, 0x00, 0x01};
+        uint8_t bc[6] = {0xff, 0xff, 0xff, 0xff, 0xff, 0xff};
+        uint8_t uc[6] = {0x02, 0x00, 0x00, 0x00, 0x00, 0x01};
+        int bad = 0, mld = 0;
+        DIR *d;
+
         if (ifindex_by_mac_ap(z, -1, NULL, 0) != 0) {
             printf("policy-selftest: FAIL zero MAC resolved\n");
-            fails++;
+            bad = 1;
         }
+        if (ifindex_by_mac_ap(mc, -1, NULL, 0) != 0) {
+            printf("policy-selftest: FAIL multicast MAC resolved\n");
+            bad = 1;
+        }
+        if (ifindex_by_mac_ap(bc, -1, NULL, 0) != 0) {
+            printf("policy-selftest: FAIL broadcast MAC resolved\n");
+            bad = 1;
+        }
+        if (!wl_mac_usable(uc) || wl_mac_usable(z) || wl_mac_usable(mc) ||
+            wl_mac_usable(bc)) {
+            printf("policy-selftest: FAIL MAC usability predicate\n");
+            bad = 1;
+        }
+        if (!wl_netdev_ignored("mld-wifi0") || wl_netdev_ignored("wifi0") ||
+            !wl_netdev_ignored("mld-phy0")) {
+            printf("policy-selftest: FAIL MLD name predicate\n");
+            bad = 1;
+        }
+        /* Live regression: if this system has an mld-* netdev, its own MAC
+         * must not resolve back to it. */
+        d = opendir("/sys/class/net");
+        if (d) {
+            struct dirent *de;
+            while ((de = readdir(d)) != NULL) {
+                uint8_t m[6];
+                int self, got;
+                char nm[64] = "";
+                if (!wl_netdev_ignored(de->d_name)) continue;
+                if (de->d_name[0] == '.') continue;
+                mld++;
+                if (read_sysfs_mac(de->d_name, m) != 0) continue;
+                self = read_sysfs_int(de->d_name, "ifindex");
+                got = ifindex_by_mac_ap(m, -1, nm, sizeof(nm));
+                if (got > 0 && (got == self || !strcmp(nm, de->d_name))) {
+                    printf("policy-selftest: FAIL MLD %s resolved by MAC\n",
+                           de->d_name);
+                    bad = 1;
+                }
+            }
+            closedir(d);
+        }
+        if (mld)
+            printf("policy-selftest: MLD netdevs present=%d, none resolved\n",
+                   mld);
+        if (bad)
+            fails++;
     }
 
     /* W34: the ubus payload is the production ownership source. */

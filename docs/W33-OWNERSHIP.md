@@ -14,6 +14,11 @@ two-mode contract.
 > `wl_port_managed()`.  `--wireless-owner legacy` still forces the fully
 > read-only contract below.  See `REPORT.md` (W34) and
 > `native/src/ownership.inc`.
+>
+> **W51 update:** when `network.wireless` does not exist (vendor images), the
+> source falls back to `uci show wireless` then `/etc/config/wireless`; any
+> fallback result is read-only.  MLD (`mld-*`) and netifd/vendor netdevs are
+> never adopted.  See `docs/W51-OWNERSHIP-FALLBACK.md`.
 
 ## 1. The invariant (W33 history)
 

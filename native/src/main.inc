@@ -1,6 +1,89 @@
 /* main.inc — run loop, options, main
  * Part of capagent.c (single translation unit; included in order). */
 
+/* W45: one new manager session == one fresh Peer.  The manager forgets every
+ * station when the TLS session dies (manager reboot, CAP restart, WAN loss,
+ * capagent crash), but the kernel/hostapd association survives and keeps its
+ * old PTK.  The STA is then invisible to the manager (no registration row, no
+ * accounting) until it roams.  On the next session we delete the station and
+ * its keys, so the STA retries Auth/Assoc and the manager builds a new Peer.
+ *
+ * Ownership contract (W33/W34): only a BSS the ownership table says is
+ * capagent-owned is touched.  netifd and foreign netdevs are never deauthed,
+ * started, stopped or deleted from this path. */
+static int g_session_ok;              /* set by a successful 0xc029 */
+static int g_session_deauth_pending;  /* new session, stations not reset yet */
+
+static void session_deauth(const struct cfg *c)
+{
+    int n = 0, skipped = 0;
+
+    /* W51: never deauth on a vendor/legacy netdev.  If the ownership source
+     * is unproven the session is read-only and even our journal rows are not
+     * touched. */
+    if (own_readonly_session(c)) {
+        printf("recovery: read-only ownership, not resetting stations\n");
+        fflush(stdout);
+        return;
+    }
+    if (nl_cmd_open() != 0) {
+        fprintf(stderr, "recovery: nl80211 unavailable, cannot deauth\n");
+        return;
+    }
+    for (int r = 0; r < MAX_RADIOS; r++)
+        for (int w = 0; w < 16; w++) {
+            struct vap *v = &g_vap[r][w];
+            int port = (r << 8) | w;
+            if (!v->used || v->ifindex <= 0) continue;
+            if (!own_managed_strict(port)) {
+                skipped++;
+                continue;
+            }
+            /* Refresh the dst-MAC -> egress-ifindex map for this BSS. */
+            nl_sta_dump(v->ifindex);
+            for (int a = 0; a < v->napvlan; a++)
+                nl_sta_dump(v->apvlan[a]);
+            for (int i = 0; i < 128; i++) {
+                int on_vap, on_vlan = 0;
+                if (!g_sta[i].used) continue;
+                on_vap = (g_sta[i].ifindex == v->ifindex);
+                for (int a = 0; a < v->napvlan && !on_vap; a++)
+                    if (g_sta[i].ifindex == v->apvlan[a]) on_vlan = 1;
+                if (!on_vap && !on_vlan) continue;
+                if (c->ext_auth_dir && v->ifname[0]) {
+                    char cmd[96];
+                    snprintf(cmd, sizeof(cmd),
+                             "DEAUTHENTICATE %02x:%02x:%02x:%02x:%02x:%02x",
+                             g_sta[i].mac[0], g_sta[i].mac[1],
+                             g_sta[i].mac[2], g_sta[i].mac[3],
+                             g_sta[i].mac[4], g_sta[i].mac[5]);
+                    hostapd_ctrl(c->ext_auth_dir, v->ifname, cmd);
+                }
+                int rr = nl_del_station(g_sta[i].ifindex, g_sta[i].mac);
+                printf("recovery: deauth %02x:%02x:%02x:%02x:%02x:%02x "
+                       "ifindex=%d ret=%d (%s)\n", g_sta[i].mac[0],
+                       g_sta[i].mac[1], g_sta[i].mac[2], g_sta[i].mac[3],
+                       g_sta[i].mac[4], g_sta[i].mac[5], g_sta[i].ifindex,
+                       rr, rr ? strerror(-rr) : "ok");
+                g_sta[i].used = 0;
+                n++;
+            }
+        }
+    printf("recovery: reset %d station(s) after reconnect (%d BSS(es) "
+           "not capagent-owned, left alone)\n", n, skipped);
+    fflush(stdout);
+}
+
+/* Consume the per-session reset exactly once.  Called after 0xc029 and, as a
+ * fallback, after the first 0x6016 in case a manager provisions without a
+ * join response. */
+static void session_recover(const struct cfg *c)
+{
+    if (!g_session_deauth_pending) return;
+    g_session_deauth_pending = 0;
+    session_deauth(c);
+}
+
 /* W14: every connection starts from a clean session.  A manager reboot or a
  * CAP reconnect must not keep the previous vapid/ifindex/key map, otherwise
  * the manager's fresh 0x500b/0x6016 sequence lands on stale state.  Kernel
@@ -10,19 +93,41 @@
  * on every reconnect made the next 0x500b re-resolve VAP0 by MAC — and the
  * only lookup available was "first /sys/class/net entry with this MAC",
  * which is the monitor VIF (same radio MAC) as often as it is the AP.  Keep
- * the identity while the netdev exists and drop only what is really gone. */
+ * the identity while the netdev exists and drop only what is really gone.
+ *
+ * W45: everything that belongs to one manager session is cleared here:
+ * stations, channel map, datachan keys/cookies, VLAN map, dedup cache and
+ * the per-VAP key/replay material.  The netdev identity (used/ifname/ifindex/
+ * bssid/we_created) and the MAC->vapid allocation survive, so the manager's
+ * fresh 0x500b still lands on the same BSS. */
 static void cap_reset_session(void)
 {
     if (g_extmux) {
         extmux_free(g_extmux);
         g_extmux = NULL;
     }
+    dp_close_all();              /* also fixes any stale AF_PACKET fd */
+    memset(g_sta, 0, sizeof(g_sta));
+    memset(g_vchan, 0, sizeof(g_vchan));
+    memset(g_dckey, 0, sizeof(g_dckey));
+    memset(g_vw, 0, sizeof(g_vw));
+    memset(g_dd, 0, sizeof(g_dd));
     for (int r = 0; r < MAX_RADIOS; r++)
         for (int w = 0; w < 16; w++) {
             struct vap *vp = &g_vap[r][w];
             if (vp->extfd >= 0) close(vp->extfd);
             vp->extfd = -1;
             vp->l2fd = -1;
+            vp->vlan = 0;
+            vp->mode = 0;
+            vp->klen = 0;
+            vp->keyidx = 0;
+            vp->tx_seq = 0;
+            vp->rx_max = 0;
+            vp->rx_bitmap = 0;
+            vp->rx_started = 0;
+            vp->napvlan = 0;
+            memset(vp->apvlan, 0, sizeof(vp->apvlan));
             if (!vp->used) continue;
             if (vp->ifname[0] && if_nametoindex(vp->ifname) > 0) {
                 vp->ifindex = (int)if_nametoindex(vp->ifname);
@@ -37,6 +142,55 @@ static void cap_reset_session(void)
     g_sta_ident = 0;
     g_msrc = -1;                 /* re-arm the management relay source */
     vapid_gc();                  /* keep MAC->vapid while the netdev lives */
+    g_session_deauth_pending = 1;
+}
+
+/* W45: procd only sees a process that exits.  A wedged TLS/netlink/hostapd
+ * path used to leave capagent alive forever, so the 3600/5/0 respawn never
+ * fired.  This watchdog is progress-based: run_once() re-arms SIGALRM on
+ * every loop iteration; if nothing happens for watchdog_secs the handler
+ * exits with a distinct status and procd restarts the agent.  The optional
+ * heartbeat file makes the same stall visible to an external supervisor. */
+static void hang_watchdog_alarm(int sig)
+{
+    static const char msg[] =
+        "capagent: watchdog: no progress, exiting for procd respawn\n";
+    (void)sig;
+    if (write(2, msg, sizeof(msg) - 1) < 0) { /* best effort */ }
+    _exit(70);
+}
+
+static void hang_watchdog_arm(int secs)
+{
+    static int installed;
+
+    if (secs <= 0) {
+        alarm(0);
+        return;
+    }
+    if (!installed) {
+        struct sigaction sa;
+        memset(&sa, 0, sizeof(sa));
+        sa.sa_handler = hang_watchdog_alarm;
+        sigemptyset(&sa.sa_mask);
+        sigaction(SIGALRM, &sa, NULL);
+        installed = 1;
+    }
+    alarm((unsigned)secs);
+}
+
+static void heartbeat_write(const struct cfg *c, const char *state)
+{
+    char b[160];
+    int fd, n;
+
+    if (!c->heartbeat || !*c->heartbeat) return;
+    n = snprintf(b, sizeof(b), "%ld %s session_ok=%d\n",
+                 (long)time(NULL), state, g_session_ok);
+    fd = open(c->heartbeat, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
+    if (fd < 0) return;
+    if (write(fd, b, (size_t)n) < 0) { /* best effort */ }
+    close(fd);
 }
 
 static int run_once(struct cfg *c)
@@ -70,6 +224,9 @@ static int run_once(struct cfg *c)
     g_bcast_flood = c->bcast_flood;
     g_msrc_cfg = c->mgmt_source;
     mlme_init(c);
+    g_session_ok = 0;
+    hang_watchdog_arm(c->watchdog_secs);
+    heartbeat_write(c, "connecting");
 
     /* W14: discover on every attempt.  At boot S95 runs ~130 s before the
      * WAN lease, so a single discovery can only cache an empty address.
@@ -85,7 +242,7 @@ static int run_once(struct cfg *c)
     printf("capagent: manager=%s:%s radios=%d discovery=%s verify=%s\n",
            c->manager, c->port, c->nradios,
            c->discovery_if ? c->discovery_if : "-",
-           (c->dont_verify || !c->ca_cert) ? "no" : "ca");
+           tls_verify_label(c));
     fflush(stdout);
 
     if (connect_tls(&fd, &ssl, &conf, &ent, &ctr, &crt, &pk, c) != 0)
@@ -127,10 +284,12 @@ static int run_once(struct cfg *c)
     }
 
     time_t last_echo = time(NULL);
+    time_t last_rx = time(NULL);
     time_t last_stats = 0;
     time_t last_dc_ka = 0;
     time_t last_refresh = 0;
     time_t last_own = 0;
+    time_t last_hb = 0;
 #ifdef CAPAGENT_LAB
     if (c->lab_iface && lab_ap_setup(c) != 0) {
         fprintf(stderr, "lab: AP setup failed\n");
@@ -144,6 +303,24 @@ static int run_once(struct cfg *c)
         int mon_i[MON_MAX];
         int have_tls = mbedtls_ssl_get_bytes_avail(&ssl) > 0;
         for (int i = 0; i < MON_MAX; i++) mon_i[i] = -1;
+
+        /* Progress tick: the watchdog only fires when the loop itself stops
+         * making progress, not while a long poll is waiting for traffic. */
+        hang_watchdog_arm(c->watchdog_secs);
+        if (time(NULL) != last_hb) {
+            last_hb = time(NULL);
+            heartbeat_write(c, "active");
+        }
+
+        /* W45 FIX-3: the manager polls every interface roughly once a second.
+         * 20 s of complete silence means the session is gone even if TCP has
+         * not noticed (WAN blackhole, dead manager, wedged relay). */
+        if (c->silence_secs > 0 &&
+            time(NULL) - last_rx > c->silence_secs) {
+            printf("manager silent >%ds, reconnecting\n", c->silence_secs);
+            fflush(stdout);
+            break;
+        }
 
         pfd[nfd].fd = fd.fd;
         pfd[nfd].events = POLLIN;
@@ -258,6 +435,7 @@ static int run_once(struct cfg *c)
         int r = read_exact(&ssl, fd.fd, hdr, 14);
         if (r == 0) continue;
         if (r < 0) break;
+        last_rx = time(NULL);
 
         uint16_t type = rd16(hdr);
         uint16_t port = rd16(hdr + 2);
@@ -267,6 +445,7 @@ static int run_once(struct cfg *c)
             g_sta_ident = ((uint64_t)rd32(hdr + 4) << 32) | rd32(hdr + 8);
         if (len > BODY_MAX) break;
         if (len && read_exact(&ssl, fd.fd, body, len) != 1) break;
+        last_rx = time(NULL);
 
         if (type == TYPE_PROVISION) {
             int phy = port >> 8;
@@ -297,6 +476,11 @@ static int run_once(struct cfg *c)
         } else if (type == TYPE_JOIN_RESP) {
             dump_raw("joinresp", type, port, body, len);
             handle_c029(body, len);
+            g_session_ok = 1;
+            /* W45: a new manager session has no Peer for an old station.
+             * own_restore_vaps() already re-adopted surviving BSSes, so the
+             * deauth runs here, before the manager re-provisions. */
+            session_recover(c);
         } else if (type == TYPE_POLL) {   /* periodic status poll */
             static int n27;
             /* The genuine CAP answers with MAC/vapid/ifindex/ifname/current
@@ -386,6 +570,8 @@ static int run_once(struct cfg *c)
                     mgmt_vap_add((int)rd32(iv));
             }
             vap_provision(port, body, len, c);
+            /* Fallback when a manager provisions without a visible 0xc029. */
+            session_recover(c);
             send_hdr_msg(&ssl, TYPE_START_RESP, hdr + 2, NULL, 0);
         } else if (type == TYPE_ECHO) {
             const uint8_t *k = NULL, *iv = NULL;
@@ -424,6 +610,8 @@ static int run_once(struct cfg *c)
     }
 
 out:
+    hang_watchdog_arm(0);
+    heartbeat_write(c, "reconnect");
     cap_extmux_stop(c);
     dp_close_all();
 #ifdef CAPAGENT_LAB
@@ -474,15 +662,26 @@ static void usage(const char *p)
         "  --ext-auth-dir DIR           hostapd external-RSN dgram dir (P5)\n"
         "  --country CC                 hostapd country_code (e.g. GR)\n"
         "  --ext-ctrl-dir DIR           hostapd ctrl_interface dir (default: dir above)\n"
+        "  --no-extmux                  use the ext-auth socket + direct nl80211\n"
+        "                               EAPOL TX (compat with older hostapd builds)\n"
         "  --state-file FILE            key-free extmux restart journal\n"
         "  --vap-state FILE             netdev ownership journal\n"
         "                               (default: /var/run/capagent-vaps.state)\n"
         "  --fourway-timeout MS         CAP-side 4-way deadline (default 10000)\n"
         "  --m1-retry MS                M1 retransmit interval (default 3000)\n"
+        "  --silence-timeout SEC        reconnect after this much manager silence\n"
+        "                               (default 20, 0 keeps the old behaviour)\n"
+        "  --watchdog-secs SEC          exit for procd if the loop stalls\n"
+        "                               (default 60, 0 disables)\n"
+        "  --heartbeat FILE             write a progress timestamp for supervisors\n"
         "  --wireless-config FILE       UCI wireless file to classify (default\n"
         "                               /etc/config/wireless)\n"
         "  --wireless-owner auto|own|legacy\n"
-        "                               override the ownership policy (tests only)\n"
+        "                               ownership source. auto = ubus\n"
+        "                               network.wireless, then uci show wireless,\n"
+        "                               then /etc/config/wireless; if none is\n"
+        "                               usable the session is read-only. own is\n"
+        "                               an explicit opt-in (tests/vendor images)\n"
         "  --check-wireless             print the ownership decision and exit\n"
         "  --no-vap-teardown            keep our netdev/hostapd on 0x600c\n"
         "  --selftest-policy            run the ownership-policy checks and exit\n"
@@ -514,6 +713,8 @@ int main(int argc, char **argv)
     c.dc_id = DC_ID_DEFAULT;
     c.fourway_ms = 10000;
     c.m1_retry_ms = 3000;
+    c.watchdog_secs = 60;
+    c.silence_secs = MANAGER_SILENCE_SEC;
     c.mlme_port = 0x0000;       /* 2.4 GHz master by default */
     c.wireless_conf = "/etc/config/wireless";
     c.wireless_mode = -1;
@@ -531,7 +732,8 @@ int main(int argc, char **argv)
            OPT_EXTCTRL, OPT_STATE, OPT_FOURWAY, OPT_M1RETRY,
            OPT_MLME, OPT_MLME_PORT,
            OPT_WLCONF, OPT_WLOWNER, OPT_NOTEARDOWN, OPT_POLICYTEST,
-           OPT_CHECKWL, OPT_VAPSTATE };
+           OPT_CHECKWL, OPT_VAPSTATE, OPT_SILENCE, OPT_WATCHDOG, OPT_HEARTBEAT,
+           OPT_NOEXTMUX };
     static struct option opts[] = {
         {"manager", required_argument, 0, 'm'},
         {"port", required_argument, 0, 'p'},
@@ -570,10 +772,14 @@ int main(int argc, char **argv)
         {"ext-auth-dir", required_argument, 0, OPT_EXTAUTH},
         {"country", required_argument, 0, OPT_COUNTRY},
         {"ext-ctrl-dir", required_argument, 0, OPT_EXTCTRL},
+        {"no-extmux", no_argument, 0, OPT_NOEXTMUX},
         {"state-file", required_argument, 0, OPT_STATE},
         {"vap-state", required_argument, 0, OPT_VAPSTATE},
         {"fourway-timeout", required_argument, 0, OPT_FOURWAY},
         {"m1-retry", required_argument, 0, OPT_M1RETRY},
+        {"silence-timeout", required_argument, 0, OPT_SILENCE},
+        {"watchdog-secs", required_argument, 0, OPT_WATCHDOG},
+        {"heartbeat", required_argument, 0, OPT_HEARTBEAT},
         {"wireless-config", required_argument, 0, OPT_WLCONF},
         {"wireless-owner", required_argument, 0, OPT_WLOWNER},
         {"no-vap-teardown", no_argument, 0, OPT_NOTEARDOWN},
@@ -642,10 +848,14 @@ int main(int argc, char **argv)
             break;
         case OPT_EXTAUTH: c.ext_auth_dir = optarg; break;
         case OPT_EXTCTRL: c.ext_ctrl_dir = optarg; break;
+        case OPT_NOEXTMUX: c.no_extmux = 1; break;
         case OPT_STATE: c.state_file = optarg; break;
         case OPT_VAPSTATE: c.vap_state = optarg; break;
         case OPT_FOURWAY: c.fourway_ms = atoi(optarg); break;
         case OPT_M1RETRY: c.m1_retry_ms = atoi(optarg); break;
+        case OPT_SILENCE: c.silence_secs = atoi(optarg); break;
+        case OPT_WATCHDOG: c.watchdog_secs = atoi(optarg); break;
+        case OPT_HEARTBEAT: c.heartbeat = optarg; break;
         case OPT_MLME: c.mlme = 1; break;
         case OPT_MLME_PORT:
             c.mlme_port = (int)strtol(optarg, NULL, 0);
@@ -711,14 +921,24 @@ int main(int argc, char **argv)
      * drop stale /tmp/vap-*.conf files that no live process owns. */
     own_init(&c);
     /* W14: discovery and session setup are per attempt; run_once() owns both
-     * so an early failure (no WAN lease yet) is never permanent. */
+     * so an early failure (no WAN lease yet) is never permanent.
+     * W45: exponential backoff with jitter (1→60 s) instead of a fixed 5 s
+     * retry storm after a manager reboot, and an immediate reset after a
+     * successful join.  A missing manager re-runs discovery on every attempt;
+     * the empty answer is never cached. */
     c.manager_spec = c.manager;
+    int backoff = 1;
+    srand((unsigned)time(NULL) ^ (unsigned)getpid());
     for (;;) {
+        c.manager = c.manager_spec;
         run_once(&c);
         /* W34: keep repairing our netdevs even while the manager is away. */
         own_service(&c);
-        fprintf(stderr, "reconnect in 5s\n");
-        sleep(5);
+        if (g_session_ok) backoff = 1;
+        int d = backoff + rand() % 1000 / 1000;
+        fprintf(stderr, "reconnect in %ds (session_ok=%d)\n", d, g_session_ok);
+        sleep(d);
+        if (backoff < 60) backoff *= 2;
     }
     return 0;
 }

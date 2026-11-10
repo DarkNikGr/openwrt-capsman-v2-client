@@ -93,13 +93,29 @@ static struct fake_net *fake_add(const char *name)
     return NULL;
 }
 
-/* W33 deterministic MAC lookup: AP/AP_VLAN only, deterministic name. */
+/* W51 policy seams: the host model is normally "own", and an MLD companion
+ * device is never a BSS.  g_test_wl_readonly models the vendor-image
+ * fallback result (network.wireless missing). */
+static int g_test_wl_readonly;
+static int wl_readonly(void) { return g_test_wl_readonly; }
+static int wl_netdev_ignored(const char *name)
+{
+    return !name || !strncmp(name, "mld-", 4);
+}
+
+/* W33 deterministic MAC lookup: AP/AP_VLAN only, deterministic name.
+ * W51: unusable MACs (zero/multicast/broadcast) and MLD names never match. */
 static int ifindex_by_mac_ap(const uint8_t mac[6], int want_phy,
                              char *name, size_t n)
 {
     (void)want_phy;
+    if (!mac || !(mac[0] | mac[1] | mac[2] | mac[3] | mac[4] | mac[5]))
+        return 0;
+    if (mac[0] & 0x01)
+        return 0;
     for (int i = 0; i < FAKE_MAX; i++)
-        if (g_net[i].used && !memcmp(g_net[i].mac, mac, 6)) {
+        if (g_net[i].used && !wl_netdev_ignored(g_net[i].name) &&
+            !memcmp(g_net[i].mac, mac, 6)) {
             if (name && n) snprintf(name, n, "%s", g_net[i].name);
             return g_net[i].ifindex;
         }
@@ -228,6 +244,7 @@ static void reset_all(void)
     T.vap_state = OWN_RUN_DIR "/test.state";
     T.wireless_mode = -1;
     T.vap_teardown = 1;
+    g_test_wl_readonly = 0;
 }
 
 static void set_nd(const char *json)
@@ -486,6 +503,65 @@ static void test_reload_recreate(void)
     check(g_starts == before_s + 1, "hostapd restarted on crash");
 }
 
+static void test_w51_readonly_and_mld(void)
+{
+    char ifname[32];
+    uint8_t mac[6] = { 0x02, 0, 0, 0, 0, 0 };
+    uint8_t zero[6] = { 0 };
+    int idx = -1, managed = 1, r;
+    static const uint8_t body[] = { 0x00, 0x03, 0x00, 0x04, 't', 'e', 's', 't' };
+    struct vap vp;
+
+    memset(&vp, 0, sizeof(vp));
+    memcpy(vp.bssid, mac, 6);
+
+    printf("-- W51 read-only ownership source + MLD regression --\n");
+    set_nd("{}");
+    reset_all();
+    fake_add("wifi0");                  /* vendor AP, not ours, no pid file */
+    g_test_wl_readonly = 1;             /* network.wireless missing -> legacy */
+    r = own_claim(&T, 0, 0, "wifi0", mac, ifname, sizeof(ifname),
+                  &idx, &managed);
+    check(r == 1 && managed == 0 && idx > 0 && !strcmp(ifname, "wifi0"),
+          "read-only: vendor netdev reported, never adopted");
+    check(g_created == 0 && g_starts == 0,
+          "read-only: nothing created or started");
+    own_note_start(&T, 0, body, sizeof(body), &vp, idx, managed);
+    check(g_starts == 0, "read-only: 0x6016 cannot start a hostapd");
+    own_destroy(&T, 0);
+    check(fake_find("wifi0") && g_deleted == 0 && g_stops == 0,
+          "read-only: destroy cannot delete/stop a vendor netdev");
+
+    /* MLD companion device with the vendor's zero address: never a VAP. */
+    reset_all();
+    g_test_wl_readonly = 1;             /* vendor image: read-only source */
+    fake_add("mld-wifi0");
+    r = own_claim(&T, 0, 0, "mld-wifi0", zero, ifname, sizeof(ifname),
+                  &idx, &managed);
+    check(r == 0 && idx == 0 && strcmp(ifname, "mld-wifi0") != 0,
+          "MLD is never returned as the VAP netdev");
+    check(own_by_name("mld-wifi0") == NULL, "MLD never enters the journal");
+    check(g_created == 0 && g_starts == 0, "MLD never created/started");
+
+    /* Poisoned journal row naming an MLD: restore must drop it untouched. */
+    reset_all();
+    g_test_wl_readonly = 1;
+    fake_add("mld-wifi0");
+    {
+        struct own_entry *e = own_alloc(0xffff, "mld-wifi0");
+        if (e) {
+            e->owner = OWN_CAPAGENT;
+            e->created = 1;
+            e->ifindex = fake_find("mld-wifi0")->ifindex;
+        }
+    }
+    own_restore_vaps(&T);
+    check(own_by_name("mld-wifi0") == NULL, "MLD journal row dropped at restore");
+    check(fake_find("mld-wifi0") && g_deleted == 0 && g_stops == 0,
+          "MLD netdev untouched at restore");
+    g_test_wl_readonly = 0;
+}
+
 int main(void)
 {
     char dir[256];
@@ -511,6 +587,7 @@ int main(void)
     test_busy_and_stale();
     test_netifd_readonly_and_forced();
     test_reload_recreate();
+    test_w51_readonly_and_mld();
 
     if (failures) {
         printf("%d FAILURE(S)\n", failures);

@@ -248,6 +248,9 @@ static int vap_hostapd_start(int port, const char *ifname, int phy, int vapid,
 {
     const uint8_t *ssid = NULL, *ie = NULL, *chv = NULL;
     uint16_t sl = 0, il = 0, cl = 0;
+    /* W51: an MLD companion netdev or a netifd-owned name is not a BSS;
+     * never write hostapd files for one. */
+    if (wl_name_protected(ifname)) return -1;
     if (!find_el(body, len, 0x03, &ssid, &sl) || sl == 0) return -1;
     find_el(body, len, 0x04, &ie, &il);
     find_el(body, len, 0x0a, &chv, &cl);

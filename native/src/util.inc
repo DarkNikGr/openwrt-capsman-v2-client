@@ -67,10 +67,22 @@ static int send_msg_id(mbedtls_ssl_context *ssl, uint16_t type, uint16_t port,
 static int read_exact(mbedtls_ssl_context *ssl, int fd, uint8_t *buf, size_t len)
 {
     size_t got = 0;
+    /* W45: an absolute deadline for the whole header/body, not one poll()
+     * iteration.  The old loop retried forever once got > 0, so a manager
+     * that sent 13 of 14 header bytes wedged the agent (and procd saw it
+     * alive).  A frame larger than BODY_MAX is already rejected by the
+     * caller; a 5 s budget is orders of magnitude above a real LAN frame. */
+    time_t deadline = time(NULL) + FRAME_READ_TIMEOUT_SEC;
+
     while (got < len) {
+        if (time(NULL) >= deadline) {
+            fprintf(stderr, "read_exact: frame deadline after %zu/%zu bytes\n",
+                    got, len);
+            return -1;
+        }
         if (mbedtls_ssl_get_bytes_avail(ssl) == 0) {
             struct pollfd pfd = { .fd = fd, .events = POLLIN, .revents = 0 };
-            int pr = poll(&pfd, 1, 1000);
+            int pr = poll(&pfd, 1, 500);
             if (pr == 0) {
                 if (got == 0) return 0;
                 continue;
@@ -244,13 +256,46 @@ static int parse_sel(const char *p, uint8_t out[4])
 /* Ciphers, chain masks and AP-interface limit from `iw phy phyN info`. */
 static int nl_get_wiphy_ciphers(int phy, uint8_t *out, int outmax);
 
+/* W45: resolve a phy index to the name `iw phy <name>` accepts.  A wiphy can
+ * be renamed (mac80211_hwsim, consistent naming, udev); `iw phy phyN` then
+ * fails even though the index exists, and the CAP advertises no channels, so
+ * the manager never selects a channel and no 0x6016 arrives.  Resolve the
+ * index through /sys/class/ieee80211/<name>/index. */
+static void phy_iw_name(int phy, char *out, size_t n)
+{
+    DIR *d;
+    struct dirent *de;
+
+    snprintf(out, n, "phy%d", phy);
+    d = opendir("/sys/class/ieee80211");
+    if (!d) return;
+    while ((de = readdir(d)) != NULL) {
+        char p[300], b[32];
+        FILE *f;
+        if (de->d_name[0] == '.') continue;
+        snprintf(p, sizeof(p), "/sys/class/ieee80211/%.200s/index",
+                 de->d_name);
+        f = fopen(p, "r");
+        if (!f) continue;
+        if (fgets(b, sizeof(b), f) && atoi(b) == phy) {
+            fclose(f);
+            snprintf(out, n, "%.*s", (int)(n ? n - 1 : 0), de->d_name);
+            closedir(d);
+            return;
+        }
+        fclose(f);
+    }
+    closedir(d);
+}
+
 static void read_phy_caps(int phy, struct phy_caps *pc)
 {
     phy = real_phy(phy);
-    char cmd[128], line[256];
+    char cmd[160], line[256], pn[64];
     int in_ciph = 0;
     memset(pc, 0, sizeof(*pc));
-    snprintf(cmd, sizeof(cmd), "/usr/sbin/iw phy phy%d info 2>/dev/null", phy);
+    phy_iw_name(phy, pn, sizeof(pn));
+    snprintf(cmd, sizeof(cmd), "/usr/sbin/iw phy %s info 2>/dev/null", pn);
     FILE *fp = popen(cmd, "r");
     if (fp) {
         while (fgets(line, sizeof(line), fp)) {
@@ -320,10 +365,11 @@ static void iface_chan(const char *ifn, unsigned *freq, unsigned *width);
 static void read_phy_bands(int phy, struct phy_bands *pb)
 {
     phy = real_phy(phy);
-    char cmd[128], line[256];
+    char cmd[160], line[256], pn[64];
     int have2 = 0, have5 = 0, have6 = 0;
     memset(pb, 0, sizeof(*pb));
-    snprintf(cmd, sizeof(cmd), "/usr/sbin/iw phy phy%d info 2>/dev/null", phy);
+    phy_iw_name(phy, pn, sizeof(pn));
+    snprintf(cmd, sizeof(cmd), "/usr/sbin/iw phy %s info 2>/dev/null", pn);
     FILE *fp = popen(cmd, "r");
     if (fp) {
         while (fgets(line, sizeof(line), fp)) {

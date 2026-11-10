@@ -225,6 +225,21 @@ static void nl_sta_dump(int ifindex)
     }
 }
 
+/* Delete one station in the kernel.  With a reason code the driver emits a
+ * deauth/disassoc; deleting the station also removes its pairwise keys, so a
+ * reconnect can force a fresh Auth/Assoc and a new manager Peer. */
+static int nl_del_station(int ifindex, const uint8_t mac[6])
+{
+    struct nl_buf m;
+
+    if (ifindex <= 0 || nl_cmd_open() != 0) return -EINVAL;
+    nlb_init(&m, NL80211_CMD_DEL_STATION, NLM_F_ACK);
+    nlb_u32(&m, NL80211_ATTR_IFINDEX, (uint32_t)ifindex);
+    nlb_put(&m, NL80211_ATTR_MAC, mac, 6);
+    nlb_u32(&m, NL80211_ATTR_REASON_CODE, 3);   /* DEAUTH_LEAVING */
+    return nl_send_ack(g_nl_cmd_fd, &m);
+}
+
 /* ---- AF_PACKET bridge (P3) ------------------------------------------ */
 struct dp_fd { int fd; int ifindex; struct vap *v; };
 static struct dp_fd g_dp[64];

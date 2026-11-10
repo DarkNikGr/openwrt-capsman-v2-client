@@ -30,7 +30,10 @@ start_service() {
 		--cert "${CERT:-/etc/cap/client.pem}" \
 		--key "${KEY:-/etc/cap/client.key}" \
 		--macs "${MACS:-auto}"
-	[ -f "${CA_CERT:-/etc/cap/ca.pem}" ] && set -- "$@" --ca-cert "${CA_CERT:-/etc/cap/ca.pem}"
+	# W45: pass the CA path even when the file is currently missing.  The
+	# old "-f" guard silently turned a configured CA into VERIFY_NONE; the
+	# agent now fails closed instead.
+	[ -n "${CA_CERT:-}" ] && set -- "$@" --ca-cert "${CA_CERT}"
 	[ "${DONT_VERIFY_CERTIFICATE:-no}" = yes ] && set -- "$@" --dont-verify-certificate
 	[ -n "${CAPS_MAN_CERT_CN:-}" ] && set -- "$@" --caps-man-certificate-common-names "${CAPS_MAN_CERT_CN}"
 	[ "${LOCK_TO_CAPS_MAN:-no}" = yes ] && set -- "$@" --lock-to-caps-man
@@ -52,6 +55,12 @@ start_service() {
 	[ -n "${STATE_FILE:-}" ] && set -- "$@" --state-file "${STATE_FILE}"
 	[ -n "${FOURWAY_TIMEOUT:-}" ] && set -- "$@" --fourway-timeout "${FOURWAY_TIMEOUT}"
 	[ -n "${M1_RETRY:-}" ] && set -- "$@" --m1-retry "${M1_RETRY}"
+	# W45: control-plane liveness and the procd hang watchdog.  SIGALRM is
+	# re-armed on every loop iteration; a stall exits(70) and procd's
+	# respawn 3600 5 0 restarts the agent.
+	[ -n "${SILENCE_TIMEOUT:-}" ] && set -- "$@" --silence-timeout "${SILENCE_TIMEOUT}"
+	set -- "$@" --watchdog-secs "${WATCHDOG_SECS:-60}"
+	[ -n "${HEARTBEAT:-}" ] && set -- "$@" --heartbeat "${HEARTBEAT}"
 	# Ownership policy (W33 API + W34 ubus model).  WIRELESS_OWNER=auto is
 	# production: ubus decides per netdev and the manager VAP yields to
 	# netifd's names.  WIRELESS_CONFIG is for offline diagnostics.
@@ -81,6 +90,10 @@ start_service() {
 
 service_triggers() {
 	procd_add_reload_trigger "network"
+	# W45: a wifi reload (netifd recreates or detaches BSSes) must also wake
+	# the agent so ownership and the session are re-evaluated, not just the
+	# next 1-60 s backoff retry.
+	procd_add_reload_trigger "wireless"
 
 	# Wake the agent as soon as the interface that carries the manager comes
 	# up (or changes address), instead of waiting for the next retry.
