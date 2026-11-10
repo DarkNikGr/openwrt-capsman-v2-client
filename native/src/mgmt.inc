@@ -608,7 +608,15 @@ static void mgmt_monitor_service(mbedtls_ssl_context *ssl)
                 {
                     uint16_t alg = (uint16_t)(fr[24] | (fr[25] << 8));
                     uint16_t txn = (uint16_t)(fr[26] | (fr[27] << 8));
-                    if (!(txn == 1 || (alg == 3 && txn == 2))) continue;
+                    if (!(txn == 1 || (alg == 3 && txn == 2))) {
+                        if (getenv("CAPAGENT_DEBUG"))
+                            printf("0x2018 monitor: drop auth alg=%u txn=%u "
+                                   "len=%zu\n", alg, txn, len);
+                        continue;
+                    }
+                    if (getenv("CAPAGENT_DEBUG"))
+                        printf("0x2018 monitor: relay auth alg=%u txn=%u "
+                               "len=%zu\n", alg, txn, len);
                 }
             }
             /* addr1 == addr3 == BSSID, addr2 != BSSID. */
@@ -1137,9 +1145,16 @@ static void handle_2019(mbedtls_ssl_context *ssl, int port,
         return;
     }
     if (st != 11 && st != 12 && st != 13) {
-        printf("0x2019 subtype %d: not transmitted (unsupported)\n", st);
-        fflush(stdout);
-        return;
+        /* W46: in external-SAE mode the manager also sends the
+         * Association Response (subtype 1; and Reassoc variants) as a
+         * 0x2019 management frame.  A CAP that drops it leaves the
+         * station retrying forever, so forward assoc mgmt through the
+         * owning hostapd BSS as well. */
+        if (!(ext_tx && (st == 0 || st == 1 || st == 2 || st == 3))) {
+            printf("0x2019 subtype %d: not transmitted (unsupported)\n", st);
+            fflush(stdout);
+            return;
+        }
     }
     const uint8_t *sta = fr + 4;                 /* addr1 */
     int r;
@@ -1247,6 +1262,29 @@ static int xm_on_eapol(void *ctx, const struct extmux_vap *v,
     eapol_relay(x->ssl, x->dc, x->c, v->port, mac, eapol, len);
     (void)encrypted;
     return 0;
+}
+
+/* W12/W46: hostapd relays the raw Auth (SAE commit/confirm) and AssocReq
+ * over the per-VAP socket; forward them to the manager as 0x2018. */
+static void xm_on_mgmt(void *ctx, const struct extmux_vap *v,
+                       const uint8_t *fr, size_t len)
+{
+    struct xm_ctx *x = ctx;
+    uint32_t freq = 0;
+    uint8_t width = 1, band = 0;
+
+    if (!x || !v || !fr || len < 24) return;
+    if (!vchan_get(v->port, &freq, &width, &band) || !freq) {
+        struct vap *vp = vap_by_ifindex(v->ifindex);
+        if (vp && vp->freq) freq = vp->freq;
+    }
+    if (!freq) return;
+    if (!band) band = band_code_for_freq(freq);
+    printf("EXTMUX: 0x2018 %s port=0x%04x len=%zu freq=%u\n",
+           ((fr[0] >> 4) & 0xf) == 11 ? "auth" : "assocreq",
+           v->port, len, freq);
+    fflush(stdout);
+    mgmt_send_2018(x->ssl, v->port, fr, len, freq, width, band, 0, "ext");
 }
 
 static int xm_on_delsta(void *ctx, const struct extmux_vap *v,
@@ -1412,6 +1450,7 @@ static void cap_extmux_start(struct cfg *c, mbedtls_ssl_context *ssl,
         .on_deauth = xm_on_deauth,
         .on_direct_tx = xm_on_direct,
         .on_authorized = xm_on_authorized,
+        .on_mgmt = xm_on_mgmt,
     };
     struct extmux_stats st;
 

@@ -218,6 +218,99 @@ index 77e1143..1fc35b2 100644
  	/*
  	 * Exact RSN IE (element ID and length octets included) to advertise in
  	 * Beacon/Probe Response/(Re)Association Response frames instead of the
+diff --git a/src/ap/ext_auth.c b/src/ap/ext_auth.c
+index 8c6e0f7..fc6411c 100644
+--- a/src/ap/ext_auth.c
++++ b/src/ap/ext_auth.c
+@@ -158,6 +158,54 @@ void ext_auth_notify_eapol(struct hostapd_data *hapd, const u8 *src,
+ 	ext_auth_send(hapd, buf, n);
+ }
+ 
++/*
++ * SAE/OWE and (Re)Association frames are 802.11 management frames, not
++ * EAPOL.  A split-MAC CAP must relay the raw frame to the manager; the
++ * manager owns the SAE state machine and builds the Peer from the raw
++ * Association Request.  Reusing the same text protocol keeps one socket per
++ * BSS: "AUTH <mac> <hex>" and "ASSOCREQ <mac> <hex>".
++ */
++static void ext_auth_notify_mgmt(struct hostapd_data *hapd, const char *tag,
++				 const u8 *src, const u8 *data, size_t len)
++{
++	char buf[EXT_AUTH_MSG_MAX];
++	int n;
++
++	if (!hapd->ext_auth)
++		return;
++
++	if (2 * len + 64 > sizeof(buf)) {
++		wpa_printf(MSG_INFO,
++			   "EXT-AUTH: dropping oversized %s frame (%lu bytes)",
++			   tag, (unsigned long) len);
++		return;
++	}
++
++	n = os_snprintf(buf, sizeof(buf), "%s " MACSTR " ", tag, MAC2STR(src));
++	if (os_snprintf_error(sizeof(buf), n))
++		return;
++
++	n += wpa_snprintf_hex(buf + n, sizeof(buf) - n, data, len);
++	buf[n++] = '\n';
++
++	wpa_hexdump(MSG_DEBUG, tag, data, len);
++	wpa_printf(MSG_DEBUG, "EXT-AUTH: relaying %s from " MACSTR
++		   " (%lu bytes)", tag, MAC2STR(src), (unsigned long) len);
++	ext_auth_send(hapd, buf, n);
++}
++
++void ext_auth_notify_auth(struct hostapd_data *hapd, const u8 *src,
++			  const u8 *data, size_t len)
++{
++	ext_auth_notify_mgmt(hapd, "AUTH", src, data, len);
++}
++
++void ext_auth_notify_assocreq(struct hostapd_data *hapd, const u8 *src,
++			      const u8 *data, size_t len)
++{
++	ext_auth_notify_mgmt(hapd, "ASSOCREQ", src, data, len);
++}
++
+ void ext_auth_notify_disconnect(struct hostapd_data *hapd,
+ 				struct sta_info *sta)
+ {
+diff --git a/src/ap/ext_auth.h b/src/ap/ext_auth.h
+index 7aac349..a1eddd6 100644
+--- a/src/ap/ext_auth.h
++++ b/src/ap/ext_auth.h
+@@ -55,6 +55,10 @@ void ext_auth_deinit(struct hostapd_data *hapd);
+ void ext_auth_notify_assoc(struct hostapd_data *hapd, struct sta_info *sta);
+ void ext_auth_notify_eapol(struct hostapd_data *hapd, const u8 *src,
+ 			   const u8 *data, size_t len, int encrypted);
++void ext_auth_notify_auth(struct hostapd_data *hapd, const u8 *src,
++			  const u8 *data, size_t len);
++void ext_auth_notify_assocreq(struct hostapd_data *hapd, const u8 *src,
++			      const u8 *data, size_t len);
+ void ext_auth_notify_disconnect(struct hostapd_data *hapd, struct sta_info *sta);
+ int ext_auth_authorize(struct hostapd_data *hapd, const u8 *addr);
+ 
+@@ -80,6 +84,18 @@ static inline void ext_auth_notify_eapol(struct hostapd_data *hapd,
+ {
+ }
+ 
++static inline void ext_auth_notify_auth(struct hostapd_data *hapd,
++					const u8 *src, const u8 *data,
++					size_t len)
++{
++}
++
++static inline void ext_auth_notify_assocreq(struct hostapd_data *hapd,
++					    const u8 *src, const u8 *data,
++					    size_t len)
++{
++}
++
+ static inline void ext_auth_notify_disconnect(struct hostapd_data *hapd,
+ 					      struct sta_info *sta)
+ {
 diff --git a/src/ap/hostapd.c b/src/ap/hostapd.c
 index 59e2467..d941317 100644
 --- a/src/ap/hostapd.c
@@ -233,10 +326,18 @@ index 59e2467..d941317 100644
  	} else {
  		ieee802_1x_new_station(hapd, sta);
 diff --git a/src/ap/ieee802_11.c b/src/ap/ieee802_11.c
-index c6d6c65..c0b66c5 100644
+index c6d6c65..d959e3c 100644
 --- a/src/ap/ieee802_11.c
 +++ b/src/ap/ieee802_11.c
-@@ -3145,6 +3145,24 @@ static void handle_auth(struct hostapd_data *hapd,
+@@ -36,6 +36,7 @@
+ #include "beacon.h"
+ #include "ieee802_11_auth.h"
+ #include "sta_info.h"
++#include "ext_auth.h"
+ #include "ieee802_1x.h"
+ #include "wpa_auth.h"
+ #include "pmksa_cache_auth.h"
+@@ -3145,6 +3146,25 @@ static void handle_auth(struct hostapd_data *hapd,
  	if (res == HOSTAPD_ACL_PENDING)
  		return;
  
@@ -252,8 +353,9 @@ index c6d6c65..c0b66c5 100644
 +	if (hapd->conf->external_rsn_auth && hapd->conf->external_rsn_sae &&
 +	    auth_alg == WLAN_AUTH_SAE) {
 +		wpa_printf(MSG_DEBUG,
-+			   "EXT-AUTH: suppressing local SAE, auth_transaction=%u from "
-+			   MACSTR, auth_transaction, MAC2STR(sa));
++			   "EXT-AUTH: suppressing local SAE, relaying Auth alg=%u transaction=%u from "
++			   MACSTR, auth_alg, auth_transaction, MAC2STR(sa));
++		ext_auth_notify_auth(hapd, sa, (const u8 *) mgmt, len);
 +		return;
 +	}
 +#endif /* CONFIG_EXTERNAL_RSN_AUTH */
@@ -261,7 +363,7 @@ index c6d6c65..c0b66c5 100644
  #ifdef CONFIG_SAE
  	if (auth_alg == WLAN_AUTH_SAE && !from_queue &&
  	    (auth_transaction == 1 ||
-@@ -4162,6 +4180,28 @@ static int __check_assoc_ies(struct hostapd_data *hapd, struct sta_info *sta,
+@@ -4162,6 +4182,28 @@ static int __check_assoc_ies(struct hostapd_data *hapd, struct sta_info *sta,
  
  	if (hapd->conf->wpa && wpa_ie) {
  		enum wpa_validate_result res;
@@ -290,3 +392,23 @@ index c6d6c65..c0b66c5 100644
  #ifdef CONFIG_IEEE80211BE
  		struct mld_info *info = &sta->mld_info;
  		bool init = !sta->wpa_sm;
+@@ -5448,6 +5490,19 @@ static void handle_assoc(struct hostapd_data *hapd,
+ 	}
+ #endif /* CONFIG_TESTING_OPTIONS */
+ 
++#ifdef CONFIG_EXTERNAL_RSN_AUTH
++	/*
++	 * The CAPsMAN manager builds the Peer from the raw Association
++	 * Request (0x2018 subtype 0) and only then starts the 4-way.  Relay
++	 * the frame before the local association processing so the manager's
++	 * EAPOL-Key M1 can race the local AssocResp exactly as it does on a
++	 * stock CAP.  hostapd keeps doing its own assoc/AssocResp.
++	 */
++	if (hapd->conf->external_rsn_auth && hapd->conf->external_rsn_sae)
++		ext_auth_notify_assocreq(hapd, mgmt->sa,
++					 (const u8 *) mgmt, len);
++#endif /* CONFIG_EXTERNAL_RSN_AUTH */
++
+ 	fc = le_to_host16(mgmt->frame_control);
+ 	seq_ctrl = le_to_host16(mgmt->seq_ctrl);
+ 

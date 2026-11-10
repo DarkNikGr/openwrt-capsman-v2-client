@@ -12,7 +12,7 @@ Apply order is lexicographic, after the stock OpenWrt patches:
 | `9997-external-rsn-ie.patch` | `external_rsn_ie=<hex>`; replaces the generated RSN IE with the manager's exact bytes (the station rejects M3 on any difference) | yes for PSK-free |
 | `9998-external-rsn-eapol-rx.patch` | relay STA EAPOL from `ieee802_1x_receive()` (the path mac80211 uses), not only from the driver event | yes |
 | `9999-external-rsn-no-psk.patch` | in external mode, discard every PSK field from the config and allow a passphrase-free BSS; reject SAE/OWE/802.1X there | yes |
-| `9999a-external-rsn-sae.patch` | `external_rsn_sae=1`; allow SAE/OWE in external mode, suppress the local SAE exchange, skip local `wpa_validate_wpa_ie()` (the manager already validated it and owns the PMK), set the MFP station flag, accept an `external_rsn_ie` blob with RSNXE, and add `EXT_AUTH_MGMT_TX` so the manager's 0x2019 Auth frames go out through the owning BSS | yes for SAE/OWE |
+| `9999a-external-rsn-sae.patch` | `external_rsn_sae=1`; allow SAE/OWE in external mode, suppress the local SAE exchange and relay raw `AUTH`/`ASSOCREQ` frames to the capagent socket, skip local `wpa_validate_wpa_ie()` (the manager already validated it and owns the PMK), set the MFP station flag, accept an `external_rsn_ie` blob with RSNXE, add `EXT_AUTH_MGMT_TX` so the manager's 0x2019 Auth/Assoc frames go out through the owning BSS, and trim the trailing newline on `EXT_AUTH_TX` | yes for SAE/OWE |
 
 `9999a` sorts immediately after `9999` in the C locale (`-` < `a`), so it is
 applied after the PSK-only guard it relaxes.

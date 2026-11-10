@@ -326,7 +326,7 @@ static int vap_hostapd_start(int port, const char *ifname, int phy, int vapid,
         fprintf(stderr, "vap: %s: %s\n", path, strerror(errno));
         return -1;
     }
-    fprintf(f, "interface=%s\ndriver=nl80211\n", ifname);
+    fprintf(f, "interface=%s\ndriver=nl80211\nauth_algs=1\n", ifname);
     if (c->ext_ctrl_dir || c->ext_auth_dir)
         fprintf(f, "ctrl_interface=%s\n",
                 c->ext_ctrl_dir ? c->ext_ctrl_dir : c->ext_auth_dir);
@@ -409,14 +409,20 @@ static int vap_hostapd_start(int port, const char *ifname, int phy, int vapid,
         }
     }
     fprintf(f, "ignore_broadcast_ssid=0\nap_isolate=0\n");
+    if (getenv("CAPAGENT_HOSTAPD_DEBUG"))
+        fprintf(f, "logger_syslog=-1\nlogger_stdout_level=3\n");
     fclose(f);
 
     pid_t pid = fork();
     if (pid == 0) {
         int fd = open(logf, O_CREAT | O_WRONLY | O_TRUNC, 0600);
         if (fd >= 0) { dup2(fd, 1); dup2(fd, 2); close(fd); }
-        execl(hostapd_exe_path(), "hostapd", "-B", "-P", pidf, path,
-              (char *)NULL);
+        if (getenv("CAPAGENT_HOSTAPD_DEBUG"))
+            execl(hostapd_exe_path(), "hostapd", "-dd",
+                  "-P", pidf, path, (char *)NULL);
+        else
+            execl(hostapd_exe_path(), "hostapd", "-B", "-P", pidf, path,
+                  (char *)NULL);
         _exit(127);
     }
     if (pid < 0) {
