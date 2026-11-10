@@ -1011,6 +1011,13 @@ static void handle_2019(mbedtls_ssl_context *ssl, int port,
         fflush(stdout);
         return;
     }
+    /* In-CAP MLME answers open-system Auth itself (alg 0).  The manager's
+     * echoed response is needed only for SAE/other multi-round algorithms. */
+    if (st == 11 && mlme_owned && fl >= 26 && fr[24] == 0 && fr[25] == 0) {
+        printf("0x2019 auth-resp: open-system already answered locally\n");
+        fflush(stdout);
+        return;
+    }
     if (st != 11 && st != 12 && st != 13) {
         printf("0x2019 subtype %d: not transmitted (unsupported)\n", st);
         fflush(stdout);

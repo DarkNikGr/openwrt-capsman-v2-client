@@ -241,16 +241,44 @@ static int parse_sel(const char *p, uint8_t out[4])
     return 1;
 }
 
+/* iw addresses a wiphy by its sysfs name, not by its numeric index.  On a
+ * stock OpenWrt image the two happen to be equal (phy0, phy1); on a test
+ * host / hwsim they are not (w36ap0 with index 1328), so resolve the name. */
+static const char *phy_name_by_index(int idx, char *buf, size_t n)
+{
+    DIR *d = opendir("/sys/class/ieee80211");
+    snprintf(buf, n, "phy%d", idx);
+    if (!d) return buf;
+    struct dirent *e;
+    while ((e = readdir(d))) {
+        char path[160], line[32];
+        if (e->d_name[0] == '.') continue;
+        snprintf(path, sizeof(path), "/sys/class/ieee80211/%s/index",
+                 e->d_name);
+        FILE *f = fopen(path, "r");
+        if (!f) continue;
+        if (!fgets(line, sizeof(line), f)) { fclose(f); continue; }
+        fclose(f);
+        if (atoi(line) == idx) {
+            snprintf(buf, n, "%s", e->d_name);
+            break;
+        }
+    }
+    closedir(d);
+    return buf;
+}
+
 /* Ciphers, chain masks and AP-interface limit from `iw phy phyN info`. */
 static int nl_get_wiphy_ciphers(int phy, uint8_t *out, int outmax);
 
 static void read_phy_caps(int phy, struct phy_caps *pc)
 {
     phy = real_phy(phy);
-    char cmd[128], line[256];
+    char cmd[128], line[256], pname[32];
     int in_ciph = 0;
     memset(pc, 0, sizeof(*pc));
-    snprintf(cmd, sizeof(cmd), "/usr/sbin/iw phy phy%d info 2>/dev/null", phy);
+    phy_name_by_index(phy, pname, sizeof(pname));
+    snprintf(cmd, sizeof(cmd), "/usr/sbin/iw phy %s info 2>/dev/null", pname);
     FILE *fp = popen(cmd, "r");
     if (fp) {
         while (fgets(line, sizeof(line), fp)) {
@@ -320,10 +348,11 @@ static void iface_chan(const char *ifn, unsigned *freq, unsigned *width);
 static void read_phy_bands(int phy, struct phy_bands *pb)
 {
     phy = real_phy(phy);
-    char cmd[128], line[256];
+    char cmd[128], line[256], pname[32];
     int have2 = 0, have5 = 0, have6 = 0;
     memset(pb, 0, sizeof(*pb));
-    snprintf(cmd, sizeof(cmd), "/usr/sbin/iw phy phy%d info 2>/dev/null", phy);
+    phy_name_by_index(phy, pname, sizeof(pname));
+    snprintf(cmd, sizeof(cmd), "/usr/sbin/iw phy %s info 2>/dev/null", pname);
     FILE *fp = popen(cmd, "r");
     if (fp) {
         while (fgets(line, sizeof(line), fp)) {
