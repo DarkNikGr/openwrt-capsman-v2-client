@@ -21,18 +21,19 @@ Current reality: control plane joins, but the BSSes come from a local
 | F5 | `0x2018` Auth/Assoc relay + `0x201b`/`0x201c` EAPOL + `0x201f` keys works end-to-end in the lab (hwsim), including SAE. | V10, V12, U3, U17 |
 | F6 | T12 hostapd `external_rsn_auth` patch: hostapd does beacon/auth/assoc, relays EAPOL, installs no keys. | V12 |
 | F7 | **With zero `wifi-iface` on the CAP the manager still provisions all 8 VAPs** (`0x6016` for ports 0x0000/0x0100/0x0001-3/0x0101-3) and installs 6 key sets. The `0xd00b` reply we already send is accepted. | live zero-config run, `work-V22/ZERO-CONFIG-FINDING.md` |
+| F8 | The CAP can create the netdevs itself from `0x500b` and spawn hostapd from `0x6016` (SSID + RSN IE + channel, `external_rsn_auth=1`, no PSK). Live: 8/8 created, 8 hostapd, the 4 x 2.4 GHz BSSes carry the manager's SSIDs. | `src/vap.inc`, commit 1bd9d78 |
+| F9 | The EAPOL relay works on the real RB1100: STA M2 -> `0x201b` -> manager -> `0x201c` M3 back. | live log `EXT-AUTH: EAPOL ... -> 0x201b` |
+| F10 | Remaining blocker: the station rejects M3 because hostapd's beacon RSN IE (caps `0x008c`, no GMCS) differs from the manager's (`0x0080` + BIP-CMAC `00:0f:ac:06`). | station log `IE in 3/4 msg does not match` |
 
 ## Open blockers (ranked)
 
-1. **Manager does not start the pilot VAP on the live CAP** — no `0x6016` for
-   `port=0x0000`, no `0x201c`, so the PSK-free 4-way never begins. Suspected
-   `0xd00b` reply fidelity (band/freq/ifname) and VAP-id mapping.
-2. **Virtual VAPs are invisible to the manager** — `ifindex=0`, slave
-   interfaces never created, `vapid` derived from MAC instead of the `0x500b`
-   port; `0x600c` never releases.
-3. **STA→manager EAPOL leg** — after the 9998 fix the CAP relays from
-   `ieee802_1x_receive`, but on the live box the manager still retransmits M1
-   (no `0x201b` observed when the VAP was not started).
+1. **Beacon RSN IE must equal the manager's M3 RSN IE byte-for-byte** — hostapd
+   regenerates it with different capabilities and without the group-management
+   cipher. Needs a forced RSN IE in the generated hostapd config (W21/W24).
+2. **5 GHz hostapd start fails** on the MT7612E (DFS/regulatory/centre-freq);
+   the driver refuses the AP. 2.4 GHz is up.
+3. **VAP lifecycle** — `0x600c` never stops hostapd/deletes the netdev/releases
+   the id, so a second create cycle wedges (W25/W28).
 4. **Zero-touch boot** — client + certificate + hostapd must live in ROM
    (custom image), otherwise a factory reset removes them.
 5. **No manual fallback allowed** — no SSH-driven bootstrap, no local
