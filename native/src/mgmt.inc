@@ -1166,7 +1166,8 @@ static void handle_2019(mbedtls_ssl_context *ssl, int port,
         r = (nl_cmd_open() == 0) ? nl_mgmt_tx(ifindex, freq, fr, fl) : -1;
     printf("0x2019 %s -> %02x:%02x:%02x:%02x:%02x:%02x port=0x%04x "
            "ifindex=%d freq=%u len=%u ret=%d (%s)\n",
-           st == 11 ? "auth-resp" : (st == 12 ? "deauth" : "action"),
+           st == 11 ? "auth-resp" : (st == 12 ? "deauth" :
+           (st == 1 ? "assoc-resp" : "action")),
            sta[0], sta[1], sta[2], sta[3], sta[4], sta[5], xp, ifindex,
            freq, fl, r, r ? strerror(-r) : "ok");
     if (st == 12) {
