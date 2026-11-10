@@ -8,6 +8,7 @@
  * ==================================================================== */
 #ifdef CAPAGENT_LAB
 static int g_lab_ifindex;
+static int g_lab_freq = 2412;
 static uint8_t g_lab_bssid[6];
 static char g_lab_ifname[32];
 
@@ -161,6 +162,7 @@ static int lab_ap_setup(const struct cfg *c)
     printf("lab: SET_INTERFACE AP ret=%d\n", r);
     lab_stop_ap(g_lab_ifindex);
     read_sysfs_mac(g_lab_ifname, g_lab_bssid);
+    g_lab_freq = 2407 + c->lab_chan * 5;
     r = lab_start_ap(g_lab_ifindex, c->lab_ssid, c->lab_chan);
     printf("lab: START_AP %s chan=%d bssid=%02x:%02x:%02x:%02x:%02x:%02x "
            "ret=%d\n", c->lab_ssid, c->lab_chan, g_lab_bssid[0],
@@ -173,18 +175,34 @@ static int lab_ap_setup(const struct cfg *c)
     printf("lab: REGISTER_FRAME assoc ret=%d\n", r);
     /* The lab manager sends port 0x0000; map it to this interface. */
     pmap_set(0, g_lab_ifindex, g_lab_bssid);
+    vchan_set(0, (uint32_t)g_lab_freq, 1, band_code_for_freq(g_lab_freq));
+    g_ap_owned = 1;             /* REGISTER_FRAME is safe now */
     fflush(stdout);
     return 0;
+}
+
+/* Monitor-sourced lab MLME pump (U3): the monitor sees the same real frames
+   that REGISTER_FRAME would have delivered. */
+static void lab_monitor_frame(mbedtls_ssl_context *ssl, const uint8_t *fr,
+                              size_t len)
+{
+    if (g_lab_ifindex <= 0 || len < 24) return;
+    if (memcmp(fr + 16, g_lab_bssid, 6) != 0) return;
+    lab_handle_mgmt(ssl, fr, len);
 }
 
 static void lab_assoc_event(mbedtls_ssl_context *ssl, const uint8_t *fr,
                             size_t len)
 {
-    uint8_t b[BODY_MAX];
-    size_t n = 0;
-    uint8_t freq[4];
-    put32(freq, 2412u);
+    uint8_t b[BODY_MAX], ch[32];
+    size_t n = 0, cn = 0;
+    uint8_t freq[4], w = 1, band = band_code_for_freq((uint32_t)g_lab_freq);
+    put32(freq, (uint32_t)g_lab_freq);
+    cn += put_el(ch + cn, 0x0b, freq, 4);
+    cn += put_el(ch + cn, 0x0c, &w, 1);
+    cn += put_el(ch + cn, 0x10, &band, 1);
     n += put_el(b + n, 0x3e, fr, (uint16_t)len);
+    n += put_el(b + n, 0x0a, ch, (uint16_t)cn);
     n += put_el(b + n, 0x3f, freq, 4);
     if (send_msg(ssl, TYPE_ASSOC_FRAME, 0, b, (uint16_t)n) == 0)
         printf("0x2018: assoc frame %zuB -> manager\n", len);
@@ -216,7 +234,7 @@ static void lab_handle_mgmt(mbedtls_ssl_context *ssl, const uint8_t *f,
         out[n++] = 0; out[n++] = 0;
         out[n++] = 2; out[n++] = 0;
         out[n++] = 0; out[n++] = 0;
-        lab_send_mgmt(g_lab_ifindex, out, (size_t)n, 2412);
+        lab_send_mgmt(g_lab_ifindex, out, (size_t)n, g_lab_freq);
     } else if (stype == 0) {                 /* association request */
         if (len < 28) return;
         uint16_t capab = (uint16_t)(f[24] | (f[25] << 8));
@@ -249,7 +267,7 @@ static void lab_handle_mgmt(mbedtls_ssl_context *ssl, const uint8_t *f,
         out[n++] = 0x01; out[n++] = 0x00;
         out[n++] = 0x00; out[n++] = 0x0f; out[n++] = 0xac; out[n++] = 0x02;
         out[n++] = 0x00; out[n++] = 0x00;
-        lab_send_mgmt(g_lab_ifindex, out, (size_t)n, 2412);
+        lab_send_mgmt(g_lab_ifindex, out, (size_t)n, g_lab_freq);
         int r = lab_add_station(g_lab_ifindex, sta, capab,
                                 rl ? rates : lab_rates, rl ? rl : 8);
         printf("lab: NEW_STATION ret=%d (%s)\n", r, r ? strerror(-r) : "ok");

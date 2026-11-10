@@ -1,5 +1,8 @@
-/* datachan.inc — c2 datachan: AES-CCM, keepalive, per-VAP keys, rekey
- * Part of capagent.c (single translation unit; included in order). */
+/* datachan.inc — c2 datachan: AES-CCM/plain, keepalive, per-VAP keys, rekey
+ * Part of capagent.c (single translation unit; included in order).
+ * Merges U11 P1/P2 (per-VAP key/seq/replay) with U16 (a2=1 plain vs a2=2
+ * secure, 0x402b two-slot rekey).
+ */
 
 static void vlan_wid_set(int phy, uint16_t vlan, int wid)
 {
@@ -45,15 +48,24 @@ struct dc_ctx {
     uint8_t rid, wid, flags;    /* cdh[0]; cdh[1] bits 3..0 / 6..4 */
     int have_hdr;
     uint64_t tx_seq;
+    int variant;                /* 0x500b TLV 0xa2: 1 plain, 2 AES-CCM */
+    int secure;                 /* variant != 1 */
+    int slot_valid[2];          /* c2 key slots, selected by cdh[1] bit 7 */
+    uint8_t slot_key[2][DC_KEY_MAX];
+    size_t slot_keylen[2];
+    int active;                 /* c2 ch+0x48 */
+    int pending_del;            /* old slot deleted 1 s after a rotation */
+    uint64_t pending_ms;
     uint64_t rx_max;
     uint64_t rx_bitmap;
     int rx_started;
     struct sockaddr_storage peer;
     socklen_t peer_len;
+    const struct cfg *cfg;      /* for the lab --dc-peer-port override */
 };
 
 /* One c2 key/cookie per (radio, wlan id): the manager sends a separate
-   0x500b a2=1 for every VAP, all on the same datachan. */
+   0x500b per VAP, all on the same datachan. */
 struct dc_keyent {
     int used;
     uint8_t key[DC_KEY_MAX];
@@ -101,29 +113,42 @@ static void dc_build_nonce(const uint8_t hdr[DC_HDR_LEN],
     /* nonce[8..12] stay zero */
 }
 
-static int dc_replay_ok(struct dc_ctx *d, uint64_t seq)
+static uint64_t dc_now_ms(void)
+{
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (uint64_t)ts.tv_sec * 1000 + (uint64_t)ts.tv_nsec / 1000000;
+}
+
+static int dc_replay_window(uint64_t *max, uint64_t *bitmap, int *started,
+                            uint64_t seq)
 {
     uint64_t bit, dist;
 
-    if (!d->rx_started) {
-        d->rx_started = 1;
-        d->rx_max = seq;
-        d->rx_bitmap = 1;
+    if (!*started) {
+        *started = 1;
+        *max = seq;
+        *bitmap = 1;
         return 1;
     }
-    if (seq > d->rx_max) {
-        dist = seq - d->rx_max;
-        d->rx_bitmap = dist >= 64 ? 0 : d->rx_bitmap << dist;
-        d->rx_bitmap |= 1;
-        d->rx_max = seq;
+    if (seq > *max) {
+        dist = seq - *max;
+        *bitmap = dist >= 64 ? 0 : *bitmap << dist;
+        *bitmap |= 1;
+        *max = seq;
         return 1;
     }
-    dist = d->rx_max - seq;
+    dist = *max - seq;
     if (dist >= 64) return 0;
     bit = 1ULL << dist;
-    if (d->rx_bitmap & bit) return 0;
-    d->rx_bitmap |= bit;
+    if (*bitmap & bit) return 0;
+    *bitmap |= bit;
     return 1;
+}
+
+static int dc_replay_ok(struct vap *v, uint64_t seq)
+{
+    return dc_replay_window(&v->rx_max, &v->rx_bitmap, &v->rx_started, seq);
 }
 
 static int dc_open(struct dc_ctx *d, uint16_t port)
@@ -163,6 +188,8 @@ fail:
 
 static void dc_set_peer(struct dc_ctx *d, int tls_fd, uint16_t port)
 {
+    const struct cfg *cfg = d->cfg;
+    if (cfg && cfg->dc_peer_port) port = cfg->dc_peer_port;
     d->peer_len = sizeof(d->peer);
     if (getpeername(tls_fd, (struct sockaddr *)&d->peer, &d->peer_len) != 0) {
         d->peer_len = 0;
@@ -176,20 +203,28 @@ static void dc_set_peer(struct dc_ctx *d, int tls_fd, uint16_t port)
 
 static void dc_install(struct dc_ctx *d, const uint8_t *key, size_t key_len,
                        const uint8_t *cookie, size_t cookie_len,
-                       uint16_t id, uint16_t port, uint8_t keyidx)
+                       uint16_t id, uint16_t port, uint8_t keyidx,
+                       int rid, int wid)
 {
     d->id = id;
     d->port = port;
-    d->have_key = 0;
     d->have_hdr = 0;
-    d->rid = (uint8_t)(port >> 8);
-    d->wid = (uint8_t)(port & 0xff);
+    /* rid/wid come from the VAP registry, never from the UDP port. */
+    d->rid = (uint8_t)rid;
+    d->wid = (uint8_t)wid;
     d->flags = 0;
     d->keyidx = keyidx;
+    d->have_key = 0;
     if (key && (key_len == 16 || key_len == 32)) {
         memcpy(d->key, key, key_len);
         d->key_len = key_len;
         d->have_key = 1;
+        memcpy(d->slot_key[keyidx & 1], key, key_len);
+        d->slot_keylen[keyidx & 1] = key_len;
+        d->slot_valid[keyidx & 1] = 1;
+        if (d->active < 0) d->active = keyidx & 1;
+        /* P1: the transmit path uses the per-VAP key, not dc_ctx's. */
+        vap_set_key(rid, wid, key, key_len, keyidx);
     }
     if (cookie && cookie_len <= DC_COOKIE_MAX) {
         memcpy(d->cookie, cookie, cookie_len);
@@ -206,7 +241,7 @@ static void dc_send_keepalive(struct dc_ctx *d)
     uint8_t pkt[DC_PFX_LEN + DC_COOKIE_MAX];
 
     if (d->fd < 0 || !d->peer_len) return;
-    for (int r = 0; r < 2; r++) {
+    for (int r = 0; r < MAX_RADIOS; r++) {
         for (int w = 0; w < 16; w++) {
             struct dc_keyent *e = &g_dckey[r][w];
             size_t n = 0;
@@ -243,12 +278,61 @@ static int dc_decrypt_key(const uint8_t *key, size_t key_len,
     return ret == 0 ? 0 : -1;
 }
 
+/* 0x402b {a8=key,a9=slot}: install before ACK, switch TX to the new slot,
+   keep the old slot for 1 s (c2.ko cm_datachan_key_add/-del semantics). */
+static int dc_rekey(struct dc_ctx *d, int idx, const uint8_t *key, size_t len)
+{
+    if (idx < 0 || idx > 1 || (len != 16 && len != 32) || !key)
+        return -1;
+    int old = d->active;
+    memcpy(d->slot_key[idx], key, len);
+    d->slot_keylen[idx] = len;
+    d->slot_valid[idx] = 1;
+    if (old != idx) {
+        d->active = idx;
+        d->tx_seq = 0;
+    }
+    if (old >= 0 && old != idx && d->slot_valid[old]) {
+        d->pending_del = old;
+        d->pending_ms = dc_now_ms() + 1000;
+    }
+    memcpy(d->key, key, len);
+    d->key_len = len;
+    d->have_key = 1;
+    d->keyidx = (uint8_t)idx;
+    /* Every VAP's transmit path keeps its own seq; a slot change resets it. */
+    for (int r = 0; r < MAX_RADIOS; r++)
+        for (int w = 0; w < 16; w++) {
+            struct vap *v = &g_vap[r][w];
+            struct dc_keyent *e = &g_dckey[r][w];
+            if (v->used) {
+                memcpy(v->key, key, len);
+                v->klen = len;
+                v->keyidx = (uint8_t)idx;
+                if (old != idx) v->tx_seq = 0;
+            }
+            if (e->used) {
+                memcpy(e->key, key, len);
+                e->key_len = len;
+            }
+        }
+    printf("datachan: key slot=%d active %d->%d tx_seq=%llu key=%02x%02x..%02x\n",
+           idx, old, d->active, (unsigned long long)d->tx_seq,
+           key[0], key[1], key[len - 1]);
+    return 0;
+}
+
 static void dc_service(struct dc_ctx *d)
 {
     uint8_t buf[DC_PFX_LEN + DC_HDR_LEN + DC_MAX_PAYLOAD + DC_TAG_LEN];
     uint8_t pt[DC_MAX_PAYLOAD];
 
     if (d->fd < 0) return;
+    if (d->pending_del >= 0 && dc_now_ms() >= d->pending_ms) {
+        d->slot_valid[d->pending_del] = 0;
+        printf("datachan: old slot=%d deleted after 1 s\n", d->pending_del);
+        d->pending_del = -1;
+    }
     for (;;) {
         uint8_t rid, wid, flags, keyidx;
         uint64_t seq;
@@ -272,7 +356,7 @@ static void dc_service(struct dc_ctx *d)
            Take it from any source port and latch that port as the peer. */
         if (buf[1] & DC_PFX_KEEPALIVE) {
             int matched = 0;
-            for (int r2 = 0; r2 < 2 && !matched; r2++)
+            for (int r2 = 0; r2 < MAX_RADIOS && !matched; r2++)
                 for (int w2 = 0; w2 < 16 && !matched; w2++) {
                     struct dc_keyent *e = &g_dckey[r2][w2];
                     if (e->used && e->cookie_len &&
@@ -298,20 +382,43 @@ static void dc_service(struct dc_ctx *d)
             printf("datachan: fragmented frame, unsupported\n");
             continue;
         }
-        if ((size_t)r < DC_PFX_LEN + DC_HDR_LEN + DC_TAG_LEN) continue;
+        if ((size_t)r < DC_PFX_LEN + DC_HDR_LEN) continue;
         dc_hdr_read(buf + DC_PFX_LEN, &rid, &wid, &flags, &keyidx, &seq);
-        if (!d->have_hdr) {
-            d->rid = rid;
-            d->wid = wid;
-            d->keyidx = keyidx;     /* answer with the key the manager uses */
-            d->have_hdr = 1;
-        }
+        /* (rid,wid) identify the VAP that owns the key.  Do not rewrite it
+           from the first frame: every VAP shares the datachan. */
+        struct vap *v = vap_get(rid, wid);
         plen = (size_t)r - DC_PFX_LEN - DC_HDR_LEN;
         ct = buf + DC_PFX_LEN + DC_HDR_LEN;
+        if (d->variant == 1) {          /* 0xa2=1: bare Ethernet, no tag */
+            int ok = v ? dc_replay_ok(v, seq)
+                       : dc_replay_window(&d->rx_max, &d->rx_bitmap,
+                                          &d->rx_started, seq);
+            if (!ok) {
+                printf("datachan replay dropped seq=%llu\n",
+                       (unsigned long long)seq);
+                continue;
+            }
+            printf("datachan plain rid=%u wid=%u seq=%llu ethtype=%02x%02x "
+                   "payload=%zu\n", rid, wid, (unsigned long long)seq,
+                   plen >= 14 ? ct[12] : 0, plen >= 14 ? ct[13] : 0, plen);
+            dp_rx_frame(d, rid, wid, ct, plen);
+            fflush(stdout);
+            continue;
+        }
         {
             struct dc_keyent *ke = &g_dckey[rid % MAX_RADIOS][wid & 0x0f];
-            const uint8_t *kk = ke->used ? ke->key : d->key;
-            size_t kkl = ke->used ? ke->key_len : d->key_len;
+            const uint8_t *kk = NULL;
+            size_t kkl = 0;
+            if (d->slot_valid[keyidx & 1]) {
+                kk = d->slot_key[keyidx & 1];
+                kkl = d->slot_keylen[keyidx & 1];
+            } else if (v && v->klen) {
+                kk = v->key; kkl = v->klen;
+            } else if (ke->used) {
+                kk = ke->key; kkl = ke->key_len;
+            } else {
+                kk = d->key; kkl = d->key_len;
+            }
             if (!kkl || plen < DC_TAG_LEN) {
                 printf("datachan frame rid=%u wid=%u len=%zu (no key)\n",
                        rid, wid, plen);
@@ -328,38 +435,68 @@ static void dc_service(struct dc_ctx *d)
                 continue;
             }
         }
-        if (!dc_replay_ok(d, seq)) {
-            printf("datachan replay dropped seq=%llu\n",
-                   (unsigned long long)seq);
-            continue;
+        {
+            int ok = v ? dc_replay_ok(v, seq)
+                       : dc_replay_window(&d->rx_max, &d->rx_bitmap,
+                                          &d->rx_started, seq);
+            if (!ok) {
+                printf("datachan replay dropped seq=%llu\n",
+                       (unsigned long long)seq);
+                continue;
+            }
         }
-        printf("datachan rid=%u wid=%u seq=%llu payload=%zu\n",
+        printf("datachan secure rid=%u wid=%u seq=%llu payload=%zu\n",
                rid, wid, (unsigned long long)seq, ct_len);
+        dp_rx_frame(d, rid, wid, pt, ct_len);
         fflush(stdout);
     }
 }
 
 /* Transmit one Ethernet frame on the datachan, c2.ko layout:
-       UDP payload = 10 | flags | cdh[8] | AES-CCM(ct||tag16)
-   assoclen/AAD = cdh, nonce = cdh||0*5, seq increments per frame from 1. */
-static int dc_send_frame(struct dc_ctx *d, const uint8_t *frame, size_t flen)
+       secure: UDP payload = 10 | flags | cdh[8] | AES-CCM(ct||tag16)
+       plain:  UDP payload = 10 | flags | cdh[8] | eth
+   assoclen/AAD = cdh, nonce = cdh||0*5, seq per VAP from 1. */
+static int dc_send_frame_vap(struct dc_ctx *d, int rid, int wid,
+                             const uint8_t *frame, size_t flen)
 {
     uint8_t cdh[DC_HDR_LEN];
     uint8_t pkt[DC_PFX_LEN + DC_HDR_LEN + DC_MAX_PAYLOAD + DC_TAG_LEN];
     mbedtls_ccm_context ccm;
-    int ret;
+    struct vap *v;
+    const uint8_t *key = NULL;
+    size_t klen = 0;
+    uint8_t keyidx = 0;
+    int ret, active;
 
-    if (d->fd < 0 || !d->have_key || !d->peer_len) return -1;
+    if (rid < 0 || wid < 0) return -EINVAL;
+    v = &g_vap[rid % MAX_RADIOS][wid & 0x0f];
+    active = d->active;
+    if (active >= 0 && active <= 1 && d->slot_valid[active]) {
+        key = d->slot_key[active];
+        klen = d->slot_keylen[active];
+        keyidx = (uint8_t)active;
+    } else if (v->klen) {
+        key = v->key; klen = v->klen; keyidx = v->keyidx;
+    } else if (d->have_key && (int)d->rid == rid && (int)d->wid == wid) {
+        key = d->key; klen = d->key_len; keyidx = d->keyidx;
+    }
+    if (d->fd < 0 || !d->peer_len) return -1;
     if (flen > DC_MAX_PAYLOAD) return -1;
 
     pkt[0] = DC_PFX_MAGIC;
     pkt[1] = 0x00;                  /* unfragmented, not keepalive */
-    dc_hdr_write(cdh, d->rid, d->wid, d->flags, d->keyidx, ++d->tx_seq);
+    dc_hdr_write(cdh, (uint8_t)rid, (uint8_t)wid, 0, keyidx, ++v->tx_seq);
     memcpy(pkt + DC_PFX_LEN, cdh, sizeof(cdh));
+    if (d->variant == 1) {          /* 0xa2=1: no tag, no crypto */
+        memcpy(pkt + DC_PFX_LEN + DC_HDR_LEN, frame, flen);
+        return sendto(d->fd, pkt, DC_PFX_LEN + DC_HDR_LEN + flen, 0,
+                      (struct sockaddr *)&d->peer, d->peer_len) < 0 ? -1 : 0;
+    }
+    if (!klen) return -EINVAL;
 
     mbedtls_ccm_init(&ccm);
-    if (mbedtls_ccm_setkey(&ccm, MBEDTLS_CIPHER_ID_AES, d->key,
-                           (unsigned)d->key_len * 8) != 0) {
+    if (mbedtls_ccm_setkey(&ccm, MBEDTLS_CIPHER_ID_AES, key,
+                           (unsigned)klen * 8) != 0) {
         mbedtls_ccm_free(&ccm);
         return -1;
     }
@@ -376,6 +513,12 @@ static int dc_send_frame(struct dc_ctx *d, const uint8_t *frame, size_t flen)
                   (struct sockaddr *)&d->peer, d->peer_len) < 0 ? -1 : 0;
 }
 
+__attribute__((unused))
+static int dc_send_frame(struct dc_ctx *d, const uint8_t *frame, size_t flen)
+{
+    return dc_send_frame_vap(d, d->rid, d->wid, frame, flen);
+}
+
 /* Install the id/port/cookie/key from a 0x500b create and start listening.
    The datachan is opt-in: without --datachan the fields are only logged. */
 static void dc_handle_create(struct dc_ctx *d, const struct cfg *c,
@@ -387,9 +530,18 @@ static void dc_handle_create(struct dc_ctx *d, const struct cfg *c,
     uint16_t id = c->dc_id, port = c->dc_port;
     size_t key_len = 0, cookie_len = 0;
     uint8_t keyidx = c->dc_keyidx;
+    int vrid = create_port >> 8, vwid = create_port & 0xff;
+    int a2 = -1;
 
     if (find_el(body, len, 0x4a, &v, &l) && l == 4) id = (uint16_t)rd32(v);
     if (find_el(body, len, 0xa6, &v, &l) && l == 2) port = rd16(v);
+    if (find_el(body, len, 0xa2, &v, &l) && l == 1) {
+        a2 = v[0];
+        d->variant = a2;
+        d->secure = (a2 != 1);
+        printf("0x500b datachan variant a2=%d (%s)\n", a2,
+               a2 == 2 ? "AES-CCM" : a2 == 1 ? "plain" : "none");
+    }
     if (find_el(body, len, 0xa8, &v, &l) && (l == 16 || l == 32)) {
         key = v;
         key_len = l;
@@ -408,7 +560,7 @@ static void dc_handle_create(struct dc_ctx *d, const struct cfg *c,
         cookie_len = c->dc_cookie_len;
     }
 
-    /* Every VAP has its own a2=1 key/cookie on the shared datachan. */
+    /* Every VAP has its own key/cookie on the shared datachan. */
     if (key) {
         const uint8_t *m = NULL; uint16_t ml = 0;
         if (find_el(body, len, 0x08, &m, &ml) && ml == 6) {
@@ -421,6 +573,8 @@ static void dc_handle_create(struct dc_ctx *d, const struct cfg *c,
             }
             if (wid < 0)
                 wid = vapid_for(rid, m);
+            vrid = rid;
+            vwid = wid;
             struct dc_keyent *e = &g_dckey[rid % MAX_RADIOS][wid & 0x0f];
             e->used = 1;
             memcpy(e->key, key, key_len);
@@ -429,13 +583,15 @@ static void dc_handle_create(struct dc_ctx *d, const struct cfg *c,
                 memcpy(e->cookie, cookie, cookie_len);
                 e->cookie_len = cookie_len;
             }
+            /* P1: the data path uses the VAP registry copy. */
+            vap_set_key(rid, wid, key, key_len, keyidx);
             printf("datachan: key rid=%d wid=%d vlan=%u keyidx=%u "
                    "cookie=%zuB\n", rid, wid, vlan, keyidx, cookie_len);
         }
     }
 
-    printf("0x500b datachan id=%u port=%u key=%zuB cookie=%zuB\n",
-           id, port, key_len, cookie_len);
+    printf("0x500b datachan id=%u port=%u key=%zuB cookie=%zuB a2=%d\n",
+           id, port, key_len, cookie_len, a2);
     if (!c->datachan) {
         printf("datachan: disabled (use --datachan to receive)\n");
         fflush(stdout);
@@ -451,7 +607,8 @@ static void dc_handle_create(struct dc_ctx *d, const struct cfg *c,
     } else {
         port = d->port;     /* already bound (test override): keep it */
     }
-    dc_install(d, key, key_len, cookie, cookie_len, id, port, keyidx);
+    dc_install(d, key, key_len, cookie, cookie_len, id, port, keyidx,
+               vrid, vwid);
     dc_send_keepalive(d);
     printf("datachan: listening on UDP %u, id %u rid %u wid %u keyidx %u\n",
            port, id, d->rid, d->wid, d->keyidx);
@@ -527,9 +684,3 @@ static int dc_selftest(void)
     printf("crypto-selftest: %s\n", fail ? "FAILED" : "all tests passed");
     return fail ? 1 : 0;
 }
-
-/* 0x000A channel-descriptor TLVs for the CREATEVAP-response (0xD00B) body.
-   The official manager's ActManBase::updateHwChans() rebuilds its supported
-   channel vector (phy+0x20) and the matched regulatory rows (phy+0x28) from
-   these.  Without them provisioning fails with "no available channels".
-   Layout: 0x000A { 0x000B freq(BE32), 0x000C width=1, [0x0010 band=0x80] } */

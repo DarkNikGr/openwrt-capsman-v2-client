@@ -15,10 +15,13 @@
 #include <time.h>
 #include <getopt.h>
 #include <sys/socket.h>
+#include <sys/un.h>
+#include <sys/stat.h>
 #include <sys/time.h>
 #include <poll.h>
 #include <fcntl.h>
 #include <signal.h>
+#include <dirent.h>
 #include <arpa/inet.h>
 #include <net/if.h>
 #include <netinet/in.h>
@@ -27,6 +30,8 @@
 #include <linux/genetlink.h>
 #include <linux/nl80211.h>
 #include <linux/if_ether.h>
+#include <linux/if_packet.h>
+#include <linux/filter.h>
 #ifndef NLA_F_NESTED
 #define NLA_F_NESTED (1 << 15)
 #endif
@@ -73,6 +78,9 @@
 #define TYPE_EAPOL_TX          0x201C
 #define TYPE_KEY_INSTALL       0x201F
 #define TYPE_DEL_STA           0x201A
+#define TYPE_ASSOC_RESP        0x6019
+#define TYPE_ASSOC_RESP2       0x2019
+#define TYPE_MGMT_TX_RESP      0xE019
 #define TYPE_EAPOL_TX_RESP     0xE01C
 #define TYPE_KEY_RESP          0xE01F
 #define TYPE_START             0x6016
@@ -136,6 +144,7 @@ struct cfg {
     int no_ack;
     int inject_assoc;
     uint16_t dc_port;
+    uint16_t dc_peer_port;      /* lab: manager datachan port (QEMU hostfwd) */
     uint16_t dc_id;
     uint8_t dc_key[DC_KEY_MAX];
     size_t dc_key_len;
@@ -144,6 +153,13 @@ struct cfg {
     /* EAPOL relay leg: 0 = control channel 0x201B, 1 = c2 datachan,
        2 = both.  See REPORT.md §3. */
     int eapol_leg;
+    /* Split-MAC data plane (U11) and hostapd external-RSN adapter (U11/U3). */
+    int datapath_bridge;
+    int vap_mtu;
+    int bcast_flood;            /* --bcast flood */
+    int mgmt_relay;             /* --mgmt-relay */
+    const char *ext_auth_dir;   /* --ext-auth-dir */
+    int mgmt_source;            /* 0 auto, 1 nl80211, 2 monitor, 3 off */
     /* Lab/hwsim harness: bring up a minimal AP and drive the MLME locally. */
     const char *lab_iface;
     const char *lab_ssid;
@@ -161,7 +177,8 @@ static void put32(uint8_t *p, uint32_t v) { p[0]=v>>24; p[1]=v>>16; p[2]=v>>8; p
 #include "src/util.inc"   /* TLV/hex/sysfs helpers, join/NEWPHY builders */
 #include "src/nl80211.inc"   /* generic netlink: control-port EAPOL, NEW_KEY/SET_KEY, authorize */
 #include "src/apply.inc"   /* 0x77/M2 config parse and UCI apply (argv, no shell) */
-#include "src/datachan.inc"   /* c2 datachan: AES-CCM, keepalive, per-VAP keys, rekey */
+#include "src/datapath.inc"   /* split-MAC VAP registry + AF_PACKET bridge (U11) */
+#include "src/datachan.inc"   /* c2 datachan: AES-CCM/plain, keepalive, per-VAP keys */
 #include "src/channels.inc"   /* 0x000a channels, 0x00b7 set, vapid allocation */
 #include "src/mgmt.inc"   /* EAPOL/key descriptors, 0x200e/0x2015/0x2018 helpers */
 #include "src/discovery.inc"   /* manager discovery and MAC/ifname resolution */

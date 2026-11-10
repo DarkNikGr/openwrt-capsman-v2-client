@@ -1,6 +1,10 @@
 /* channels.inc — 0x000a channels, 0x00b7 set, vapid allocation
  * Part of capagent.c (single translation unit; included in order). */
 
+static void dp_vap_open(struct vap *v);
+static void mgmt_vap_add(int ifindex);
+static int ext_auth_bind(struct vap *v, const char *dir);
+
 static uint32_t ccfi80(uint32_t f)
 {
     if (f >= 5180 && f <= 5240) return 5210;
@@ -74,8 +78,9 @@ static void createvap_response(mbedtls_ssl_context *ssl, const uint8_t hdr[10],
                                const uint8_t *req, uint16_t reqlen)
 {
     uint8_t body[BODY_MAX], v[4], mac[6] = {0};
-    char ifname[32];
+    char ifname[32], macname[32] = "";
     size_t n = 0;
+    uint32_t curfreq = 0;
     /* The manager identifies each interface only by the MAC in 0x08. */
     const uint8_t *rm = NULL; uint16_t rml = 0;
     int have_mac = find_el(req, reqlen, 0x08, &rm, &rml) && rml == 6;
@@ -90,18 +95,76 @@ static void createvap_response(mbedtls_ssl_context *ssl, const uint8_t hdr[10],
             vlan_wid_set(phy, rd16(vv), vapid);
     }
     snprintf(ifname, sizeof(ifname), "phy%d-ap%d", phy, vapid);
+    int ifindex = have_mac ? ifindex_by_mac(mac, macname, sizeof(macname)) : 0;
+    if (ifindex <= 0) {
+        ifindex = read_sysfs_int(ifname, "ifindex");
+        snprintf(macname, sizeof(macname), "%s", ifname);
+    } else if (macname[0]) {
+        snprintf(ifname, sizeof(ifname), "%s", macname);
+    }
+    /* U3: hostapd may own an interface with a different name; the -i
+       mapping is authoritative when the conventional name does not exist. */
+    if (ifindex <= 0 && phy < MAX_RADIOS && c->ifnames[phy][0]) {
+        snprintf(ifname, sizeof(ifname), "%s", c->ifnames[phy]);
+        ifindex = read_sysfs_int(ifname, "ifindex");
+    }
+
+    /* P0: bind the VAP to its netdev, VLAN and channel. */
+    {
+        struct vap *vp = &g_vap[phy % MAX_RADIOS][vapid & 0x0f];
+        const uint8_t *vv = NULL; uint16_t vl = 0;
+        vp->used = 1;
+        vp->rid = phy;
+        vp->wid = vapid;
+        vp->vlan = 0;
+        if (find_el(req, reqlen, 0x7d, &vv, &vl) && vl == 2)
+            vp->vlan = rd16(vv);
+        vp->freq = 0;
+        {   /* 0x0a channel container is authoritative (T13). */
+            uint32_t vf = 0;
+            if (vchan_get((phy << 8) | vap, &vf, NULL, NULL) && vf)
+                vp->freq = vf;
+        }
+        if (!vp->freq) vp->freq = phy_freq_hint(phy);
+        if (!vp->freq) vp->freq = (phy & 1) ? 5180u : 2437u;
+        curfreq = vp->freq;
+        memcpy(vp->bssid, mac, 6);
+        vp->ifindex = ifindex;
+        snprintf(vp->ifname, sizeof(vp->ifname), "%s", ifname);
+        vp->mode = 0;                   /* ACCESS (default) */
+        vp->napvlan = 0;
+        vp->l2fd = -1;
+        vp->extfd = -1;
+        vchan_set((phy << 8) | vapid, vp->freq, 1,
+                  band_code_for_freq(vp->freq));
+        vchan_set((phy << 8) | vap, vp->freq, 1,
+                  band_code_for_freq(vp->freq));
+        printf("vap: rid=%d wid=%d vlan=%u freq=%u bssid=%02x:%02x:%02x:%02x:"
+               "%02x:%02x ifindex=%d ifname=%s\n", phy, vapid, vp->vlan,
+               vp->freq, mac[0], mac[1], mac[2], mac[3], mac[4], mac[5],
+               ifindex, ifname);
+        fflush(stdout);
+        if (c->datapath_bridge) dp_vap_open(vp);
+        if (c->mgmt_relay || c->mgmt_source) mgmt_vap_add(ifindex);
+        if (c->ext_auth_dir) ext_auth_bind(vp, c->ext_auth_dir);
+    }
+
     if (c->no_ack) {
         /* A genuine CAP sends nothing when the data channel is created OK;
            0xD00B is only the failure path. */
-        int ni = read_sysfs_int(ifname, "ifindex");
-        if (ni > 0) pmap_set(phy << 8 | vap, ni, mac);
+        if (ifindex > 0) {
+            pmap_set(phy << 8 | vap, ifindex, mac);
+            pmap_set(phy << 8 | vapid, ifindex, mac);
+        }
         printf("0xd00b phy=%d ifname=%s (no-ack: success reply suppressed)\n",
                phy, ifname);
         fflush(stdout);
         return;
     }
-    int ifindex = read_sysfs_int(ifname, "ifindex");
-    if (ifindex > 0) pmap_set(phy << 8 | vap, ifindex, mac);
+    if (ifindex > 0) {
+        pmap_set(phy << 8 | vap, ifindex, mac);
+        pmap_set(phy << 8 | vapid, ifindex, mac);
+    }
 
     n += put_el(body+n, 0x08, mac, 6);
     put32(v, (uint32_t)vapid);
@@ -123,7 +186,7 @@ static void createvap_response(mbedtls_ssl_context *ssl, const uint8_t hdr[10],
        phy+0x30 and sets "current freq known" (phy+0x34), which chansel uses. */
     {
         uint8_t cf[4];
-        uint32_t hf = phy_freq_hint(phy);
+        uint32_t hf = curfreq;
         if (hf) {
             put32(cf, hf);
             n += put_el(body + n, 0x61, cf, 4);

@@ -11,9 +11,7 @@
 
 static int g_nl_family = -1;
 static int g_nl_cmd_fd = -1;       /* synchronous commands            */
-#ifdef CAPAGENT_LAB
-static int g_nl_evt_fd = -1;       /* lab: mgmt + control-port events */
-#endif
+static int g_nl_evt_fd = -1;       /* mgmt + control-port events      */
 static uint32_t g_nl_seq;
 
 struct nl_buf { struct nlmsghdr *nlh; uint8_t buf[NL_MAX_MSG]; };
@@ -175,6 +173,128 @@ static int nl_cmd_open(void)
     printf("nl80211: family=%d cmd-socket=%d\n", fam, fd);
     fflush(stdout);
     return 0;
+}
+
+/* Resolve a multicast group id ("mlme") for NETLINK_ADD_MEMBERSHIP. */
+static int nl_resolve_group(int fd, const char *name)
+{
+    struct {
+        struct nlmsghdr n;
+        struct genlmsghdr g;
+        uint8_t buf[64];
+    } req;
+    struct sockaddr_nl sa;
+    size_t nl = strlen(name) + 1;
+
+    memset(&req, 0, sizeof(req));
+    req.n.nlmsg_len = NLMSG_LENGTH(GENL_HDRLEN);
+    req.n.nlmsg_type = GENL_ID_CTRL;
+    req.n.nlmsg_flags = NLM_F_REQUEST;
+    req.n.nlmsg_seq = ++g_nl_seq;
+    req.g.cmd = CTRL_CMD_GETFAMILY;
+    req.g.version = 1;
+    struct nlattr *a = (struct nlattr *)((uint8_t *)&req +
+                                         NLMSG_ALIGN(req.n.nlmsg_len));
+    a->nla_type = CTRL_ATTR_FAMILY_NAME;
+    a->nla_len = (uint16_t)(NLA_HDRLEN + 8);
+    memcpy((uint8_t *)a + NLA_HDRLEN, "nl80211", 8);
+    req.n.nlmsg_len = NLMSG_ALIGN(req.n.nlmsg_len) + NLA_ALIGN(a->nla_len);
+
+    memset(&sa, 0, sizeof(sa));
+    sa.nl_family = AF_NETLINK;
+    if (sendto(fd, &req, req.n.nlmsg_len, 0, (struct sockaddr *)&sa,
+               sizeof(sa)) < 0)
+        return -1;
+
+    uint8_t rbuf[4096];
+    for (;;) {
+        struct pollfd pfd = { .fd = fd, .events = POLLIN, .revents = 0 };
+        if (poll(&pfd, 1, 1000) <= 0) return -1;
+        int n = recv(fd, rbuf, sizeof(rbuf), 0);
+        if (n <= 0) return -1;
+        for (struct nlmsghdr *nlh = (struct nlmsghdr *)rbuf; NLMSG_OK(nlh, n);
+             nlh = NLMSG_NEXT(nlh, n)) {
+            if (nlh->nlmsg_seq != req.n.nlmsg_seq) continue;
+            if (nlh->nlmsg_type != GENL_ID_CTRL) continue;
+            int alen = nlh->nlmsg_len - NLMSG_LENGTH(GENL_HDRLEN);
+            struct nlattr *at = (struct nlattr *)((uint8_t *)NLMSG_DATA(nlh) +
+                                                  GENL_HDRLEN);
+            for (struct nlattr *x = at; alen >= (int)NLA_HDRLEN &&
+                 x->nla_len >= NLA_HDRLEN && x->nla_len <= alen;
+                 alen -= NLA_ALIGN(x->nla_len),
+                 x = (struct nlattr *)((uint8_t *)x + NLA_ALIGN(x->nla_len))) {
+                if ((x->nla_type & NLA_TYPE_MASK) != CTRL_ATTR_MCAST_GROUPS)
+                    continue;
+                int glen = x->nla_len - NLA_HDRLEN;
+                struct nlattr *g = (struct nlattr *)((uint8_t *)x + NLA_HDRLEN);
+                for (; glen >= (int)NLA_HDRLEN && g->nla_len >= NLA_HDRLEN &&
+                     g->nla_len <= glen;
+                     glen -= NLA_ALIGN(g->nla_len),
+                     g = (struct nlattr *)((uint8_t *)g + NLA_ALIGN(g->nla_len))) {
+                    int elen = g->nla_len - NLA_HDRLEN;
+                    struct nlattr *e = (struct nlattr *)((uint8_t *)g +
+                                                         NLA_HDRLEN);
+                    const char *gname = NULL;
+                    int gid = -1;
+                    for (; elen >= (int)NLA_HDRLEN &&
+                         e->nla_len >= NLA_HDRLEN && e->nla_len <= elen;
+                         elen -= NLA_ALIGN(e->nla_len),
+                         e = (struct nlattr *)((uint8_t *)e +
+                                               NLA_ALIGN(e->nla_len))) {
+                        int t = e->nla_type & NLA_TYPE_MASK;
+                        if (t == CTRL_ATTR_MCAST_GRP_NAME)
+                            gname = (const char *)e + NLA_HDRLEN;
+                        else if (t == CTRL_ATTR_MCAST_GRP_ID &&
+                                 e->nla_len >= NLA_HDRLEN + 4)
+                            gid = (int)*(uint32_t *)((uint8_t *)e +
+                                                      NLA_HDRLEN);
+                    }
+                    if (gname && gid >= 0 && !strncmp(gname, name, nl))
+                        return gid;
+                }
+            }
+        }
+    }
+}
+
+/* Current nl80211 iftype of a netdev (AP_VLAN detection for the bridge). */
+static int nl_get_iftype(int ifindex)
+{
+    if (ifindex <= 0 || nl_cmd_open() != 0) return -1;
+    struct nl_buf m;
+    struct sockaddr_nl sa;
+    uint8_t rbuf[NL_MAX_MSG];
+
+    nlb_init(&m, NL80211_CMD_GET_INTERFACE, 0);
+    nlb_u32(&m, NL80211_ATTR_IFINDEX, (uint32_t)ifindex);
+    memset(&sa, 0, sizeof(sa));
+    sa.nl_family = AF_NETLINK;
+    if (sendto(g_nl_cmd_fd, m.buf, m.nlh->nlmsg_len, 0,
+               (struct sockaddr *)&sa, sizeof(sa)) < 0)
+        return -1;
+    for (;;) {
+        struct pollfd pfd = { .fd = g_nl_cmd_fd, .events = POLLIN,
+                              .revents = 0 };
+        if (poll(&pfd, 1, 1000) <= 0) return -1;
+        int n = recv(g_nl_cmd_fd, rbuf, sizeof(rbuf), 0);
+        if (n <= 0) return -1;
+        for (struct nlmsghdr *nlh = (struct nlmsghdr *)rbuf; NLMSG_OK(nlh, n);
+             nlh = NLMSG_NEXT(nlh, n)) {
+            if (nlh->nlmsg_seq != m.nlh->nlmsg_seq) continue;
+            if (nlh->nlmsg_type == NLMSG_ERROR) return -1;
+            int alen = nlh->nlmsg_len - NLMSG_LENGTH(GENL_HDRLEN);
+            struct nlattr *at = (struct nlattr *)((uint8_t *)NLMSG_DATA(nlh) +
+                                                  GENL_HDRLEN);
+            for (struct nlattr *x = at; alen >= (int)NLA_HDRLEN &&
+                 x->nla_len >= NLA_HDRLEN && x->nla_len <= alen;
+                 alen -= NLA_ALIGN(x->nla_len),
+                 x = (struct nlattr *)((uint8_t *)x + NLA_ALIGN(x->nla_len))) {
+                if ((x->nla_type & NLA_TYPE_MASK) == NL80211_ATTR_IFTYPE &&
+                    x->nla_len >= NLA_HDRLEN + 4)
+                    return (int)*(uint32_t *)((uint8_t *)x + NLA_HDRLEN);
+            }
+        }
+    }
 }
 
 /* Supported cipher suites of a wiphy, from NL80211_CMD_GET_WIPHY
