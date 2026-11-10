@@ -404,6 +404,9 @@ not committed to the repository. `scripts/build-mipsel.sh` writes its output to
 
 ## Security
 
+See [`SECURITY.md`](SECURITY.md) for the threat model, the v0.2.1 fixes
+(shell injection, `/tmp` dumps, key logging) and deployment hardening.
+
 Never commit `client.key`, `client.pem`, `ca.pem` or any private key material.
 The `.gitignore` excludes them. Certificates belong in `/etc/cap` on the
 device, not in the repository.
