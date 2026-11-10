@@ -41,6 +41,7 @@ struct rsn_info {
     int akm_psk;
     int akm_psk256;
     int akm_sae;
+    int akm_owe;
     int mfpr;
     int mfpc;
 };
@@ -71,6 +72,7 @@ static void rsn_parse(const uint8_t *ie, size_t len, struct rsn_info *ri)
                         if (a[3] == 2)  ri->akm_psk = 1;
                         if (a[3] == 6)  ri->akm_psk256 = 1;
                         if (a[3] == 8)  ri->akm_sae = 1;
+                        if (a[3] == 18) ri->akm_owe = 1;
                     }
                 }
                 k += 2 + 4 * (size_t)ac;
@@ -86,28 +88,79 @@ static void rsn_parse(const uint8_t *ie, size_t len, struct rsn_info *ri)
     }
 }
 
-/* Does this hostapd build accept external_rsn_ie=<hex>?  The option only
-   exists in the patched wpad, so probe the binary instead of guessing: an
-   unknown option makes hostapd refuse the whole configuration. */
-static int hostapd_has_rsn_override(void)
+/* W46: remember the per-VAP RSN policy the manager sent in 0x6016.  The
+ * 0x201f handler needs it to set the kernel MFP flag and to choose the
+ * hostapd TX path for 0x2019 Auth frames. */
+static void vap_note_rsn(struct vap *vp, const uint8_t *ie, size_t il)
 {
-    static int cached = -1;
-    if (cached >= 0) return cached;
-    cached = 0;
-    FILE *f = fopen("/usr/sbin/wpad", "rb");
-    if (!f) f = fopen("/usr/sbin/hostapd", "rb");
-    if (!f) return 0;
-    const char needle[] = "external_rsn_ie";
-    size_t nl = sizeof(needle) - 1, hit = 0;
+    struct rsn_info ri;
+
+    if (!vp) return;
+    rsn_parse(ie, il, &ri);
+    if (!ri.valid) return;
+    vp->mfp = ri.mfpc || ri.mfpr;
+    vp->external_auth = ri.akm_sae || ri.akm_owe;
+}
+
+/* Path of the hostapd binary capagent starts.  Production uses the OpenWrt
+ * wpad/hostapd; CAPAGENT_HOSTAPD is a lab/diagnostic override so the probe
+ * and the exec always inspect/run the same binary. */
+static const char *hostapd_exe_path(void)
+{
+    const char *p = getenv("CAPAGENT_HOSTAPD");
+    return (p && *p) ? p : "/usr/sbin/hostapd";
+}
+
+/* Does the hostapd binary contain this option/command string?  The split-MAC
+ * features only exist in the patched wpad/hostapd, so probe the binary
+ * instead of guessing: an unknown option makes hostapd refuse the whole
+ * configuration.  Same pattern as the original external_rsn_ie probe. */
+static int hostapd_binary_has(const char *needle)
+{
+    const char *env = getenv("CAPAGENT_HOSTAPD");
+    FILE *f;
+    size_t nl = strlen(needle), hit = 0;
     int c;
+
+    if (env && *env) {
+        f = fopen(env, "rb");
+    } else {
+        f = fopen("/usr/sbin/wpad", "rb");
+        if (!f) f = fopen("/usr/sbin/hostapd", "rb");
+    }
+    if (!f) return 0;
     while ((c = fgetc(f)) != EOF) {
         if ((char)c == needle[hit]) {
-            if (++hit == nl) { cached = 1; break; }
+            if (++hit == nl) break;
         } else {
             hit = ((char)c == needle[0]) ? 1 : 0;
         }
     }
     fclose(f);
+    return hit == nl;
+}
+
+static int hostapd_has_rsn_override(void)
+{
+    static int cached = -1;
+    if (cached < 0) cached = hostapd_binary_has("external_rsn_ie");
+    return cached;
+}
+
+/* W46: external_rsn_sae/OWE support (local SAE suppression, RSN-IE
+ * validation skip for the manager-owned PMK). */
+static int hostapd_has_sae_override(void)
+{
+    static int cached = -1;
+    if (cached < 0) cached = hostapd_binary_has("external_rsn_sae");
+    return cached;
+}
+
+/* W46: EXT_AUTH_MGMT_TX ctrl command (0x2019 Auth frames through the BSS). */
+static int hostapd_has_mgmt_tx(void)
+{
+    static int cached = -1;
+    if (cached < 0) cached = hostapd_binary_has("EXT_AUTH_MGMT_TX");
     return cached;
 }
 
@@ -232,6 +285,24 @@ static int vap_netdev_create(int phy, const char *ifname, const uint8_t mac[6])
         fprintf(stderr, "vap: %s did not appear\n", ifname);
         return -1;
     }
+    /* W58: NEW_INTERFACE may leave the fresh VIF as managed on kernels
+     * that drop NL80211_ATTR_IFTYPE; START_AP then succeeds but mac80211
+     * reverts the type on the next reconfig and the BSS never beacons.
+     * Set the type explicitly before anyone starts the AP. */
+    /* Some kernels/drivers (and a host NetworkManager racing a fresh wlan
+     * VIF) leave NEW_INTERFACE as managed even though the reply said AP;
+     * START_AP then succeeds but mac80211 drops the BSS on the next
+     * reconfig.  Enforce the type before anyone starts the AP. */
+    {
+        int t0 = nl_get_iftype(ifindex);
+        int rt = nl_set_iftype(ifindex, NL80211_IFTYPE_AP);
+        if (rt || t0 != NL80211_IFTYPE_AP) {
+            printf("vap: %s iftype %d -> %d SET AP ret=%d (%s)\n", ifname,
+                   t0, nl_get_iftype(ifindex), rt,
+                   rt < 0 ? strerror(-rt) : "ok");
+            fflush(stdout);
+        }
+    }
     if (set_iface_up(ifname) < 0)
         fprintf(stderr, "vap: %s up: %s\n", ifname, strerror(errno));
     printf("vap: created %s ifindex=%d phy=%d\n", ifname, ifindex, rp);
@@ -314,7 +385,7 @@ static int vap_hostapd_start_one(int port, const char *ifname, int phy, int vapi
         fprintf(stderr, "vap: %s: %s\n", path, strerror(errno));
         return -1;
     }
-    fprintf(f, "interface=%s\ndriver=nl80211\n", ifname);
+    fprintf(f, "interface=%s\ndriver=nl80211\nauth_algs=1\n", ifname);
     if (c->ext_ctrl_dir || c->ext_auth_dir)
         fprintf(f, "ctrl_interface=%s\n",
                 c->ext_ctrl_dir ? c->ext_ctrl_dir : c->ext_auth_dir);
@@ -327,47 +398,90 @@ static int vap_hostapd_start_one(int port, const char *ifname, int phy, int vapi
     if (bridge[0]) fprintf(f, "bridge=%s\n", bridge);
     vap_write_channel(f, freq, vap_mgr_width(chv, cl));
 
-    if (ri.valid && (ri.akm_psk || ri.akm_psk256)) {
-        fprintf(f, "wpa=2\n");
-        fprintf(f, "wpa_key_mgmt=%s%s\n", ri.akm_psk ? "WPA-PSK" : "",
-                ri.akm_psk256 ? (ri.akm_psk ? " WPA-PSK-SHA256" : "WPA-PSK-SHA256") : "");
-        fprintf(f, "rsn_pairwise=CCMP\nwpa_group_rekey=0\nwpa_ptk_rekey=0\n");
+    int have_psk = ri.valid && (ri.akm_psk || ri.akm_psk256);
+    int have_sae = ri.valid && (ri.akm_sae || ri.akm_owe) &&
+                   hostapd_has_sae_override();
+
+    if (have_psk || have_sae) {
+        int first = 1;
+        fprintf(f, "wpa=2\nwpa_key_mgmt=");
+        if (ri.akm_psk) {
+            fprintf(f, "WPA-PSK");
+            first = 0;
+        }
+        if (ri.akm_psk256) {
+            fprintf(f, "%sWPA-PSK-SHA256", first ? "" : " ");
+            first = 0;
+        }
+        if (have_sae && ri.akm_sae) {
+            fprintf(f, "%sSAE", first ? "" : " ");
+            first = 0;
+        }
+        if (have_sae && ri.akm_owe) {
+            fprintf(f, "%sOWE", first ? "" : " ");
+            first = 0;
+        }
+        fprintf(f, "\nrsn_pairwise=CCMP\nwpa_group_rekey=0\nwpa_ptk_rekey=0\n");
         fprintf(f, "ieee80211w=%d\n", ri.mfpr ? 2 : (ri.mfpc ? 1 : 0));
+        if (have_sae && ri.mfpc)
+            fprintf(f, "group_mgmt_cipher=AES-128-CMAC\n");
+        if (have_sae && ri.akm_sae)
+            fprintf(f, "sae_pwe=2\n");
         fprintf(f, "external_rsn_auth=1\n");
         if (c->ext_auth_dir)
             fprintf(f, "ext_auth_socket=%s/ext-auth-%s\n", c->ext_auth_dir,
                     ifname);
+        /* W46: the manager also owns the 802.11 Auth exchange (SAE/OWE).
+         * Only emitted when the patched hostapd advertises the option; an
+         * unpatched binary never sees an unknown keyword. */
+        if (have_sae)
+            fprintf(f, "external_rsn_sae=1\n");
     } else {
-        /* open / SAE / OWE: the manager drives the handshake or none exists */
+        /* open, unsupported AKM, or an unpatched hostapd without SAE support */
         fprintf(f, "wpa=0\n");
     }
     /* The station compares the RSN IE in M3 with the one in our beacon and
        drops the handshake on any difference.  When the build can take the
-       manager's exact IE, hand it over verbatim. */
+       manager's exact IE, hand it over verbatim.  For SAE/OWE the blob also
+       carries the RSNXE, which the station compares separately. */
     if (ri.valid && hostapd_has_rsn_override() && ie && il) {
-        const uint8_t *r = NULL;
-        size_t p = 0, rl = 0;
+        size_t p = 0;
+        uint8_t blob[257];
+        size_t bl = 0;
+        int want_rsnxe = have_sae;
+
         while (p + 2 <= il) {
             uint8_t id = ie[p], l = ie[p + 1];
             if (p + 2 + l > il) break;
-            if (id == 48) { r = ie + p; rl = (size_t)l + 2; break; }
+            if (id == 48 || (want_rsnxe && id == 244)) {
+                if (bl + 2 + l <= sizeof(blob)) {
+                    memcpy(blob + bl, ie + p, 2 + (size_t)l);
+                    bl += 2 + (size_t)l;
+                }
+            }
             p += 2 + l;
         }
-        if (r && rl) {
+        if (bl) {
             fprintf(f, "external_rsn_ie=");
-            for (size_t i = 0; i < rl; i++) fprintf(f, "%02x", r[i]);
+            for (size_t i = 0; i < bl; i++) fprintf(f, "%02x", blob[i]);
             fprintf(f, "\n");
         }
     }
     fprintf(f, "ignore_broadcast_ssid=0\nap_isolate=0\n");
+    if (getenv("CAPAGENT_HOSTAPD_DEBUG"))
+        fprintf(f, "logger_syslog=-1\nlogger_stdout_level=3\n");
     fclose(f);
 
     pid_t pid = fork();
     if (pid == 0) {
         int fd = open(logf, O_CREAT | O_WRONLY | O_TRUNC, 0600);
         if (fd >= 0) { dup2(fd, 1); dup2(fd, 2); close(fd); }
-        execl("/usr/sbin/hostapd", "hostapd", "-B", "-P", pidf, path,
-              (char *)NULL);
+        if (getenv("CAPAGENT_HOSTAPD_DEBUG"))
+            execl(hostapd_exe_path(), "hostapd", "-dd",
+                  "-P", pidf, path, (char *)NULL);
+        else
+            execl(hostapd_exe_path(), "hostapd", "-B", "-P", pidf, path,
+                  (char *)NULL);
         _exit(127);
     }
     if (pid < 0) {
@@ -426,7 +540,7 @@ static int vap_hostapd_start_one(int port, const char *ifname, int phy, int vapi
 
 static int vap_hostapd_start(int port, const char *ifname, int phy, int vapid,
                              const uint8_t *body, uint16_t len,
-                             const struct vap *vp, const struct cfg *c)
+                             struct vap *vp, const struct cfg *c)
 {
     int lockfd = open("/var/run/cap-vap-start.lock",
                       O_CREAT | O_RDWR | O_CLOEXEC, 0600);
@@ -788,6 +902,10 @@ static void vap_provision(int port, const uint8_t *body, uint16_t len,
         return;
     }
     struct vap *vp = &g_vap[phy % MAX_RADIOS][vapid];
+    const uint8_t *ie = NULL;
+    uint16_t il = 0;
+
+    find_el(body, len, 0x04, &ie, &il);
 
     char ifname[32];
     int created = 0;
@@ -815,6 +933,7 @@ static void vap_provision(int port, const uint8_t *body, uint16_t len,
      * manager retry can recover after the profile/netdev was fixed. */
     vp->hostapd_fail = 0;
     vp->hostapd_given_up = 0;
+    vap_note_rsn(vp, ie, il);
 
     /* Bind (or re-bind) the per-BSS ext-auth relay socket before hostapd
      * starts accepting clients.  cap_vap_ready() itself enforces ownership. */

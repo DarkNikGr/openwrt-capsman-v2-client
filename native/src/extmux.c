@@ -620,6 +620,23 @@ static void ext_read(struct extmux *m, struct extmux_vap *v)
         buf[strcspn(buf, "\r\n")] = 0;
         if (!strncmp(buf, "ASSOC ", 6)) {
             handle_assoc(m, v, buf + 6);
+        } else if (!strncmp(buf, "AUTH ", 5) ||
+                   !strncmp(buf, "ASSOCREQ ", 9)) {
+            int is_auth = !strncmp(buf, "AUTH ", 5);
+            char *rest = buf + (is_auth ? 5 : 9);
+            char macs[32], hex[EXTMUX_EXT_MAX * 2 + 8];
+            uint8_t fr[EXTMUX_EXT_MAX];
+            size_t fl;
+
+            if (sscanf(rest, "%31s %8191s", macs, hex) != 2)
+                continue;
+            fl = parse_hex(hex, fr, sizeof(fr));
+            if (fl < 24)
+                continue;
+            mlog(m, "extmux: %s port=0x%04x len=%zu",
+                 is_auth ? "AUTH" : "ASSOCREQ", v->port, fl);
+            if (m->cb.on_mgmt)
+                m->cb.on_mgmt(m->cb.ctx, v, fr, fl);
         } else if (!strncmp(buf, "EAPOL ", 6)) {
             handle_eapol(m, v, buf + 6);
         } else if (!strncmp(buf, "DISCONNECT ", 11)) {

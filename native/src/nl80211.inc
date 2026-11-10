@@ -180,6 +180,19 @@ static int nl_cmd_open(void)
     return 0;
 }
 
+/* Set a netdev's nl80211 iftype.  Some kernels/drivers ignore (or lose)
+ * NL80211_ATTR_IFTYPE on NEW_INTERFACE and leave a fresh VAP as managed;
+ * verify and correct it explicitly before START_AP. */
+static int nl_set_iftype(int ifindex, uint32_t type)
+{
+    struct nl_buf m;
+    if (ifindex <= 0 || nl_cmd_open() != 0) return -ENODEV;
+    nlb_init(&m, NL80211_CMD_SET_INTERFACE, NLM_F_ACK);
+    nlb_u32(&m, NL80211_ATTR_IFINDEX, (uint32_t)ifindex);
+    nlb_u32(&m, NL80211_ATTR_IFTYPE, type);
+    return nl_send_ack(g_nl_cmd_fd, &m);
+}
+
 /* Current nl80211 iftype of a netdev (AP_VLAN detection for the bridge). */
 static int nl_get_iftype(int ifindex){
     if (ifindex <= 0 || nl_cmd_open() != 0) return -1;
@@ -452,6 +465,26 @@ static int nl_sta_authorize(int ifindex, const uint8_t mac[6])
     memset(&upd, 0, sizeof(upd));
     upd.mask = 1u << NL80211_STA_FLAG_AUTHORIZED;
     upd.set  = 1u << NL80211_STA_FLAG_AUTHORIZED;
+    nlb_init(&m, NL80211_CMD_SET_STATION, NLM_F_ACK);
+    nlb_u32(&m, NL80211_ATTR_IFINDEX, (uint32_t)ifindex);
+    nlb_put(&m, NL80211_ATTR_MAC, mac, 6);
+    nlb_put(&m, NL80211_ATTR_STA_FLAGS2, &upd, sizeof(upd));
+    return nl_send_ack(g_nl_cmd_fd, &m);
+}
+
+/* W46: PMF station flag.  hostapd would normally set this from the local
+ * RSN state machine, but in external-SAE mode the manager owns the RSN
+ * state and hostapd never sees the negotiated MFPC.  The manager's RSN caps
+ * are authoritative: set the kernel flag before authorizing the station so
+ * the driver accepts/uses BIP-protected management frames. */
+static int nl_sta_mfp(int ifindex, const uint8_t mac[6])
+{
+    if (ifindex <= 0) return -EINVAL;
+    struct nl_buf m;
+    struct nl80211_sta_flag_update upd;
+    memset(&upd, 0, sizeof(upd));
+    upd.mask = 1u << NL80211_STA_FLAG_MFP;
+    upd.set  = 1u << NL80211_STA_FLAG_MFP;
     nlb_init(&m, NL80211_CMD_SET_STATION, NLM_F_ACK);
     nlb_u32(&m, NL80211_ATTR_IFINDEX, (uint32_t)ifindex);
     nlb_put(&m, NL80211_ATTR_MAC, mac, 6);
