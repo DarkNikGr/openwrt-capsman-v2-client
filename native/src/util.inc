@@ -42,6 +42,27 @@ static int send_msg(mbedtls_ssl_context *ssl, uint16_t type, uint16_t port,
     return 0;
 }
 
+static int send_msg_id(mbedtls_ssl_context *ssl, uint16_t type, uint16_t port,
+                       uint64_t id, const uint8_t *body, uint16_t len)
+{
+    uint8_t buf[BODY_MAX + 16];
+    put16(buf, type);
+    put16(buf + 2, port);
+    put32(buf + 4, (uint32_t)(id >> 32));
+    put32(buf + 8, (uint32_t)id);
+    put16(buf + 12, len);
+    if (len && body) memcpy(buf + 14, body, len);
+    size_t n = 14 + (size_t)len, off = 0;
+    while (off < n) {
+        int r = mbedtls_ssl_write(ssl, buf + off, n - off);
+        if (r == MBEDTLS_ERR_SSL_WANT_READ || r == MBEDTLS_ERR_SSL_WANT_WRITE)
+            continue;
+        if (r <= 0) return -1;
+        off += (size_t)r;
+    }
+    return 0;
+}
+
 /* returns 1 = full message, 0 = timeout with no data, -1 = error */
 static int read_exact(mbedtls_ssl_context *ssl, int fd, uint8_t *buf, size_t len)
 {

@@ -54,6 +54,7 @@ static int run_once(struct cfg *c)
     }
 
     time_t last_echo = time(NULL);
+    time_t last_stats = 0;
     time_t last_dc_ka = 0;
 #ifdef CAPAGENT_LAB
     if (c->lab_iface && lab_ap_setup(c) != 0) {
@@ -99,6 +100,10 @@ static int run_once(struct cfg *c)
             dc_send_keepalive(&dc);
             last_dc_ka = time(NULL);
         }
+        if (time(NULL) != last_stats) {
+            last_stats = time(NULL);
+            send_station_stats(&ssl, c);
+        }
         if (time(NULL) - last_echo > 5) {
             send_msg(&ssl, TYPE_ECHO, 0, NULL, 0);
             last_echo = time(NULL);
@@ -114,6 +119,9 @@ static int run_once(struct cfg *c)
         uint16_t type = rd16(hdr);
         uint16_t port = rd16(hdr + 2);
         uint16_t len  = rd16(hdr + 12);
+        if (type == TYPE_PROVISION || type == 0x6016 || type == 0x2019 ||
+            type == 0x6019 || type == 0x6014)
+            g_sta_ident = ((uint64_t)rd32(hdr + 4) << 32) | rd32(hdr + 8);
         if (len > BODY_MAX) break;
         if (len && read_exact(&ssl, fd.fd, body, len) != 1) break;
 
@@ -160,11 +168,6 @@ static int run_once(struct cfg *c)
                 }
             }
             send_hdr_msg(&ssl, 0xE027, hdr + 2, b27, (uint16_t)z27);
-            static time_t last_stats;
-            if (time(NULL) != last_stats) {
-                last_stats = time(NULL);
-                send_station_stats(&ssl, c);
-            }
             maybe_inject_assoc(&ssl, c);
             if ((++n27 % 100) == 1) {
                 printf("RX 0x6027 poll (count=%d) -> 0xE027 len=%zu\n",

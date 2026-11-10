@@ -102,6 +102,7 @@
 
 #define MAX_RADIOS   8
 
+static uint64_t g_sta_ident;   /* last manager station-level ident */
 static int g_phy_map[MAX_RADIOS] = { 0,1,2,3,4,5,6,7 };
 static int real_phy(int phy)
 {

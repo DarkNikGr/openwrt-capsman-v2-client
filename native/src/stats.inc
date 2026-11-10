@@ -86,13 +86,13 @@ static void emit_station(mbedtls_ssl_context *ssl, int phy, int vap,
 
     /* 0x200E: station appeared/updated; this is the signal source. */
     n += put_el(b + n, 0x07, mac, 6);
-    put16(v2, (uint16_t)freq);
-    cn += put_el(ch + cn, 0x0b, v2, 2);
+    put32(v4, freq);
+    cn += put_el(ch + cn, 0x0b, v4, 4);
     if (width) {
         w = (uint8_t)chan_width_code(width);
         cn += put_el(ch + cn, 0x0c, &w, 1);
     }
-    w = band_code_for_freq(freq);
+    w = (freq < 3000) ? 0x81 : (freq < 5925) ? 0x82 : 0x83;
     cn += put_el(ch + cn, 0x10, &w, 1);
     n += put_el(b + n, 0x0a, ch, (uint16_t)cn);
     {   /* opaque station-info blob (24 dwords) copied into sta+0x18 */
@@ -121,7 +121,7 @@ static void emit_station(mbedtls_ssl_context *ssl, int phy, int vap,
     }
 
     /* 0x2015 PEERSTATSRESULT, corrected layout (work-T7/T15):
-     *   0x3d +0x00 u32 freq (MHz)       +0x04 u32 tx PHY rate (kbit/s)
+     *   0x3d +0x00 i32 signal (dBm)     +0x04 u32 tx PHY rate (kbit/s)
      *        +0x08 u32 rx PHY rate       +0x0c u64 tx-packets
      *        +0x14 u64 rx-packets        +0x1c u64 tx-bytes
      *        +0x24 u64 rx-bytes
@@ -137,7 +137,7 @@ static void emit_station(mbedtls_ssl_context *ssl, int phy, int vap,
         if (rx >= p->rx) ra = (uint32_t)((rx - p->rx) / dt);
     }
     if (p) { p->rx = rx; p->tx = tx; p->t = now; }
-    put32(st + 0, freq);
+    put32(st + 0, (uint32_t)(int32_t)sig);
     put32(st + 4, tx_kbps);
     put32(st + 8, rx_kbps);
     put64(st + 12, txp);
@@ -148,7 +148,7 @@ static void emit_station(mbedtls_ssl_context *ssl, int phy, int vap,
     put32(rt, ta);
     put32(rt + 4, ra);
     n += put_el(b + n, 0x40, rt, 8);
-    send_msg(ssl, 0x2015, port, b, (uint16_t)n);
+    send_msg_id(ssl, 0x2015, port, g_sta_ident, b, (uint16_t)n);
     (void)conn_s;                       /* manager derives uptime itself */
 }
 
@@ -156,6 +156,7 @@ static void send_station_stats(mbedtls_ssl_context *ssl, const struct cfg *c)
 {
     for (int phy = 0; phy < c->nradios; phy++) {
         for (int vap = 0; vap < 16; vap++) {
+            if (vap > 0 && !g_vmap[phy % MAX_RADIOS][vap].used) continue;
             char ifn[32], cmd[96], line[256];
             unsigned freq = 0, width = 0;
             uint32_t tx_kbps = 0, rx_kbps = 0, v;
