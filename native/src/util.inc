@@ -200,6 +200,75 @@ static const char *phy_hwtype(int phy)
     return "unknown";
 }
 
+struct phy_caps {
+    uint8_t ciphers[32];
+    int nciphers;
+    uint32_t tx_chain;
+    uint32_t rx_chain;
+    int max_ap;
+};
+
+static int parse_sel(const char *p, uint8_t out[4])
+{
+    unsigned a, b, c, d;
+    if (!p || sscanf(p, "%2x-%2x-%2x-%2x", &a, &b, &c, &d) != 4) return 0;
+    out[0] = (uint8_t)a; out[1] = (uint8_t)b;
+    out[2] = (uint8_t)c; out[3] = (uint8_t)d;
+    return 1;
+}
+
+/* Ciphers, chain masks and AP-interface limit from `iw phy phyN info`. */
+static void read_phy_caps(int phy, struct phy_caps *pc)
+{
+    char cmd[128], line[256];
+    int in_ciph = 0;
+    memset(pc, 0, sizeof(*pc));
+    pc->tx_chain = pc->rx_chain = 0x3;
+    pc->max_ap = 8;
+    snprintf(cmd, sizeof(cmd), "/usr/sbin/iw phy phy%d info 2>/dev/null", phy);
+    FILE *fp = popen(cmd, "r");
+    if (!fp) return;
+    while (fgets(line, sizeof(line), fp)) {
+        char *p;
+        unsigned tx, rx;
+        if (sscanf(line, " Available Antennas: TX 0x%x RX 0x%x", &tx, &rx) == 2 ||
+            sscanf(line, "	Available Antennas: TX 0x%x RX 0x%x", &tx, &rx) == 2) {
+            pc->tx_chain = tx;
+            pc->rx_chain = rx;
+        }
+        if (strstr(line, "Supported Ciphers:")) { in_ciph = 1; continue; }
+        if (in_ciph) {
+            if ((p = strchr(line, '(')) != NULL) {
+                uint8_t sel[4];
+                if (parse_sel(p + 1, sel)) {
+                    /* keep TKIP/CCMP/GCMP selectors (00-0f-ac-01..0a) */
+                    if (sel[0] == 0x00 && sel[1] == 0x0f && sel[2] == 0xac &&
+                        sel[3] >= 0x02 && sel[3] <= 0x0a && pc->nciphers < 8) {
+                        memcpy(pc->ciphers + pc->nciphers * 4, sel, 4);
+                        pc->nciphers++;
+                    }
+                }
+            } else if (line[0] != '\t' && line[0] != ' ') {
+                in_ciph = 0;
+            }
+        }
+        if ((p = strstr(line, "#{ AP")) != NULL ||
+            (p = strstr(line, "#{AP")) != NULL) {
+            char *q = strstr(p, "<=");
+            if (q) {
+                int n = atoi(q + 2);
+                if (n > 0 && n < pc->max_ap) pc->max_ap = n;
+            }
+        }
+    }
+    pclose(fp);
+    if (pc->nciphers == 0) {
+        static const uint8_t ccmp[4] = { 0x00, 0x0f, 0xac, 0x04 };
+        memcpy(pc->ciphers, ccmp, 4);
+        pc->nciphers = 1;
+    }
+}
+
 /* 2.4 GHz channels 1-13 (channel 14 is disabled). */
 static const uint32_t freqs_2g[] = {
     2412, 2417, 2422, 2427, 2432, 2437, 2442,
@@ -301,16 +370,14 @@ static void build_newphy(uint8_t *b, const uint8_t mac[6], int phy, size_t *out)
     uint8_t v16[2], v32[4];
     /* MT7603E/MT7612E support TKIP and CCMP-128 only: no GCMP/GCMP-256 and
        no CCMP-256.  5ghz-ax is not advertised either (no HE). */
-    static const uint8_t ciphers[8] = {
-        0x00,0x0f,0xac,0x02,   /* TKIP */
-        0x00,0x0f,0xac,0x04    /* CCMP-128 */
-    };
+    struct phy_caps pc;
     struct phy_bands pb;
     uint8_t fbuf[PHY_MAX_FREQ * 4];
     const char *hw = phy_hwtype(phy);
     size_t n = 0;
 
     read_phy_bands(phy, &pb);
+    read_phy_caps(phy, &pc);
     for (int i = 0; i < pb.nfreq; i++)
         put32(fbuf + i * 4, pb.freq[i]);
 
@@ -318,7 +385,7 @@ static void build_newphy(uint8_t *b, const uint8_t mac[6], int phy, size_t *out)
 
     /* Interface/peer limits: 8 is the manager-side ceiling we advertise;
        the driver still enforces its own limit. */
-    put16(v16, 8);
+    put16(v16, (uint16_t)pc.max_ap);
     n += put_el(b+n, 0x7e, v16, 2);
     n += put_el(b+n, 0x7f, v16, 2);
     n += put_el(b+n, 0x80, v16, 2);
@@ -331,12 +398,12 @@ static void build_newphy(uint8_t *b, const uint8_t mac[6], int phy, size_t *out)
     put32(v32, 1);
     n += put_el(b+n, 0x8a, v32, 4);
 
-    n += put_el(b+n, 0x5e, ciphers, sizeof(ciphers));
+    n += put_el(b+n, 0x5e, pc.ciphers, (uint16_t)(pc.nciphers * 4));
     n += put_el(b+n, 0x05, fbuf, (uint16_t)(pb.nfreq * 4));
 
-    /* 2x2 chains (driver-dependent; this is the common mt76 value). */
-    put32(v32, 0x00000003);
+    put32(v32, pc.tx_chain);
     n += put_el(b+n, 0x4b, v32, 4);   /* tx chains */
+    put32(v32, pc.rx_chain);
     n += put_el(b+n, 0x4c, v32, 4);   /* rx chains */
     for (int i = 0; i < pb.nband; i++) {
         uint8_t bd[5] = { pb.band[i], 0, 0, 0, 0x01 };

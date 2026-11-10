@@ -272,10 +272,6 @@ static void apply_vaps(void)
     }
     pclose(p);
 
-    char *del1[] = { "uci", "-q", "delete", "wireless.capdyn_20", NULL };
-    char *del2[] = { "uci", "-q", "delete", "wireless.capdyn_30", NULL };
-    run_argv(del1);
-    run_argv(del2);
     char *commit[] = { "uci", "-q", "commit", "wireless", NULL };
     run_argv(commit);
     for (int i = 0; i < ndev; i++) {
