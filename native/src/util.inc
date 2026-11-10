@@ -182,6 +182,7 @@ static void build_join(uint8_t *b, const struct cfg *c, size_t *out)
    names of the target board as a fallback. */
 static const char *phy_hwtype(int phy)
 {
+    phy = real_phy(phy);
     static char name[32];
     char path[128], link[160];
     ssize_t n;
@@ -206,6 +207,8 @@ struct phy_caps {
     uint32_t tx_chain;
     uint32_t rx_chain;
     int max_ap;
+    int has_he;
+    int has_eht;
 };
 
 static int parse_sel(const char *p, uint8_t out[4])
@@ -222,6 +225,7 @@ static int nl_get_wiphy_ciphers(int phy, uint8_t *out, int outmax);
 
 static void read_phy_caps(int phy, struct phy_caps *pc)
 {
+    phy = real_phy(phy);
     char cmd[128], line[256];
     int in_ciph = 0;
     memset(pc, 0, sizeof(*pc));
@@ -236,6 +240,10 @@ static void read_phy_caps(int phy, struct phy_caps *pc)
                 pc->tx_chain = tx;
                 pc->rx_chain = rx;
             }
+            if (strstr(line, "HE Iftypes:") && strstr(line, "AP"))
+                pc->has_he = 1;
+            if (strstr(line, "EHT Iftypes:") && strstr(line, "AP"))
+                pc->has_eht = 1;
             if (strstr(line, "Supported Ciphers:")) { in_ciph = 1; continue; }
             if (in_ciph) {
                 if ((p = strchr(line, '(')) != NULL) {
@@ -290,6 +298,7 @@ static void iface_chan(const char *ifn, unsigned *freq, unsigned *width);
    back to the legacy 2.4/5 GHz tables only when iw gives nothing. */
 static void read_phy_bands(int phy, struct phy_bands *pb)
 {
+    phy = real_phy(phy);
     char cmd[128], line[256];
     int have2 = 0, have5 = 0, have6 = 0;
     memset(pb, 0, sizeof(*pb));
@@ -342,7 +351,7 @@ static uint32_t phy_freq_hint(int phy)
 {
     char ifn[32];
     unsigned f = 0, w = 0;
-    snprintf(ifn, sizeof(ifn), "phy%d-ap0", phy);
+    snprintf(ifn, sizeof(ifn), "phy%d-ap0", real_phy(phy));
     iface_chan(ifn, &f, &w);
     if (f) return f;
     struct phy_bands pb;
@@ -401,6 +410,27 @@ static void build_newphy(uint8_t *b, const uint8_t mac[6], int phy, size_t *out)
         if (pb.band[i] == 0x82 || pb.band[i] == 0x03) bd[4] = 0x03;
         if (pb.band[i] == 0x03 || pb.band[i] == 0x06) bd[4] = 0x07;
         n += put_el(b+n, 0x4d, bd, 5);
+    }
+
+    /* WiFi 6/7 band ids, only when the phy reports HE/EHT AP support. */
+    {
+        int have5 = 0, have6 = 0;
+        for (int i = 0; i < pb.nfreq; i++) {
+            if (pb.freq[i] >= 4900 && pb.freq[i] < 5925) have5 = 1;
+            if (pb.freq[i] >= 5925) have6 = 1;
+        }
+        if (have5 && pc.has_he) {
+            uint8_t bd[5] = { 0x04, 0, 0, 0, 0x07 };
+            n += put_el(b+n, 0x4d, bd, 5);
+        }
+        if (have5 && pc.has_eht) {
+            uint8_t bd[5] = { 0x06, 0, 0, 0, 0x07 };
+            n += put_el(b+n, 0x4d, bd, 5);
+        }
+        if (have6 && pc.has_eht) {
+            uint8_t bd[5] = { 0x06, 0, 0, 0, 0x07 };
+            n += put_el(b+n, 0x4d, bd, 5);
+        }
     }
 
     /* 0x84 = little-endian capability bitset.  Bit 6 (0x40) tells the

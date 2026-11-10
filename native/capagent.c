@@ -101,6 +101,12 @@
 #define DC_PFX_KEEPALIVE   0x02     /* cookie keepalive, no cdh, no crypto  */
 
 #define MAX_RADIOS   8
+
+static int g_phy_map[MAX_RADIOS] = { 0,1,2,3,4,5,6,7 };
+static int real_phy(int phy)
+{
+    return (phy >= 0 && phy < MAX_RADIOS) ? g_phy_map[phy] : phy;
+}
 #define BODY_MAX   4096
 
 struct cfg {

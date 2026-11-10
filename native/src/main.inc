@@ -283,7 +283,7 @@ int main(int argc, char **argv)
            OPT_SDP, OPT_SSTATIC, OPT_IDENTITY, OPT_SERIAL, OPT_A1, OPT_E70,
            OPT_SELFTEST, OPT_DATACHAN, OPT_DC_LISTEN, OPT_DC_KEY,
            OPT_DC_COOKIE, OPT_DC_ID, OPT_APPLY, OPT_NOACK,
-           OPT_EAPOL_LEG, OPT_LAB_AP, OPT_LAB_SSID, OPT_LAB_CHAN, OPT_INJECT };
+           OPT_EAPOL_LEG, OPT_LAB_AP, OPT_LAB_SSID, OPT_LAB_CHAN, OPT_INJECT, OPT_PHYS };
     static struct option opts[] = {
         {"manager", required_argument, 0, 'm'},
         {"port", required_argument, 0, 'p'},
@@ -311,6 +311,7 @@ int main(int argc, char **argv)
         {"apply", no_argument, 0, OPT_APPLY},
         {"no-ack", no_argument, 0, OPT_NOACK},
         {"inject-assoc", no_argument, 0, OPT_INJECT},
+        {"phys", required_argument, 0, OPT_PHYS},
         {"eapol-leg", required_argument, 0, OPT_EAPOL_LEG},
         {"lab-ap", required_argument, 0, OPT_LAB_AP},
         {"lab-ssid", required_argument, 0, OPT_LAB_SSID},
@@ -352,6 +353,17 @@ int main(int argc, char **argv)
         case OPT_APPLY: g_apply = 1; break;
         case OPT_NOACK: c.no_ack = 1; break;
         case OPT_INJECT: c.inject_assoc = 1; break;
+        case OPT_PHYS: {
+            char *tmp = strdup(optarg), *save = NULL, *tok;
+            int i = 0;
+            tok = strtok_r(tmp, ",", &save);
+            while (tok && i < MAX_RADIOS) {
+                g_phy_map[i++] = atoi(tok);
+                tok = strtok_r(NULL, ",", &save);
+            }
+            free(tmp);
+            break;
+        }
         case OPT_EAPOL_LEG:
             if (!strcmp(optarg, "tls")) c.eapol_leg = 1;
             else if (!strcmp(optarg, "datachan")) c.eapol_leg = 2;
