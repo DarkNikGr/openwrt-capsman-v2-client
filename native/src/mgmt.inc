@@ -1286,6 +1286,19 @@ static int xm_on_direct(void *ctx, const struct extmux_vap *v,
     return nl_control_port_tx(ifindex, mac, eapol, len);
 }
 
+/* W53: hostapd could not authorize through EXT_AUTH_AUTHORIZE.  The 4-way
+ * PTK is already installed, so mark the station authorized in the kernel
+ * directly; without this the data path would stay closed. */
+static int xm_on_direct_authz(void *ctx, const struct extmux_vap *v,
+                              const uint8_t mac[6])
+{
+    (void)ctx;
+    if (nl_cmd_open() != 0) return -1;
+    int ifindex = vap_ifindex(v->port, NULL);
+    if (ifindex <= 0) return -ENODEV;
+    return nl_sta_authorize(ifindex, mac);
+}
+
 static void xm_on_authorized(void *ctx, const struct extmux_vap *v,
                              const uint8_t mac[6])
 {
@@ -1412,6 +1425,7 @@ static void cap_extmux_start(struct cfg *c, mbedtls_ssl_context *ssl,
         .on_delsta = xm_on_delsta,
         .on_deauth = xm_on_deauth,
         .on_direct_tx = xm_on_direct,
+        .on_direct_authz = xm_on_direct_authz,
         .on_authorized = xm_on_authorized,
     };
     struct extmux_stats st;

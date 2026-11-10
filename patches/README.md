@@ -11,7 +11,9 @@ Apply order is lexicographic, after the stock OpenWrt patches:
 | `999-external-rsn-auth.patch` | `external_rsn_auth=1` / `ext_auth_socket=`; hostapd stops running the 4-way, relays EAPOL to the CAP daemon over a UNIX dgram socket, and authorizes on request | yes |
 | `9997-external-rsn-ie.patch` | `external_rsn_ie=<hex>`; replaces the generated RSN IE with the manager's exact bytes (the station rejects M3 on any difference) | yes for PSK-free |
 | `9998-external-rsn-eapol-rx.patch` | relay STA EAPOL from `ieee802_1x_receive()` (the path mac80211 uses), not only from the driver event | yes |
-| `9999-external-rsn-no-psk.patch` | in external mode, discard every PSK field from the config and allow a passphrase-free BSS; reject SAE/OWE/802.1X there | yes |
+| `9999-external-rsn-no-psk.patch` | in external mode, discard every PSK field from the config and allow a passphrase-free BSS; reject SAE/OWE/802.1X there (relaxed by `9999a` when `external_rsn_sae=1`) | yes |
+| `9999a-external-rsn-sae.patch` | W46: `external_rsn_sae=1` + `EXT_AUTH_MGMT_TX` (raw Auth/AssocReq relay), and **`EXT_AUTH_TX` trims a trailing CR/LF** — without the trim every M1/M3 is rejected before TX (the daemon does not strip the control wire newline) | yes |
+| `9999b-external-rsn-tx-retval.patch` | W53: only a negative `hostapd_wpa_auth_send_eapol()` return is an error; the nl80211 `PF_PACKET` path returns the byte count, so a transmitted frame used to answer `FAIL` | yes |
 
 ## Build
 
@@ -36,8 +38,9 @@ Verify the series before building:
 
 It replays the 61 stock OpenWrt patches **merged with** this series, sorted by
 basename in C order — the same single pass OpenWrt performs — and exits
-non-zero on any rejected hunk or fuzz.  Current result: 4 patches, 41 hunks,
-0 fuzz (`999` 0, `9997` 0, `9998` +4, `9999` +1..+17).
+non-zero on any rejected hunk or fuzz.  Current result: 6 patches, 59 hunks,
+0 fuzz (`999` 0, `9997` 0, `9998` +4, `9999` +1..+17, `9999a` 0,
+`9999b` 0).
 
 `999-` (not `0999-`) is deliberate: the name must sort after the last stock
 patch, `804-…`.  A `0999-` name sorts before `110-…` and the package build

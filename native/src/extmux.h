@@ -48,6 +48,13 @@ struct extmux_vap {
     uint8_t txn_mac[6];
     uint64_t txn_deadline;
     unsigned txn_retries;
+    /* W53: hostapd ctrl TX / authorize capability, learned once per BSS.
+     * An EXT_AUTH_TX the hostapd build rejects (unknown command, FAULTY
+     * parser, no associated STA) switches this BSS to direct control-port
+     * TX for good: the EAPOL path never stalls on a per-frame retry and the
+     * log says it exactly once. */
+    int direct_tx;                  /* hostapd EXT_AUTH_TX unusable      */
+    int direct_authz;               /* hostapd EXT_AUTH_AUTHORIZE unusable */
     unsigned long rx_events, tx_cmds, authz_ok, authz_fail;
 };
 
@@ -97,6 +104,10 @@ struct extmux_cb {
     int  (*on_direct_tx)(void *ctx, const struct extmux_vap *v,
                          const uint8_t mac[6], const uint8_t *eapol,
                          size_t len);
+    /* Fallback when EXT_AUTH_AUTHORIZE is unavailable: authorize the
+     * station straight through nl80211 (SET_STATION AUTHORIZED). */
+    int  (*on_direct_authz)(void *ctx, const struct extmux_vap *v,
+                            const uint8_t mac[6]);
     /* Session reached AUTHORIZED (after hostapd replied OK). */
     void (*on_authorized)(void *ctx, const struct extmux_vap *v,
                           const uint8_t mac[6]);

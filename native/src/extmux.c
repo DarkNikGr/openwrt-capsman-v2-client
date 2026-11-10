@@ -416,7 +416,10 @@ static void txn_start(struct extmux *m, struct extmux_vap *v, int type,
     v->txn_type = type;
     memcpy(v->txn_mac, mac, 6);
     v->txn_deadline = now_ms() + m->txn_ms;
-    v->txn_retries = 0;
+    /* W53: txn_retries is owned by the caller.  Resetting it here made the
+     * AUTHORIZE retry counter immortal (every retry restarted at 0), so a
+     * hostapd that rejects the command was retried forever instead of
+     * failing over / failing the session. */
     if (type == 1)
         m->st.tx_ok++;
 }
@@ -431,7 +434,7 @@ static void sess_authorized(struct extmux *m, struct extmux_vap *v,
     s->retry_at = 0;
     m->st.authorized++;
     v->authz_ok++;
-    mlog(m, "extmux: AUTHORIZED port=0x%04x " MAC_FMT " (hostapd OK)",
+    mlog(m, "extmux: AUTHORIZED port=0x%04x " MAC_FMT " (ok)",
          v->port, MAC_ARG(s->mac));
     if (m->cb.on_authorized)
         m->cb.on_authorized(m->cb.ctx, v, s->mac);
@@ -451,6 +454,18 @@ static void authz_failed(struct extmux *m, struct extmux_vap *v,
         m->cb.on_deauth(m->cb.ctx, v, s->mac, 15);
 }
 
+/* One-shot report when hostapd rejects EXT_AUTH_TX for a BSS.  After this
+ * the VAP uses nl80211 control-port TX for every frame; no per-frame log. */
+static void tx_use_direct(struct extmux *m, struct extmux_vap *v,
+                          const char *why)
+{
+    if (v->direct_tx)
+        return;
+    v->direct_tx = 1;
+    mlog(m, "extmux: %s: hostapd rejected EXT_AUTH_TX (%s); this BSS now "
+         "uses direct nl80211 control-port TX", v->ifname, why);
+}
+
 /* A reply arrived for the in-flight command of this VAP. */
 static void txn_reply(struct extmux *m, struct extmux_vap *v, int ok,
                       const char *reply)
@@ -463,11 +478,18 @@ static void txn_reply(struct extmux *m, struct extmux_vap *v, int ok,
     }
     s = sess_find(m, v->port, v->txn_mac);
     if (v->txn_type == 1) {
-        /* EXT_AUTH_TX: a FAIL means hostapd had no associated STA yet. */
-        if (!ok && s && s->state != EXTMUX_AUTHORIZED)
-            mlog(m, "extmux: EXT_AUTH_TX FAIL port=0x%04x " MAC_FMT,
-                 v->port, MAC_ARG(v->txn_mac));
+        /* EXT_AUTH_TX: an error reply means this hostapd build cannot (or
+         * will not) send the frame.  Switch the BSS to direct control-port
+         * TX from now on.  Do not blind-reinject this frame: an old build
+         * can transmit it and still answer FAIL (its ctrl wrapper tested
+         * the positive driver return), and a duplicate M1 confuses the
+         * manager.  The next 0x201c / M1 retry uses the direct path. */
+        if (ok) {
+            v->txn_active = 0;
+            return;
+        }
         v->txn_active = 0;
+        tx_use_direct(m, v, reply[0] ? reply : "error reply");
         return;
     }
     /* AUTHORIZE */
@@ -482,7 +504,7 @@ static void txn_reply(struct extmux *m, struct extmux_vap *v, int ok,
     if (v->txn_retries < EXTMUX_MAX_AUTHZ_RETRIES) {
         char cmd[96];
         v->txn_retries++;
-        snprintf(cmd, sizeof(cmd), "EXT_AUTH_AUTHORIZE " MAC_FMT "\n",
+        snprintf(cmd, sizeof(cmd), "EXT_AUTH_AUTHORIZE " MAC_FMT,
                  MAC_ARG(v->txn_mac));
         m->st.authz_retries++;
         mlog(m, "extmux: authorize retry %u port=0x%04x " MAC_FMT,
@@ -491,6 +513,15 @@ static void txn_reply(struct extmux *m, struct extmux_vap *v, int ok,
         return;
     }
     v->txn_active = 0;
+    if (s && !v->direct_authz && m->cb.on_direct_authz &&
+        m->cb.on_direct_authz(m->cb.ctx, v, v->txn_mac) == 0) {
+        v->direct_authz = 1;
+        mlog(m, "extmux: %s: hostapd EXT_AUTH_AUTHORIZE unavailable (%s); "
+             "authorized " MAC_FMT " through nl80211", v->ifname, reply,
+             MAC_ARG(v->txn_mac));
+        sess_authorized(m, v, s);
+        return;
+    }
     if (s)
         authz_failed(m, v, s);
 }
@@ -676,7 +707,7 @@ void extmux_tick(struct extmux *m, uint64_t now)
                 v->txn_retries++;
                 m->st.authz_retries++;
                 snprintf(cmd, sizeof(cmd),
-                         "EXT_AUTH_AUTHORIZE " MAC_FMT "\n",
+                         "EXT_AUTH_AUTHORIZE " MAC_FMT,
                          MAC_ARG(v->txn_mac));
                 mlog(m, "extmux: authorize timeout, retry %u port=0x%04x",
                      v->txn_retries, v->port);
@@ -684,8 +715,16 @@ void extmux_tick(struct extmux *m, uint64_t now)
             } else if (v->txn_type == 2) {
                 struct extmux_sess *s = sess_find(m, v->port, v->txn_mac);
                 v->txn_active = 0;
-                if (s)
+                if (s && !v->direct_authz && m->cb.on_direct_authz &&
+                    m->cb.on_direct_authz(m->cb.ctx, v, v->txn_mac) == 0) {
+                    v->direct_authz = 1;
+                    mlog(m, "extmux: %s: no reply to EXT_AUTH_AUTHORIZE; "
+                         "authorized " MAC_FMT " through nl80211",
+                         v->ifname, MAC_ARG(v->txn_mac));
+                    sess_authorized(m, v, s);
+                } else if (s) {
                     authz_failed(m, v, s);
+                }
             } else {
                 v->txn_active = 0;      /* TX is best effort */
             }
@@ -697,8 +736,9 @@ void extmux_tick(struct extmux *m, uint64_t now)
                 if (s->used && s->port == v->port && s->authz_want) {
                     char cmd[96];
                     snprintf(cmd, sizeof(cmd),
-                             "EXT_AUTH_AUTHORIZE " MAC_FMT "\n",
+                             "EXT_AUTH_AUTHORIZE " MAC_FMT,
                              MAC_ARG(s->mac));
+                    v->txn_retries = 0;
                     txn_start(m, v, 2, s->mac, cmd);
                     break;
                 }
@@ -808,23 +848,41 @@ int extmux_tx(struct extmux *m, uint16_t port, const uint8_t mac[6],
     }
     if (fmt_hex(hex, sizeof(hex), eapol, len) == 0)
         return -1;
+    /* W53: hostapd ctrl_iface commands are newline-terminated only on the
+     * wire format wpa_ctrl uses; the daemon passes the buffer verbatim to
+     * the command parser.  EXT_AUTH_TX computes the hex length from the
+     * rest of the line, so a trailing '\n' made it odd and hostapd
+     * rejected every frame without sending it.  Send it bare. */
     if (encrypted)
-        snprintf(cmd, sizeof(cmd), "EXT_AUTH_TX " MAC_FMT " %s encrypt=1\n",
+        snprintf(cmd, sizeof(cmd), "EXT_AUTH_TX " MAC_FMT " %s encrypt=1",
                  MAC_ARG(mac), hex);
     else
-        snprintf(cmd, sizeof(cmd), "EXT_AUTH_TX " MAC_FMT " %s\n",
+        snprintf(cmd, sizeof(cmd), "EXT_AUTH_TX " MAC_FMT " %s",
                  MAC_ARG(mac), hex);
 
-    if (v->txn_active) {
+    if (v->direct_tx || v->txn_active) {
         m->st.tx_fallback++;
-        if (m->cb.on_direct_tx)
-            return m->cb.on_direct_tx(m->cb.ctx, v, mac, eapol, len);
+        if (m->cb.on_direct_tx) {
+            int r = m->cb.on_direct_tx(m->cb.ctx, v, mac, eapol, len);
+            if (r == 0)
+                m->st.tx_ok++;
+            else
+                m->st.tx_failed++;
+            return r;
+        }
         return -1;
     }
     if (ctrl_send(m, v, cmd) != 0) {
         m->st.tx_fallback++;
-        if (m->cb.on_direct_tx)
-            return m->cb.on_direct_tx(m->cb.ctx, v, mac, eapol, len);
+        tx_use_direct(m, v, "ctrl socket send failed");
+        if (m->cb.on_direct_tx) {
+            int r = m->cb.on_direct_tx(m->cb.ctx, v, mac, eapol, len);
+            if (r == 0)
+                m->st.tx_ok++;
+            else
+                m->st.tx_failed++;
+            return r;
+        }
         m->st.tx_failed++;
         return -1;
     }
