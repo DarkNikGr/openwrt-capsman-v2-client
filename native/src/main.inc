@@ -546,14 +546,35 @@ int main(int argc, char **argv)
         return 1;
     }
     char mgr[64];
+    const char *orig_manager = c.manager;
+    int auto_mgr = (!orig_manager || !*orig_manager ||
+                    !strcmp(orig_manager, "auto"));
     c.manager = choose_manager(&c, mgr, sizeof(mgr));
     printf("capagent: manager=%s:%s radios=%d discovery=%s verify=%s\n",
            c.manager, c.port, c.nradios,
            c.discovery_if ? c.discovery_if : "-",
            (c.dont_verify || !c.ca_cert) ? "no" : "ca");
     fflush(stdout);
+    unsigned attempt = 0;
     for (;;) {
+        /* W14: discovery used to run exactly once, so a CAP that booted
+           before its WAN lease was ready never found the manager again.
+           Re-resolve the address periodically while in auto mode. */
+        if (auto_mgr && c.manager && !*c.manager) {
+            c.manager = orig_manager;
+            const char *m = choose_manager(&c, mgr, sizeof(mgr));
+            if (m && *m) {
+                c.manager = m;
+                printf("capagent: manager re-resolved %s\n", m);
+                fflush(stdout);
+            }
+        }
         run_once(&c);
+        if (auto_mgr && (++attempt % 3) == 0) {
+            c.manager = orig_manager;
+            const char *m = choose_manager(&c, mgr, sizeof(mgr));
+            if (m && *m) c.manager = m;
+        }
         fprintf(stderr, "reconnect in 5s\n");
         sleep(5);
     }
