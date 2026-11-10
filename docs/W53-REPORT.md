@@ -141,6 +141,10 @@ Why it could not be re-run cleanly: the CAP was shared with W39/W40/W52/W54
 loops (multiple lock holders, two reboots at 22:09 and 22:12, zero-config
 windows from other tracks). The one clean window ended when a competing run
 took the device; afterwards the device was explicitly released on request.
+A second bounded attempt (`LOCK_BOUNDED=240`, run `live-20261111-010653`,
+`--mgmt-source monitor`, pinned station MAC, VAP-derived channel) waited the
+full 240 s and aborted without touching the device: `/tmp/cap-live.lock` was
+held by `/tmp/xx39/tmp39-run.sh` for the whole window.
 
 To finish the acceptance, with an undisturbed CAP (one bounded run):
 
