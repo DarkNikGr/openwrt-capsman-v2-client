@@ -389,6 +389,11 @@ mbedTLS (`make package/libs/mbedtls/compile` in the SDK); if it does not, pass
 `MBEDTLS_INC=`/`MBEDTLS_LIB=` explicitly. `make -C native check` runs the
 AES-CCM known-answer tests under `qemu-mipsel`.
 
+For the exact SDK/toolchain paths used for the 0.4.0 build, the hostapd and
+wifi-scripts package recipe, the patch-series check and the recorded hashes,
+see [`docs/BUILD.md`](docs/BUILD.md). The build is reproducible: two clean
+clones of the same commit produce the same binary.
+
 The version is printed by `capagent --version` (`0.4.0`) and stored in
 `VERSION`. Output: `dist/capagent-mipsel` / `dist/capagent-aarch64` (static,
 stripped). `dist/` is a local, gitignored build directory; published binaries

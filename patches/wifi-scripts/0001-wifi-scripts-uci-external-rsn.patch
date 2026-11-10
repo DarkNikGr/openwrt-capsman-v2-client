@@ -1,0 +1,40 @@
+--- a/package/network/config/wifi-scripts/files/lib/netifd/hostapd.sh	2026-11-10 19:58:38.289610532 +0200
++++ b/package/network/config/wifi-scripts/files/lib/netifd/hostapd.sh	2026-11-10 19:58:38.304443172 +0200
+@@ -269,6 +269,8 @@
+ 
+ 	config_add_int maxassoc max_inactivity
+ 	config_add_boolean disassoc_low_ack isolate short_preamble skip_inactivity_poll
++	config_add_boolean external_rsn_auth
++	config_add_string ext_auth_socket
+ 
+ 	config_add_int \
+ 		wep_rekey eap_reauth_period \
+@@ -610,6 +612,7 @@
+ 		multicast_to_unicast_all proxy_arp per_sta_vif \
+ 		eap_server eap_user_file ca_cert server_cert private_key private_key_passwd server_id radius_server_clients radius_server_auth_port \
+ 		vendor_elements fils ocv apup
++	json_get_vars external_rsn_auth ext_auth_socket
+ 
+ 	set_default fils 0
+ 	set_default isolate 0
+@@ -634,6 +637,7 @@
+ 	set_default airtime_bss_limit 0
+ 	set_default eap_server 0
+ 	set_default apup 0
++	set_default external_rsn_auth 0
+ 
+ 	/usr/sbin/hostapd -vfils || fils=0
+ 
+@@ -641,6 +645,12 @@
+ 	if [ "$isolate" -gt 0 ]; then
+ 		append bss_conf "ap_isolate=$isolate" "$N"
+ 	fi
++	# split-MAC CAP: hostapd keeps beacon/auth/assoc/RSN IE; the CAP daemon
++	# owns the 4-way handshake and installs the manager's keys.
++	[ "$external_rsn_auth" -gt 0 ] && \
++		append bss_conf "external_rsn_auth=1" "$N"
++	[ -n "$ext_auth_socket" ] && \
++		append bss_conf "ext_auth_socket=$ext_auth_socket" "$N"
+ 	if [ "$maxassoc" -gt 0 ]; then
+ 		append bss_conf "max_num_sta=$maxassoc" "$N"
+ 	fi
