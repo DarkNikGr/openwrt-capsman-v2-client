@@ -161,10 +161,8 @@ static void vap_write_channel(FILE *f, uint32_t freq, int wcode)
         if (chan < 1 || chan > 14) chan = 6;
         int width = (wcode == 2 || wcode == 3) ? 40 : 20;
         fprintf(f, "hw_mode=g\nchannel=%d\nieee80211n=1\n", chan);
-        if (width == 40) {
+        if (width == 40)
             fprintf(f, "ht_capab=[HT40%c]\n", chan <= 7 ? '+' : '-');
-            fprintf(f, "noscan=1\n");       /* W54: no 40 MHz coex scan */
-        }
         return;
     }
 
@@ -178,6 +176,8 @@ static void vap_write_channel(FILE *f, uint32_t freq, int wcode)
     }
 
     fprintf(f, "hw_mode=a\nchannel=%d\n", chan);
+    int sign = width >= 40 ? vap_ht40_sign5(freq) : 0;
+    if (width >= 40 && !sign) width = 20;
     /* W54: never let hostapd run the 40 MHz coexistence scan
      * (HAPD_IFACE_HT_SCAN, ieee80211n_check_40mhz()).  On mt76x02 one
      * wiphy = one channel, so the offchannel scan that hostapd issues
@@ -186,20 +186,18 @@ static void vap_write_channel(FILE *f, uint32_t freq, int wcode)
      * hostapd falls back to HT20, which then cannot carry the VHT80
      * centre frequency ("80/80+80 MHz: no second channel offset") and the
      * BSS ends AP-DISABLED -- the W38 "5 GHz per-BSS hostapd hangs in D"
-     * symptom.  noscan=1 skips only the scan; HT40 and VHT80 stay.  The
-     * stock OpenWrt hostapd already ships this option (300-noscan.patch)
-     * and netifd sets ht_coex=0 for the same reason. */
-    if (width >= 40) fprintf(f, "noscan=1\n");
+     * symptom.  W56: only the VHT80 case needs (and has proven) this,
+     * and a DFS channel must keep its CAC/radar scan, so noscan is never
+     * written for a DFS primary.  The stock OpenWrt hostapd already ships
+     * this option (300-noscan.patch) and netifd sets ht_coex=0. */
+    if (width >= 80 && !vap_is_dfs_chan(chan)) fprintf(f, "noscan=1\n");
     if (g_vap_country && g_vap_country[0])
         fprintf(f, "country_code=%s\nieee80211d=1\n%s\n", g_vap_country,
                 vap_is_dfs_chan(chan) ? "ieee80211h=1" : "");
     fprintf(f, "ieee80211n=1\nieee80211ac=1\n");
 
-    if (width >= 40) {
-        int sign = vap_ht40_sign5(freq);
-        if (!sign) width = 20;
-        else fprintf(f, "ht_capab=[HT40%c]\n", sign > 0 ? '+' : '-');
-    }
+    if (width >= 40)
+        fprintf(f, "ht_capab=[HT40%c]\n", sign > 0 ? '+' : '-');
     if (width >= 80) {
         fprintf(f, "vht_oper_chwidth=1\n");
         fprintf(f, "vht_oper_centr_freq_seg0_idx=%u\n",
