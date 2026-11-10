@@ -30,3 +30,5 @@ out/
 
 # W34 qemu-test scratch
 native/.w34-tests/
+# per-arch agent binaries built in-tree by native/Makefile
+native/capagent-aarch64

@@ -17,7 +17,8 @@ STRIP=${CROSS}strip
     echo "mbedTLS static libs not found in ${MBEDTLS}" >&2; exit 1; }
 mkdir -p "$(dirname "${OUT}")"
 "${CC}" -O2 -Wall -Wextra -Wno-unused-parameter -I"${MBEDTLS}/include" \
-    -o "${OUT}" "${ROOT}/native/capagent.c" \
+    -I"${ROOT}/native/src" \
+    -o "${OUT}" "${ROOT}/native/capagent.c" "${ROOT}/native/src/extmux.c" \
     "${MBEDTLS}/library/libmbedtls.a" \
     "${MBEDTLS}/library/libmbedx509.a" \
     "${MBEDTLS}/library/libmbedcrypto.a" -static

@@ -686,26 +686,6 @@ static void mgmt_vap_add(int ifindex)
         mgmt_monitor_add(ifindex);
 }
 
-static int mgmt_open(void)
-{
-    static int joined;
-    int grp;
-    if (g_nl_evt_fd < 0) {
-        if (nl_cmd_open() != 0) return -1;
-        g_nl_evt_fd = nl_open_socket();
-        if (g_nl_evt_fd < 0) return -1;
-    }
-    if (joined) return 0;
-    grp = nl_resolve_group(g_nl_evt_fd, "mlme");
-    if (grp >= 0)
-        setsockopt(g_nl_evt_fd, SOL_NETLINK, NETLINK_ADD_MEMBERSHIP,
-                   &grp, sizeof(grp));
-    joined = 1;
-    printf("mgmt: event socket=%d mlme-group=%d\n", g_nl_evt_fd, grp);
-    fflush(stdout);
-    return 0;
-}
-
 /* Production nl80211 event service. */
 static void mgmt_service_nl(mbedtls_ssl_context *ssl, struct dc_ctx *dc,
                             const struct cfg *c)
@@ -1405,4 +1385,25 @@ static void cap_extmux_stop(const struct cfg *c)
     g_extmux = NULL;
     printf("EXTMUX: stopped\n");
     fflush(stdout);
+}
+
+/* Restored from 5364e76: used by the in-CAP MLME path (mlme.inc). */
+static int mgmt_open(void)
+{
+    static int joined;
+    int grp;
+    if (g_nl_evt_fd < 0) {
+        if (nl_cmd_open() != 0) return -1;
+        g_nl_evt_fd = nl_open_socket();
+        if (g_nl_evt_fd < 0) return -1;
+    }
+    if (joined) return 0;
+    grp = nl_resolve_group(g_nl_evt_fd, "mlme");
+    if (grp >= 0)
+        setsockopt(g_nl_evt_fd, SOL_NETLINK, NETLINK_ADD_MEMBERSHIP,
+                   &grp, sizeof(grp));
+    joined = 1;
+    printf("mgmt: event socket=%d mlme-group=%d\n", g_nl_evt_fd, grp);
+    fflush(stdout);
+    return 0;
 }

@@ -490,7 +490,8 @@ static void usage(const char *p)
         "  --lab-ssid SSID              lab SSID (default T14-CAP)\n"
         "  --lab-chan N                 lab channel (default 1)\n"
         "  --mlme                       in-CAP MLME for one VAP (no hostapd)\n"
-        "  --mlme-port PORT             VAP port, default 0x0000 (2.4 master)\n",
+        "  --mlme-port PORT             VAP port, default 0x0000 (2.4 master)\n"
+        "  --version                    print the version and exit\n",
         p);
 }
 
@@ -586,11 +587,12 @@ int main(int argc, char **argv)
         {"mlme", no_argument, 0, OPT_MLME},
         {"mlme-port", required_argument, 0, OPT_MLME_PORT},
         {"help", no_argument, 0, 'h'},
+        {"version", no_argument, 0, 'V'},
         {0,0,0,0}
     };
     int o;
     int check_wireless = 0;
-    while ((o = getopt_long(argc, argv, "m:p:c:k:i:a:h", opts, NULL)) != -1) {
+    while ((o = getopt_long(argc, argv, "m:p:c:k:i:a:hV", opts, NULL)) != -1) {
         switch (o) {
         case 'm': c.manager = optarg; break;
         case 'p': c.port = optarg; break;
@@ -678,6 +680,9 @@ int main(int argc, char **argv)
         case OPT_LAB_AP: c.lab_iface = optarg; break;
         case OPT_LAB_SSID: c.lab_ssid = optarg; break;
         case OPT_LAB_CHAN: c.lab_chan = atoi(optarg); break;
+        case 'V':
+            printf("capagent %s\n", CAPAGENT_VERSION);
+            return 0;
         default: usage(argv[0]); return 1;
         }
     }

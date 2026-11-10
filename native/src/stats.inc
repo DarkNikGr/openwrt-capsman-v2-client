@@ -116,7 +116,9 @@ static void emit_station(mbedtls_ssl_context *ssl, int phy, int vap,
         printf("stats tx %02x:%02x:%02x:%02x:%02x:%02x phy=%d vap=%d "
                "sig=%d freq=%u txr=%u rxr=%u rx=%llu tx=%llu rxp=%llu txp=%llu\n",
                mac[0], mac[1], mac[2], mac[3], mac[4], mac[5],
-               phy, vap, sig, freq, tx_kbps, rx_kbps, rx, tx, rxp, txp);
+               phy, vap, sig, freq, tx_kbps, rx_kbps,
+               (unsigned long long)rx, (unsigned long long)tx,
+               (unsigned long long)rxp, (unsigned long long)txp);
         fflush(stdout);
     }
 

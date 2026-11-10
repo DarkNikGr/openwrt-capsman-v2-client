@@ -5,8 +5,10 @@ CAPsMAN v2 manager, the manager provisions every SSID/VLAN/security setting,
 clients connect with the manager's credentials, and **nothing on the CAP needs
 SSH, a local wireless file or a second service**.
 
-Current reality: control plane joins, but the BSSes come from a local
-`/etc/config/wireless`. That is manual configuration and is **not** the goal.
+Current reality: the control plane joins, the manager provisions 8/8 VAPs with
+no local `wifi-iface`, and the CAP creates the netdevs and starts one hostapd
+per VAP with no PSK. What is still missing is the 5 GHz start, VAP teardown and
+the **hardware/factory-reset proof** — see `docs/MANAGER-ONLY.md`.
 
 ---
 
@@ -23,28 +25,23 @@ Current reality: control plane joins, but the BSSes come from a local
 | F7 | **With zero `wifi-iface` on the CAP the manager still provisions all 8 VAPs** (`0x6016` for ports 0x0000/0x0100/0x0001-3/0x0101-3) and installs 6 key sets. The `0xd00b` reply we already send is accepted. | live zero-config run, `work-V22/ZERO-CONFIG-FINDING.md` |
 | F8 | The CAP can create the netdevs itself from `0x500b` and spawn hostapd from `0x6016` (SSID + RSN IE + channel, `external_rsn_auth=1`, no PSK). Live: 8/8 created, 8 hostapd, the 4 x 2.4 GHz BSSes carry the manager's SSIDs. | `src/vap.inc`, commit 1bd9d78 |
 | F9 | The EAPOL relay works on the real RB1100: STA M2 -> `0x201b` -> manager -> `0x201c` M3 back. | live log `EXT-AUTH: EAPOL ... -> 0x201b` |
-| F10 | Remaining blocker: the station rejects M3 because hostapd's beacon RSN IE (caps `0x008c`, no GMCS) differs from the manager's (`0x0080` + BIP-CMAC `00:0f:ac:06`). | station log `IE in 3/4 msg does not match` |
-| F11 | **Ownership invariant (W33 API, W34 model)**: production decides per netdev from `ubus call network.wireless status` + a port→ifname/ifindex/pid/owner journal. A netifd name is never created/deleted/started/keyed; a capagent name is fully managed; the manager VAP yields to netifd names (`cap<phy>-<vapid>`). `--wireless-owner legacy` forces the old fully read-only contract. | `native/src/ownership.inc`, `native/src/policy.inc`, `--selftest-policy`, `REPORT.md` |
-| F12 | `0x600c` now releases the vapid/port/BSS bookkeeping (it used to leak a slot per destroy and wedge at 16), and tears down netdev/hostapd only for objects capagent created. | `vap_destroy()`, `docs/W33-OWNERSHIP.md` §R3 |
+| F10 | RSN-IE mismatch fixed at the CAP side: patch `9997-external-rsn-ie.patch` makes hostapd advertise the manager's 28-byte M3 element byte-for-byte; `vap.inc` writes `external_rsn_ie` when the installed `wpad` supports it. Verified on the host (`RSN: Own IEs` identical) and on the mipsel binary under qemu; station-side acceptance on hardware still pending. | `docs/patches/9997-…`, `native/src/vap.inc` |
+| F11 | The zero-touch sysupgrade image (capagent + certificate + CA + patched `wpad`, no SSH/firewall/DHCP) is built and passes 55/55 static content checks, but it has **never been flashed**, so boot, factory reset and rejoin are unverified on hardware. | image content check, `docs/MANAGER-ONLY.md` §2.3 |
+| F12 | The 5 GHz start failure is a config-shape problem (VHT80 without `vht_oper_centr_freq_seg0_idx`, no HT40 secondary, no `country_code`), not DFS or a driver limit. A candidate fix was investigated but is **not merged** in 0.4.0. | `docs/MANAGER-ONLY.md` §2.2 |
 
 ## Open blockers (ranked)
 
-1. **Beacon RSN IE must equal the manager's M3 RSN IE byte-for-byte** — hostapd
-   regenerates it with different capabilities and without the group-management
-   cipher. Needs a forced RSN IE in the generated hostapd config (W21/W24).
-2. **5 GHz hostapd start fails** on the MT7612E (DFS/regulatory/centre-freq);
-   the driver refuses the AP. 2.4 GHz is up. (W33: reproduced on the live
-   device — `Match already configured` for the first BSS, `Resource busy` for
-   the rest; the 5 GHz wiphy allows only 4 interfaces total
-   (`iw list`), i.e. one hostapd **per radio** with `bss=` sections is the
-   structural fix, not one process per BSS.)
-3. **VAP lifecycle** — W33 fixed the leak: `0x600c` releases the vapid/port/BSS
-   bookkeeping and (own mode only) stops our hostapd and deletes our netdev.
-   Still open: reuse of a VAP id across a *manager-driven* SSID change on the
-   same port without a destroy, and validating the whole cycle against a
-   genuine CAP capture.
-4. **Zero-touch boot** — client + certificate + hostapd must live in ROM
-   (custom image), otherwise a factory reset removes them.
+1. **Hardware proof** — the zero-touch image is built and content-verified but
+   was never flashed; boot, factory reset, rejoin and 8/8 re-provision are
+   unproven. This is the last acceptance gate, not a code change.
+2. **5 GHz hostapd start** on the MT7612E: the generated config needs a
+   regulatory domain, HT40 secondary and `vht_oper_centr_freq_seg0_idx` before
+   VHT80 can resolve a channel. Candidate fix not merged (F12).
+3. **VAP lifecycle** — `0x600c` never stops hostapd/deletes the netdev/releases
+   the id, so a second create cycle for the same port can duplicate or wedge
+   (W25/W28).
+4. **Station-side M3 acceptance** with the patched `wpad` on real hardware
+   (one `wpa_supplicant -dd` connect); the IE bytes are already equal.
 5. **No manual fallback allowed** — no SSH-driven bootstrap, no local
    `wireless` file, no second daemon on the manager.
 
@@ -78,8 +75,9 @@ Current reality: control plane joins, but the BSSes come from a local
     AssocResp template handling.
 14. Boot sequence of a genuine CAP: discovery, certificate, DHCP, ordering vs
     netifd/hostapd start; derive the correct `START=` ordering.
-15. Custom OpenWrt image: client + cert + config in ROM, first-boot join with
-    no overlay; factory-reset acceptance test.
+15. Custom OpenWrt image: built and content-verified (client + cert + patched
+    `wpad` in ROM); the first-boot join and factory-reset acceptance run are
+    still pending on hardware.
 16. Certificate lifecycle: enrolment (`0x76`/`0x77`/`0x78`), renewal, and what
     happens when the manager rotates its CA.
 17. Regression harness: one command that joins, waits for 8/8 VAPs, associates
