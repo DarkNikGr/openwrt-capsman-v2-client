@@ -113,3 +113,46 @@ the **hardware/factory-reset proof** — see `docs/MANAGER-ONLY.md`.
 * no PSK on the CAP (or, if unavoidable, proof that it is not needed);
 * 8/8 VAPs visible in `/interface wifi`, clients get DHCP on the right VLAN;
 * recovery after manager/CAP reboot without touching the device.
+
+---
+
+## Update 2026-11-11 — what is resolved and what is left
+
+Resolved and merged into `main`:
+
+* **Manager-only VAP creation** — `0x500b` creates the netdev (real ifindex in
+  `0xd00b`), `0x6016` starts a per-VAP hostapd with `external_rsn_auth=1`, no
+  passphrase, and the manager's exact RSN IE (`external_rsn_ie`). 8/8 VAPs are
+  provisioned with zero `wifi-iface`.
+* **PSK-free 4-way** — the manager authenticates; the CAP relays (`0x2018`,
+  `0x201b`, `0x201c`) and installs `0x201f` keys. Lab: WPA2-PSK 10/10,
+  SAE and OWE 14/14, key-free CAP.
+* **Channel table** — one `0x0a` descriptor per (frequency, band, width),
+  `BODY_MAX` 8192, so `2ghz-n` and `5ghz-ac` profiles start (live-proven).
+* **Ownership** — ubus → uci → `/etc/config/wireless` → refuse; netifd always
+  wins a name, MLD netdevs are never adopted, unknown means read-only.
+* **Lifecycle** — full `0x600c` teardown, idempotent create, vapid release,
+  orphan reaping; live 3 cycles × 8 VAPs, 0 failures.
+* **5 GHz per-BSS start** — mt76x02 BSS index from MAC byte 0, legal-address
+  allocator, `noscan` for non-DFS VHT80, monitor never index 0; 8/8 hostapd
+  `AP-ENABLED` in isolation.
+* **Recovery** — new-session deauth, frame deadline, silence reconnect,
+  fail-closed TLS.
+* **Zero-touch enrolment** — CSR `0x76` → `0x77`/`0x78`, random CN, re-enrol on
+  duplicate/expired cert or CA rotation; no certificate needed in ROM.
+* **EXT_AUTH_TX interop** — the daemon did not strip the control-wire newline,
+  so every M1/M3 was rejected before TX. Fixed, with a one-shot fallback to
+  `nl80211` control-port TX.
+
+Still open:
+
+1. **Full live manager-only run is not green end to end**: with the newest
+   build the manager provisions 8 VAPs and the configs are correct, but a 5 GHz
+   hostapd still lands in state `D`, a netifd-named `phy0-ap0` is created next
+   to the ownership names, and no station completes the 4-way. Needs one quiet
+   window to bisect (start serialisation vs VAP renaming vs BSS index).
+2. **Repeated `0x6016`** can still spawn extra hostapd attempts in that run.
+3. **Factory-reset on hardware** — the zero-touch image passes 55/55 static
+   checks and has never been flashed.
+4. **Multi-VAP concurrency** for SAE/OWE/PMF and **GTK rekey soak** are not
+   proven on hardware.
