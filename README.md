@@ -41,13 +41,21 @@ OpenWrt 24.10, MediaTek MT7603E + MT7612E), managed by an
 >   + patched `wpad` in ROM, no SSH/firewall/DHCP) passes 55/55 static content
 >   checks but has **never been flashed**; boot, factory reset, rejoin and 8/8
 >   re-provision are unverified on the device.
-> * **5 GHz hostapd start** still fails on the MT7612E (VHT80 centre-frequency /
->   HT40 / regulatory config); the four 2.4 GHz BSSes come up, 5 GHz does not.
-> * **VAP lifecycle**: `0x600c` does not stop hostapd / delete the netdev /
->   release the vapid, so a repeated create for the same port can duplicate or
->   wedge.
-> * **Station-side M3 acceptance** with the patched `wpad` has not been observed
->   on a real client yet.
+> * **The live manager-only acceptance is not green end to end yet.** The last
+>   run with `1a5f48c` created 8 VAPs and generated correct PSK-free configs,
+>   but a 5 GHz `hostapd` still ended in state `D` and a netifd-named
+>   `phy0-ap0` was created alongside the ownership table's `cap0-*` names, so
+>   fewer than 8 SSIDs came up and no station completed the 4-way.
+> * **5 GHz per-BSS start** works in isolation (8/8 `AP-ENABLED`, W54/W56:
+>   mt76x02 derives its BSS index from MAC byte 0, VHT80 needs `noscan`, the
+>   monitor must not take index 0) but is not stable under the full
+>   manager-only run with the ownership renaming.
+> * **Repeated `0x6016`** can still spawn extra hostapd attempts in that same
+>   run; W52's budget/serialisation is in `main` and needs re-validation in a
+>   quiet window.
+> * The station-side M3 acceptance **is** observed now: the exact RSN IE
+>   (`external_rsn_ie`) removed `IE in 3/4 msg does not match`, and the lab
+>   completes WPA2-PSK (10/10), SAE and OWE (14/14) with a key-free CAP.
 > * There is still **no configuration tree** in CAPsMAN v2. The manager sends
 >   SSID + RSN/WPA IE + channel and the CAP builds the BSS from that; it never
 >   sends the passphrase, because it is the authenticator.
