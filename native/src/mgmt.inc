@@ -849,8 +849,29 @@ static void ext_auth_service(mbedtls_ssl_context *ssl, struct dc_ctx *dc,
                 buf[n] = 0;
                 buf[strcspn(buf, "\r\n")] = 0;
                 if (!strncmp(buf, "ASSOC ", 6)) {
-                    printf("EXT-AUTH: %s (ignored, 0x2018 came from mgmt)\n",
-                           buf);
+                    /* The patched hostapd also relays the raw frames as
+                     * "AUTH "/"ASSOCREQ "; those are what the manager needs in
+                     * 0x2018.  Keep this line for the mgmt-source path. */
+                    printf("EXT-AUTH: %s (mgmt-source owns 0x2018)\n", buf);
+                } else if (!strncmp(buf, "AUTH ", 5) ||
+                           !strncmp(buf, "ASSOCREQ ", 9)) {
+                    /* Radios with too few interfaces for a monitor VIF (the
+                     * MT7603E allows four, all used by the BSSes) cannot use
+                     * the mgmt-source relay.  hostapd already parsed the real
+                     * Auth/AssocReq, so forward those frames instead. */
+                    const char *rest = buf + (buf[4] == ' ' ? 5 : 9);
+                    uint8_t mac[6], fr[BODY_MAX];
+                    if (parse_mac_str(rest, mac) == 0) {
+                        const char *hx = strchr(rest, ' ');
+                        if (hx && hx[1]) {
+                            size_t fl = parse_hex(hx + 1, fr, sizeof(fr));
+                            uint32_t freq = v->freq;
+                            if (!freq) freq = phy_freq_hint(v->rid);
+                            if (fl >= 24 && freq)
+                                send_2018_frame(ssl, v->rid, v->wid, fr, fl,
+                                                freq, 0, "ext-auth");
+                        }
+                    }
                 } else if (!strncmp(buf, "DISCONNECT ", 11)) {
                     uint8_t mac[6];
                     uint8_t b[BODY_MAX];

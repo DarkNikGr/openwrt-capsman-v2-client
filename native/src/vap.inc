@@ -140,6 +140,8 @@ static int hostapd_binary_has(const char *needle)
     return hit == nl;
 }
 
+static int hostapd_has_opt(const char *needle);
+
 static int hostapd_has_rsn_override(void)
 {
     static int cached = -1;
@@ -162,6 +164,25 @@ static int hostapd_has_mgmt_tx(void)
     static int cached = -1;
     if (cached < 0) cached = hostapd_binary_has("EXT_AUTH_MGMT_TX");
     return cached;
+}
+
+/* Generic probe: does the installed wpad understand this config keyword? */
+static int hostapd_has_opt(const char *needle)
+{
+    FILE *f = fopen("/usr/sbin/wpad", "rb");
+    if (!f) f = fopen("/usr/sbin/hostapd", "rb");
+    if (!f) return 0;
+    size_t nl = strlen(needle), hit = 0;
+    int c, found = 0;
+    while ((c = fgetc(f)) != EOF) {
+        if ((char)c == needle[hit]) {
+            if (++hit == nl) { found = 1; break; }
+        } else {
+            hit = ((char)c == needle[0]) ? 1 : 0;
+        }
+    }
+    fclose(f);
+    return found;
 }
 
 /* True when a legacy UCI file owns BSSes (then we must not touch them).
@@ -453,6 +474,10 @@ static int vap_hostapd_start_one(int port, const char *ifname, int phy, int vapi
         if (have_sae && ri.akm_sae)
             fprintf(f, "sae_pwe=2\n");
         fprintf(f, "external_rsn_auth=1\n");
+        /* 9999a: also relay the raw Auth/AssocReq, which is the only way to
+         * feed the manager on radios that cannot afford a monitor VIF. */
+        if (hostapd_has_opt("external_rsn_sae"))
+            fprintf(f, "external_rsn_sae=1\n");
         if (c->ext_auth_dir)
             fprintf(f, "ext_auth_socket=%s/ext-auth-%s\n", c->ext_auth_dir,
                     ifname);
