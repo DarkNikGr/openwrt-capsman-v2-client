@@ -146,13 +146,23 @@ Resolved and merged into `main`:
 
 Still open:
 
-1. **Full live manager-only run is not green end to end**: with the newest
+1. **0x2018 relay on a 4-interface radio**: the MT7603E allows four interfaces
+   and all four are BSSes, so the monitor VIF is refused; hostapd owns
+   `REGISTER_FRAME`. Fixed in `58a3149` by forwarding hostapd's raw
+   `AUTH`/`ASSOCREQ` (relayed by patch `9999a`, enabled with
+   `external_rsn_sae=1`) as `0x2018`. Needs a live run with a wpad that carries
+   `9999a` to confirm M1 -> M2 -> M3.
+2. **Full live manager-only run is not green end to end**: with the newest
    build the manager provisions 8 VAPs and the configs are correct, but a 5 GHz
    hostapd still lands in state `D`, a netifd-named `phy0-ap0` is created next
    to the ownership names, and no station completes the 4-way. Needs one quiet
    window to bisect (start serialisation vs VAP renaming vs BSS index).
-2. **Repeated `0x6016`** can still spawn extra hostapd attempts in that run.
-3. **Factory-reset on hardware** — the zero-touch image passes 55/55 static
+3. **Repeated `0x6016`** can still spawn extra hostapd attempts in that run.
+4. **Legacy mode is not fully passive**: a stale journal (`capagent-vaps.state`)
+   makes the reconcile loop start hostapd on netifd-owned BSSes even when
+   ownership says `legacy`. `vap_provision()` is gated (`3582444`); the
+   reconcile path still needs the same gate.
+5. **Factory-reset on hardware** — the zero-touch image passes 55/55 static
    checks and has never been flashed.
-4. **Multi-VAP concurrency** for SAE/OWE/PMF and **GTK rekey soak** are not
+6. **Multi-VAP concurrency** for SAE/OWE/PMF and **GTK rekey soak** are not
    proven on hardware.
