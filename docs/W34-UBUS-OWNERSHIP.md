@@ -1,3 +1,7 @@
+> **Status:** historical track record — the behaviour it describes is
+> merged into `main`. Canonical docs: [MANAGER-ONLY](MANAGER-ONLY.md),
+> [ARCHITECTURE](ARCHITECTURE.md), [OPEN-PROBLEMS](OPEN-PROBLEMS.md).
+
 # W34 — ubus ownership on top of the W33 policy surface
 
 W34 keeps the W33 API (`src/policy.inc`) and replaces the config-file

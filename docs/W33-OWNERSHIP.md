@@ -1,3 +1,7 @@
+> **Status:** historical track record — the behaviour it describes is
+> merged into `main`. Canonical docs: [MANAGER-ONLY](MANAGER-ONLY.md),
+> [ARCHITECTURE](ARCHITECTURE.md), [OPEN-PROBLEMS](OPEN-PROBLEMS.md).
+
 # W33 — ownership invariant, deterministic VAPs, key-install refresh
 
 Audit of `be2e23d` (extmux + SDK build), `38581fc` (per-BSS relay / 0x2018 /

@@ -1,3 +1,7 @@
+> **Status:** historical track record — the behaviour it describes is
+> merged into `main`. Canonical docs: [MANAGER-ONLY](MANAGER-ONLY.md),
+> [ARCHITECTURE](ARCHITECTURE.md), [OPEN-PROBLEMS](OPEN-PROBLEMS.md).
+
 # W27 — integration of W8 (multi-VAP relay), W6 (0x2018/0x2019), W14 (boot/reconnect)
 
 Base: `3fbcaa6` (which already carries the earlier W14 re-resolve commit
