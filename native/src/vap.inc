@@ -925,6 +925,10 @@ static int vap_refresh_ifindex(int port, uint8_t mac[6], int *changed)
 static void vap_provision(int port, const uint8_t *body, uint16_t len,
                           const struct cfg *c)
 {
+    /* Hard gate: when netifd (legacy UCI or any other owner) owns the
+     * BSSes we must never create, start or touch one, even if the
+     * manager asks.  This is the read-only contract. */
+    if (wl_legacy()) return;
     int phy = (port >> 8) & 0xff;
     int vapid = port & 0xff;
     vap_set_regdomain();
