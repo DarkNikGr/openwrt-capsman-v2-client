@@ -70,7 +70,7 @@ w34-tests:
 	    -o $(W34_TEST_DIR)/test_netifd_status ../tests/test_netifd_status.c
 	$(QEMU) $(W34_TEST_DIR)/test_netifd_status
 
-check: capagent-mipsel w34-tests extmux-test
+check: capagent-mipsel w34-tests extmux-test iw-freq-test
 	$(QEMU) ./capagent-mipsel --crypto-selftest
 	$(QEMU) ./capagent-mipsel --selftest-policy
 
@@ -82,8 +82,15 @@ extmux-test: $(SRCS) $(HDRS) tests/test_extmux.c
 	    tests/test_extmux.c src/extmux.c
 	$(W53_TEST_DIR)/test_extmux
 
+# Pure host test: no cross-toolchain, radio, or manager required.
+iw-freq-test: tests/test_iw_freq.c src/iw_freq.inc
+	mkdir -p $(W53_TEST_DIR)
+	$(HOSTCC) -O2 -Wall -Wextra -Werror -o $(W53_TEST_DIR)/test_iw_freq \
+	    tests/test_iw_freq.c
+	$(W53_TEST_DIR)/test_iw_freq
+
 clean:
 	rm -f capagent-mipsel
 	rm -rf $(W34_TEST_DIR) $(W53_TEST_DIR)
 
-.PHONY: all check clean w34-tests extmux-test
+.PHONY: all check clean w34-tests extmux-test iw-freq-test
