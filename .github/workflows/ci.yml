@@ -73,8 +73,11 @@ jobs:
       # Static capagent-mipsel build; W34 ownership + netifd tests,
       # --crypto-selftest (AES-CCM KATs) and --selftest-policy under
       # qemu-mipsel.  `make check` also runs extmux-test with the host cc.
+      # W34_TEST_DIR becomes OWN_RUN_DIR in test_ownership, which formats
+      # pidfile paths into 96-byte buffers; the default under the runner's
+      # checkout (native/.w34-tests) is too long and truncates them.
       - name: make -C native check
-        run: make -C native check
+        run: make -C native check W34_TEST_DIR="$RUNNER_TEMP/w34"
 
       # make check builds extmux-test for the host only; also run it in the
       # target ABI (same flags as the extmux-test target, plus -static).

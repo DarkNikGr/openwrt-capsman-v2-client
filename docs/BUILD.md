@@ -368,6 +368,12 @@ x86_64 Linux host with `qemu-user` installed:
 make -C native $(scripts/ci-setup-mipsel.sh ~/cap-ci) check
 ```
 
+CI passes `W34_TEST_DIR=$RUNNER_TEMP/w34` to `make check`.  `test_ownership`
+uses that directory as `OWN_RUN_DIR`, and `src/ownership.inc` builds pidfile
+paths from it in 96-byte buffers, so a long checkout path (as on GitHub
+runners) truncates them and the "capagent restart" case fails.  The
+production `OWN_RUN_DIR` (`/var/run`) is not affected.
+
 Not covered by CI: the aarch64 build, `scripts/patches-check.sh` (needs the
 hostapd tarball and SDK), the `wpad-mbedtls` package build,
 `scripts/test-pmap-refresh.sh` (needs root for a dummy interface), and the
