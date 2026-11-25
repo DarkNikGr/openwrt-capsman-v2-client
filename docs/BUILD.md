@@ -341,3 +341,34 @@ RESULT: FAIL (1 patch(es) failed)
   before compiling (the Makefiles set it only for the *host* variant).
   `ucode` also needs `package/libs/{libmd,udebug}` overlaid next to it, or its
   configure step stops at `Package 'libmd' not found`.
+
+## 8. Continuous integration
+
+`.github/workflows/ci.yml` runs on pull requests to `main`, on pushes to
+`main`, and on demand.  It uses GitHub-hosted `ubuntu-24.04` runners with a
+read-only token and no secrets, and needs no hardware or RouterOS.
+
+| job | what runs |
+|---|---|
+| Host tests (gcc) | `make -C native extmux-test`, `tests/run-w34-tests.sh` |
+| Host tests (gcc, ASan + UBSan) | the same, with `-fsanitize=address,undefined -fno-sanitize-recover=all` |
+| mipsel cross-build + qemu-mipsel tests | `make -C native check`, plus `test_extmux` built `-static` for mipsel and run under `qemu-mipsel` |
+
+The mipsel job gets its inputs from `scripts/ci-setup-mipsel.sh`: the
+OpenWrt 24.10.0 ramips/mt7621 **toolchain** (GCC 13.3.0, r28427-6df0e3d02a,
+44 MB; the same release as the SDK in §1) and mbedTLS 3.6.2 built with its
+default config (which has `MBEDTLS_CCM_C`).  The mbedTLS input is the official
+release asset `mbedtls-3.6.2.tar.bz2` (`8b54fb9b…`), not the GitHub tag
+archive pinned in §1 (`a3c95977…`); both are 3.6.2.  Both downloads are
+checked against SHA-256 values pinned in the script.  CI does not compare the
+resulting binary against the §2 reference hash.  To reproduce the job on an
+x86_64 Linux host with `qemu-user` installed:
+
+```sh
+make -C native $(scripts/ci-setup-mipsel.sh ~/cap-ci) check
+```
+
+Not covered by CI: the aarch64 build, `scripts/patches-check.sh` (needs the
+hostapd tarball and SDK), the `wpad-mbedtls` package build,
+`scripts/test-pmap-refresh.sh` (needs root for a dummy interface), and the
+live `scripts/w42_harness.py` regression gate.

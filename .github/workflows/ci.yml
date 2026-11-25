@@ -1,0 +1,87 @@
+# Build and regression tests.  No hardware, RouterOS or network access to
+# devices is involved; see "Continuous integration" in docs/BUILD.md.
+name: CI
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+# Read-only token; no job needs secrets or write access.
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+defaults:
+  run:
+    # GitHub runs this as `bash --noprofile --norc -eo pipefail {0}`.
+    shell: bash
+
+jobs:
+  host:
+    name: Host tests (${{ matrix.name }})
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: gcc
+            cc: gcc
+          - name: gcc, ASan + UBSan
+            cc: >-
+              gcc -fsanitize=address,undefined -fno-sanitize-recover=all
+              -fno-omit-frame-pointer -g
+    env:
+      CC: ${{ matrix.cc }}
+      ASAN_OPTIONS: detect_leaks=1
+      UBSAN_OPTIONS: print_stacktrace=1
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: extmux EXT_AUTH_TX contract (make extmux-test)
+        run: make -C native extmux-test HOSTCC="$CC"
+
+      - name: W34 ownership + netifd status (tests/run-w34-tests.sh)
+        run: tests/run-w34-tests.sh
+
+  mipsel:
+    name: mipsel cross-build + qemu-mipsel tests (make check)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install qemu-user
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends qemu-user
+          qemu-mipsel --version | head -n 1
+
+      - name: OpenWrt 24.10.0 toolchain + mbedTLS 3.6.2 (pinned, SHA-256 verified)
+        run: scripts/ci-setup-mipsel.sh "$RUNNER_TEMP/mipsel" >> "$GITHUB_ENV"
+
+      # Static capagent-mipsel build; W34 ownership + netifd tests,
+      # --crypto-selftest (AES-CCM KATs) and --selftest-policy under
+      # qemu-mipsel.  `make check` also runs extmux-test with the host cc.
+      - name: make -C native check
+        run: make -C native check
+
+      # make check builds extmux-test for the host only; also run it in the
+      # target ABI (same flags as the extmux-test target, plus -static).
+      - name: extmux EXT_AUTH_TX contract under qemu-mipsel
+        working-directory: native
+        run: |
+          "$TOOLCHAIN/mipsel-openwrt-linux-musl-gcc" -O2 -Wall -Wextra -Werror \
+              -Isrc -static -o "$RUNNER_TEMP/test_extmux-mipsel" \
+              tests/test_extmux.c src/extmux.c
+          qemu-mipsel "$RUNNER_TEMP/test_extmux-mipsel"
