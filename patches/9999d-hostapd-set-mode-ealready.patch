@@ -1,0 +1,25 @@
+hostapd: SET_INTERFACE -EALREADY is success
+
+A CAP that creates and configures the BSS interfaces itself brings them up as
+AP before hostapd starts.  cfg80211 then answers NL80211_CMD_SET_INTERFACE
+with -EALREADY ("Match already configured"), hostapd logs 'Could not
+configure driver mode' and the whole radio fails to initialise.
+
+--- a/src/drivers/driver_nl80211.c	2026-11-26 16:14:49.939154937 +0200
++++ b/src/drivers/driver_nl80211.c	2026-11-26 16:14:49.953504832 +0200
+@@ -7465,6 +7465,15 @@
+ 
+ 	ret = send_and_recv_cmd(drv, msg);
+ 	msg = NULL;
++	/*
++	 * -EALREADY ("Match already configured") means the interface is already
++	 * in the requested mode.  That is the normal case for a control plane
++	 * that creates the BSS interfaces itself (this project) and sets them
++	 * AP before hostapd starts; treating it as a failure aborted driver
++	 * init and the whole radio never came up.
++	 */
++	if (ret == -EALREADY)
++		return 0;
+ 	if (!ret)
+ 		return 0;
+ fail:

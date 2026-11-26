@@ -15,6 +15,7 @@ Apply order is lexicographic, after the stock OpenWrt patches:
 | `9999a-external-rsn-sae.patch` | W46: `external_rsn_sae=1` + `EXT_AUTH_MGMT_TX` (raw Auth/AssocReq relay), and **`EXT_AUTH_TX` trims a trailing CR/LF** — without the trim every M1/M3 is rejected before TX (the daemon does not strip the control wire newline) | yes |
 | `9999b-external-rsn-tx-retval.patch` | W53: only a negative `hostapd_wpa_auth_send_eapol()` return is an error; the nl80211 `PF_PACKET` path returns the byte count, so a transmitted frame used to answer `FAIL` | yes |
 | `9999c-hostapd-use-existing-bss.patch` | W63: pass `use_existing` for every AP BSS, so a BSS netdev created by the CAP is attached instead of deleted and re-created (that moved the ifindex under the CAP and caused the restart loop) | yes |
+| `9999d-hostapd-set-mode-ealready.patch` | W64: `SET_INTERFACE` returning `-EALREADY` ("Match already configured") is success — a CAP that brings the BSS up as AP before hostapd starts made the whole radio fail to initialise | yes |
 
 ## Build
 
