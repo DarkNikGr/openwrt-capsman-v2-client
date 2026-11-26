@@ -78,6 +78,7 @@ struct own_entry {
     int pid;                    /* hostapd pid when owner == CAPAGENT */
     int created;                /* netdev was created by capagent */
     int active;                 /* manager sent 0x6016 for this port */
+    uint64_t created_at;        /* when the netdev was created (orphan grace) */
     int fail_count;             /* hostapd start backoff */
     int start_given_up;         /* bounded retries exhausted, reported */
     int starting;               /* a start is in flight (serialises callers) */
@@ -91,6 +92,8 @@ struct own_entry {
     uint16_t start_len;         /* last 0x6016 body, for auto-heal */
     uint8_t start[OWN_START_MAX];
 };
+
+#define OWN_ORPHAN_GRACE_MS 10000u
 
 static struct own_entry g_own[OWN_MAX];
 static const char *g_own_path;
@@ -999,6 +1002,20 @@ static void own_reconcile(const struct cfg *c)
         if (e->owner == OWN_CAPAGENT)
             own_unmirror(e);
         if (!e->active) {
+            /* A create (0x500b) is followed by the start (0x6016) a moment
+             * later.  Do not reap the row in that window: deleting the netdev
+             * there killed the hostapd that was already up and made the whole
+             * VAP churn.  Give the manager OWN_ORPHAN_GRACE_MS to send it. */
+            uint64_t now = own_now_ms();
+            if (e->created_at && now - e->created_at < OWN_ORPHAN_GRACE_MS) {
+                ifindex = read_sysfs_int(e->ifname, "ifindex");
+                if (ifindex > 0) {
+                    e->ifindex = ifindex;
+                    if (!e->pid)
+                        e->pid = own_hostapd_pid(e->ifname);
+                }
+                continue;
+            }
             if (e->owner == OWN_CAPAGENT || e->owner == OWN_PENDING) {
                 printf("own: dropping orphan row %s (active=%d)\n",
                        e->ifname, e->active);
@@ -1233,6 +1250,7 @@ static int own_claim(const struct cfg *c, int phy, int vapid,
         e->ifindex = idx;
         e->pid = 0;
         e->created = 1;
+        e->created_at = own_now_ms();
         memcpy(e->bssid, mac, 6);
         if (ifname) snprintf(ifname, ifname_len, "%.*s",
                                  (int)ifname_len - 1, nm);
