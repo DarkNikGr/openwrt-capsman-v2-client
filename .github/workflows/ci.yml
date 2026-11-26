@@ -49,6 +49,9 @@ jobs:
       - name: extmux EXT_AUTH_TX contract (make extmux-test)
         run: make -C native extmux-test HOSTCC="$CC"
 
+      - name: RSN decision (make rsn-test)
+        run: make -C native rsn-test HOSTCC="$CC"
+
       - name: W34 ownership + netifd status (tests/run-w34-tests.sh)
         run: tests/run-w34-tests.sh
 

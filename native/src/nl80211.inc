@@ -367,7 +367,9 @@ static int vap_ifindex_hint(int port, const char *hint, uint8_t mac[6])
     cached = ifindex;
     if (cached > 0) pmap_del(port);
 
-    char ifname[IF_NAMESIZE];
+    /* Name holder, not an ifreq: "phy%d-ap%d" can exceed IF_NAMESIZE on a
+     * bogus port, and a truncated name would address the wrong netdev. */
+    char ifname[32];
     if (hint && hint[0])
         snprintf(ifname, sizeof(ifname), "%s", hint);
     else

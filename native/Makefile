@@ -70,7 +70,7 @@ w34-tests:
 	    -o $(W34_TEST_DIR)/test_netifd_status ../tests/test_netifd_status.c
 	$(QEMU) $(W34_TEST_DIR)/test_netifd_status
 
-check: capagent-mipsel w34-tests extmux-test iw-freq-test
+check: capagent-mipsel w34-tests extmux-test iw-freq-test rsn-test
 	$(QEMU) ./capagent-mipsel --crypto-selftest
 	$(QEMU) ./capagent-mipsel --selftest-policy
 
@@ -89,8 +89,16 @@ iw-freq-test: tests/test_iw_freq.c src/iw_freq.inc
 	    tests/test_iw_freq.c
 	$(W53_TEST_DIR)/test_iw_freq
 
+# Pure host test: RSN IE -> hostapd RSN options (PSK/MFPC/MFPR/SAE/OWE,
+# group-mgmt cipher, external_rsn_ie/RSNXE relay).  No radio required.
+rsn-test: tests/test_rsn.c src/rsn_decide.h
+	mkdir -p $(W53_TEST_DIR)
+	$(HOSTCC) -O2 -Wall -Wextra -Werror -o $(W53_TEST_DIR)/test_rsn \
+	    tests/test_rsn.c
+	$(W53_TEST_DIR)/test_rsn
+
 clean:
 	rm -f capagent-mipsel
 	rm -rf $(W34_TEST_DIR) $(W53_TEST_DIR)
 
-.PHONY: all check clean w34-tests extmux-test iw-freq-test
+.PHONY: all check clean w34-tests extmux-test iw-freq-test rsn-test

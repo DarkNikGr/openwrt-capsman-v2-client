@@ -303,11 +303,19 @@ static int dp_add_fd(int ifindex, struct vap *v)
 
 static void set_if_mtu(const char *ifname, int mtu)
 {
-    int fd = socket(AF_INET, SOCK_DGRAM, 0);
     struct ifreq ifr;
-    if (fd < 0 || mtu <= 0) return;
+    size_t nl;
+
+    /* An ifname that does not fit ifr_name cannot be addressed by SIOCSIFMTU;
+     * truncating it would set the MTU on a different interface. */
+    if (!ifname || !ifname[0] || mtu <= 0) return;
+    nl = strlen(ifname);
+    if (nl >= IFNAMSIZ) return;
+
+    int fd = socket(AF_INET, SOCK_DGRAM, 0);
+    if (fd < 0) return;
     memset(&ifr, 0, sizeof(ifr));
-    snprintf(ifr.ifr_name, IFNAMSIZ, "%s", ifname);
+    memcpy(ifr.ifr_name, ifname, nl + 1);
     ifr.ifr_mtu = mtu;
     ioctl(fd, SIOCSIFMTU, &ifr);
     close(fd);

@@ -156,6 +156,8 @@ static void vap_phy_bss(FILE *f, const char *kw, const struct own_entry *e,
 
     struct rsn_info ri;
     rsn_parse(ie, il, &ri);
+    struct rsn_policy rp;
+    rsn_policy_from_ie(&ri, hostapd_has_sae_override(), &rp);
     char bridge[32] = "";
     vap_bridge_if_present(e->ifname, e->vlan, bridge, sizeof(bridge));
 
@@ -173,55 +175,20 @@ static void vap_phy_bss(FILE *f, const char *kw, const struct own_entry *e,
             e->bssid[4], e->bssid[5]);
     if (bridge[0]) fprintf(f, "bridge=%s\n", bridge);
 
-    int have_psk = ri.valid && (ri.akm_psk || ri.akm_psk256);
-    int have_sae = ri.valid && (ri.akm_sae || ri.akm_owe) &&
-                   hostapd_has_sae_override();
-
-    if (have_psk || have_sae) {
-        int first = 1;
-        fprintf(f, "wpa=2\nwpa_key_mgmt=");
-        if (ri.akm_psk) { fprintf(f, "WPA-PSK"); first = 0; }
-        if (ri.akm_psk256) {
-            fprintf(f, "%sWPA-PSK-SHA256", first ? "" : " "); first = 0;
-        }
-        if (have_sae && ri.akm_sae) {
-            fprintf(f, "%sSAE", first ? "" : " "); first = 0;
-        }
-        if (have_sae && ri.akm_owe) {
-            fprintf(f, "%sOWE", first ? "" : " "); first = 0;
-        }
-        fprintf(f, "\nrsn_pairwise=CCMP\nwpa_group_rekey=0\nwpa_ptk_rekey=0\n");
-        fprintf(f, "ieee80211w=%d\n", ri.mfpr ? 2 : (ri.mfpc ? 1 : 0));
-        if (have_sae && ri.mfpc)
-            fprintf(f, "group_mgmt_cipher=AES-128-CMAC\n");
-        if (have_sae && ri.akm_sae)
-            fprintf(f, "sae_pwe=2\n");
-        fprintf(f, "external_rsn_auth=1\n");
+    char rsn[256];
+    rsn_conf_write(rsn, sizeof(rsn), &rp);
+    fputs(rsn, f);
+    if (rp.wpa) {
         if (hostapd_has_opt("external_rsn_sae"))
             fprintf(f, "external_rsn_sae=1\n");
         if (c->ext_auth_dir)
             fprintf(f, "ext_auth_socket=%s/ext-auth-%s\n", c->ext_auth_dir,
                     e->ifname);
-    } else {
-        fprintf(f, "wpa=0\n");
     }
 
     if (ri.valid && hostapd_has_rsn_override() && ie && il) {
-        size_t p = 0;
         uint8_t blob[257];
-        size_t bl = 0;
-        int want_rsnxe = have_sae;
-        while (p + 2 <= il) {
-            uint8_t id = ie[p], l = ie[p + 1];
-            if (p + 2 + l > il) break;
-            if (id == 48 || (want_rsnxe && id == 244)) {
-                if (bl + 2 + l <= sizeof(blob)) {
-                    memcpy(blob + bl, ie + p, 2 + (size_t)l);
-                    bl += 2 + (size_t)l;
-                }
-            }
-            p += 2 + l;
-        }
+        size_t bl = rsn_ie_blob(blob, sizeof(blob), ie, il, rp.want_rsnxe);
         if (bl) {
             fprintf(f, "external_rsn_ie=");
             for (size_t i = 0; i < bl; i++) fprintf(f, "%02x", blob[i]);
@@ -233,12 +200,9 @@ static void vap_phy_bss(FILE *f, const char *kw, const struct own_entry *e,
 
 /* A journal row is only written into the phy config when its netdev exists
  * right now: hostapd must never create an interface itself (that hits the
- * phy vif limit and fails with -23/ENFILE). */
-static int vap_phy_row_ready(const struct own_entry *e, int phy)
-{
-    return e->used && e->active && e->start_len && e->ifname[0] &&
-           (e->port >> 8) == phy && if_nametoindex(e->ifname) > 0;
-}
+ * phy vif limit and fails with -23/ENFILE).  That invariant is enforced
+ * below: the master is created when missing, and a secondary without a
+ * netdev is skipped. */
 
 /* (Re)start the single hostapd for this phy with every journaled VAP. */
 static int vap_phy_apply(int phy, const struct cfg *c)
