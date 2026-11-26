@@ -1253,6 +1253,26 @@ static int own_claim(const struct cfg *c, int phy, int vapid,
 
         if (own_forced_readonly(c))
             continue;                  /* forced legacy: read-only */
+
+        /* Own mode with the monitor relay: reserve the monitor VIF *before*
+           the last BSS takes the final slot, otherwise mon_create() has no
+           vif left (4/4 on the MT7603E) and the 0x2018 relay dies. */
+        if (!wl_legacy() && (c->mgmt_source == 2 || c->mgmt_source == 0)) {
+            int used = 0, hasmon = 0, maxv = phy_max_vifs(phy);
+            for (int w = 0; w < 16; w++)
+                if (g_vap[phy % MAX_RADIOS][w].used) used++;
+            for (int mi = 0; mi < g_mon_n; mi++)
+                if (g_mon[mi].phy == phy && g_mon[mi].fd >= 0) hasmon = 1;
+            if (maxv > 0 && !hasmon && used >= maxv - 1) {
+                if (mon_create(phy) <= 0) {
+                    printf("own: phy%d: no vif for the monitor, leaving %s "
+                           "uncreated\n", phy, nm);
+                    fflush(stdout);
+                    continue;
+                }
+            }
+        }
+
         idx = vap_netdev_create(phy, nm, mac);
         if (idx > 0) {
             created = 1;
