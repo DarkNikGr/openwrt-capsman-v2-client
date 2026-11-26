@@ -46,7 +46,6 @@ static int g_created, g_deleted, g_starts, g_stops, g_ready;
 static int g_create_fail;
 static int g_pid_alive[4096];
 static char g_pid_ifname[4096][32];   /* BSS each fake hostapd serves */
-static int g_fake_wl_legacy;          /* netifd owns the BSSes (policy) */
 
 static int fake_kill(pid_t pid, int sig)
 {
@@ -170,23 +169,6 @@ static void extmux_del_vap(void *m, uint16_t port)
 }
 static void pmap_del(int port) { (void)port; }
 static void dp_del_ifindex(int ifindex) { (void)ifindex; }
-/* policy.inc seam: whether netifd (legacy UCI) owns the BSSes. */
-static int wl_legacy(void) { return g_fake_wl_legacy; }
-
-/* vap.inc seam: the process-table lookup.  This double states the contract
- * ownership.inc relies on (a live hostapd started for exactly this ifname,
- * never a dead pid or another BSS's daemon); it does not test vap.inc's own
- * implementation of that lookup.  Calls are counted so a case can assert that
- * the pid file alone was enough. */
-static int g_find_calls;
-static pid_t vap_find_hostapd(const char *ifname)
-{
-    g_find_calls++;
-    for (int p = 1; p < 4096; p++)
-        if (g_pid_alive[p] && !strcmp(g_pid_ifname[p], ifname))
-            return (pid_t)p;
-    return 0;
-}
 static size_t parse_hex(const char *s, uint8_t *out, size_t max)
 {
     size_t n = 0;
@@ -197,6 +179,28 @@ static size_t parse_hex(const char *s, uint8_t *out, size_t max)
         s += 2;
     }
     return n;
+}
+
+/* The full build gets these from policy.inc and vap.inc.  The unit test only
+ * links ownership.inc, so stub them here.  g_test_wl_legacy selects the
+ * policy: 0 (default) = capagent owns the BSSes, 1 = netifd does.
+ *
+ * vap_find_hostapd() is the process-table fallback.  This double states the
+ * contract ownership.inc relies on -- a live hostapd started for exactly this
+ * ifname, never a dead pid or another BSS's daemon -- and does not test
+ * vap.inc's own /proc matching.  Calls are counted so a case can assert that
+ * the pid file alone was enough. */
+static int g_test_wl_legacy;
+static int wl_legacy(void) { return g_test_wl_legacy; }
+static int wl_own(void) { return !g_test_wl_legacy; }
+static int g_find_calls;
+static pid_t vap_find_hostapd(const char *ifname)
+{
+    g_find_calls++;
+    for (int p = 1; p < 4096; p++)
+        if (g_pid_alive[p] && !strcmp(g_pid_ifname[p], ifname))
+            return (pid_t)p;
+    return 0;
 }
 
 #include "ownership.inc"
@@ -219,7 +223,7 @@ static void reset_all(void)
     memset(g_net, 0, sizeof(g_net));
     memset(g_pid_alive, 0, sizeof(g_pid_alive));
     memset(g_pid_ifname, 0, sizeof(g_pid_ifname));
-    g_fake_wl_legacy = 0;
+    g_test_wl_legacy = 0;
     g_find_calls = 0;
     memset(&g_own_nd, 0, sizeof(g_own_nd));
     g_extmux = NULL;
@@ -599,15 +603,30 @@ static void test_netifd_policy_gate(void)
         if (g_net[i].used) memset(&g_net[i], 0, sizeof(g_net[i]));
     before_s = g_starts;
     before_c = g_created;
-    g_fake_wl_legacy = 1;
+    g_test_wl_legacy = 1;
     own_service(&T);
     check(g_starts == before_s && g_created == before_c && g_deleted == 0,
           "legacy policy: no restart, create or delete");
     check(entry_owner(0) == OWN_CAPAGENT, "legacy policy: journal row kept");
-    g_fake_wl_legacy = 0;
+    g_test_wl_legacy = 0;
     own_service(&T);
     check(g_created == before_c + 1 && g_starts == before_s + 1,
           "agent policy again: rebuilt from the journal");
+
+    /* Live BSS whose name netifd now reports: in agent mode own_reconcile
+     * would stop our hostapd and hand the row to netifd.  Under the legacy
+     * policy nothing may be stopped or re-owned. */
+    set_nd("{\"radio0\":{\"up\":true,\"interfaces\":["
+           "{\"section\":\"s0\",\"ifname\":\"phy0-ap0\"}]}}");
+    before_s = g_stops;
+    g_test_wl_legacy = 1;
+    own_service(&T);
+    check(g_stops == before_s && entry_owner(0) == OWN_CAPAGENT,
+          "legacy policy: netifd name does not stop or re-own our BSS");
+    g_test_wl_legacy = 0;
+    own_service(&T);
+    check(g_stops == before_s + 1 && entry_owner(0) == OWN_NETIFD,
+          "agent policy again: netifd name reconciled");
 }
 
 int main(void)
