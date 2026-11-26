@@ -18,19 +18,44 @@ static void vap_phy_paths(int phy, char *conf, size_t cl, char *pidf, size_t pl,
     snprintf(logf, ll, "/tmp/vap-phy%d.log", phy);
 }
 
+/* Pid of the phy-wide hostapd.  hostapd -B may leave the -P file empty, so
+ * fall back to a /proc scan for our exact config path: every journal row of
+ * the phy resolves to the same process, which stops the 1 s reconcile from
+ * restarting the whole phy. */
 static pid_t vap_phy_pid(int phy)
 {
     char conf[128], pidf[128], logf[128];
     vap_phy_paths(phy, conf, sizeof(conf), pidf, sizeof(pidf),
                   logf, sizeof(logf));
     FILE *f = fopen(pidf, "r");
-    if (!f) return 0;
-    long pid = 0;
-    int got = fscanf(f, "%ld", &pid);
-    fclose(f);
-    if (got != 1 || pid <= 0) return 0;
-    if (kill((pid_t)pid, 0) != 0 && errno != EPERM) return 0;
-    return (pid_t)pid;
+    if (f) {
+        long pid = 0;
+        int got = fscanf(f, "%ld", &pid);
+        fclose(f);
+        if (got == 1 && pid > 0 &&
+            (kill((pid_t)pid, 0) == 0 || errno == EPERM))
+            return (pid_t)pid;
+    }
+    DIR *d = opendir("/proc");
+    if (!d) return 0;
+    struct dirent *de;
+    pid_t found = 0;
+    while ((de = readdir(d))) {
+        char *end = NULL;
+        long c = strtol(de->d_name, &end, 10);
+        if (!end || *end || c <= 0) continue;
+        char p[64], buf[4096];
+        snprintf(p, sizeof(p), "/proc/%ld/cmdline", c);
+        int fd = open(p, O_RDONLY);
+        if (fd < 0) continue;
+        ssize_t n = read(fd, buf, sizeof(buf) - 1);
+        close(fd);
+        if (n <= 0) continue;
+        buf[n] = 0;
+        if (strstr(buf, conf)) { found = (pid_t)c; break; }
+    }
+    closedir(d);
+    return found;
 }
 
 /* Is a live hostapd running for the phy of this ifname (phyN-apM / capN-M)? */
@@ -234,6 +259,8 @@ static int vap_phy_apply(int phy, const struct cfg *c)
      * the pid on all of them, otherwise each row's reconcile thinks its
      * hostapd is dead and restarts the phy on every tick. */
     if (hp > 0) {
+        FILE *pf = fopen(pidf, "w");
+        if (pf) { fprintf(pf, "%d\n", (int)hp); fclose(pf); }
         for (int i = 0; i < OWN_MAX; i++) {
             struct own_entry *e = &g_own[i];
             if (e->used && e->active && (e->port >> 8) == phy) {
