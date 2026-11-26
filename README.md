@@ -1,5 +1,7 @@
 # MikroTik CAPsMAN v2 client for OpenWrt
 
+**v0.5.0** — see [`docs/RELEASE-0.5.0.md`](docs/RELEASE-0.5.0.md).
+
 Turn a non-MikroTik OpenWrt AP into a **CAP of the official RouterOS
 CAPsMAN v2 manager**. The CAP side is native C: no extra service on the
 manager, no agent inside RouterOS, and no static SSID/key/VLAN file as the
