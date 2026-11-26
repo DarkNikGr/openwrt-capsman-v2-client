@@ -15,13 +15,17 @@
  * So for every VAP whose netdev does not exist we:
  *   1. NL80211_CMD_NEW_INTERFACE type __ap on the wiphy, with the MAC from
  *      0x500b, and bring it up;
- *   2. write a hostapd config with external_rsn_auth=1 (no PSK at all) and an
- *      ext_auth_socket that capagent binds;
- *   3. start hostapd for it.
+ *   2. journal the 0x6016 body (ownership.inc) so phy.inc can (re)build the
+ *      single per-phy hostapd config with external_rsn_auth=1 (no PSK at
+ *      all), the RSN policy from rsn_decide.h and the ext_auth_socket that
+ *      capagent binds;
+ *   3. let phy.inc start that hostapd for the whole radio.
  *
  * Interfaces that already exist (netifd/hostapd owns them, e.g. a legacy
  * /etc/config/wireless) are left completely alone.
  */
+
+#include "rsn_decide.h"
 
 #define VAP_CONF_DIR "/tmp"
 
@@ -32,61 +36,6 @@
 static const char *g_vap_country;
 
 static int vap_hostapd_pid(const char *ifname);
-
-/* Parse the RSN IE (element 48) out of the manager's IE blob. */
-struct rsn_info {
-    int valid;
-    int group;          /* 4 = CCMP, 2 = TKIP */
-    int pairwise;       /* 4 = CCMP */
-    int akm_psk;
-    int akm_psk256;
-    int akm_sae;
-    int akm_owe;
-    int mfpr;
-    int mfpc;
-};
-
-static void rsn_parse(const uint8_t *ie, size_t len, struct rsn_info *ri)
-{
-    memset(ri, 0, sizeof(*ri));
-    size_t p = 0;
-    while (p + 2 <= len) {
-        uint8_t id = ie[p], l = ie[p + 1];
-        if (p + 2 + l > len) break;
-        if (id == 48 && l >= 18) {          /* RSN IE */
-            const uint8_t *r = ie + p + 2;
-            size_t n = l;
-            ri->valid = 1;
-            if (n >= 8) ri->group = r[5];
-            size_t k = 6;   /* version(2) + group(4) */
-            if (k + 2 <= n) {
-                int pc = r[k] | (r[k + 1] << 8);
-                if (pc >= 1 && k + 6 <= n) ri->pairwise = r[k + 5];
-                k += 2 + 4 * (size_t)pc;
-            }
-            if (k + 2 <= n) {
-                int ac = r[k] | (r[k + 1] << 8);
-                for (int i = 0; i < ac && k + 4 + 4 * (size_t)i + 3 < n; i++) {
-                    const uint8_t *a = r + k + 2 + 4 * (size_t)i;
-                    if (a[0] == 0x00 && a[1] == 0x0f && a[2] == 0xac) {
-                        if (a[3] == 2)  ri->akm_psk = 1;
-                        if (a[3] == 6)  ri->akm_psk256 = 1;
-                        if (a[3] == 8)  ri->akm_sae = 1;
-                        if (a[3] == 18) ri->akm_owe = 1;
-                    }
-                }
-                k += 2 + 4 * (size_t)ac;
-            }
-            if (k + 2 <= n) {
-                uint16_t caps = (uint16_t)(r[k] | (r[k + 1] << 8));
-                ri->mfpr = !!(caps & 0x0040);
-                ri->mfpc = !!(caps & 0x0080);
-            }
-            return;
-        }
-        p += 2 + l;
-    }
-}
 
 /* W46: remember the per-VAP RSN policy the manager sent in 0x6016.  The
  * 0x201f handler needs it to set the kernel MFP flag and to choose the
@@ -412,219 +361,9 @@ static int vap_wait_ap_enabled(const char *logf, int ms)
     return -1;
 }
 
-/* Build and start a hostapd instance for one provisioned VAP. */
 static int  vap_phy_apply(int phy, const struct cfg *c);
 static void vap_phy_stop(int phy);
 static pid_t vap_phy_pid_for_ifname(const char *ifname);
-
-static int vap_hostapd_start_one(int port, const char *ifname, int phy, int vapid,
-                                 const uint8_t *body, uint16_t len,
-                                 struct vap *vp, const struct cfg *c)
-{
-    const uint8_t *ssid = NULL, *ie = NULL, *chv = NULL;
-    uint16_t sl = 0, il = 0, cl = 0;
-    if (!find_el(body, len, 0x03, &ssid, &sl) || sl == 0) return -1;
-    find_el(body, len, 0x04, &ie, &il);
-    find_el(body, len, 0x0a, &chv, &cl);
-
-    struct rsn_info ri;
-    rsn_parse(ie, il, &ri);
-
-    uint32_t freq = 0;
-    vchan_get(port, &freq, NULL, NULL);
-    if (!freq) freq = vp ? vp->freq : 0;
-    if (!freq) return -1;
-
-    char path[128], pidf[128], logf[128];
-    snprintf(path, sizeof(path), VAP_CONF_DIR "/vap-%s.conf", ifname);
-    snprintf(pidf, sizeof(pidf), "/var/run/vap-%s.pid", ifname);
-    snprintf(logf, sizeof(logf), "/tmp/vap-%s.log", ifname);
-
-    char bridge[32] = "";
-    vap_bridge_if_present(ifname, vp ? vp->vlan : 0, bridge, sizeof(bridge));
-
-    FILE *f = fopen(path, "w");
-    if (!f) {
-        fprintf(stderr, "vap: %s: %s\n", path, strerror(errno));
-        return -1;
-    }
-    fprintf(f, "interface=%s\ndriver=nl80211\nauth_algs=1\n", ifname);
-    if (c->ext_ctrl_dir || c->ext_auth_dir)
-        fprintf(f, "ctrl_interface=%s\n",
-                c->ext_ctrl_dir ? c->ext_ctrl_dir : c->ext_auth_dir);
-    fprintf(f, "ssid=%.*s\n", (int)sl, (const char *)ssid);
-    if (vp) {
-        fprintf(f, "bssid=%02x:%02x:%02x:%02x:%02x:%02x\n",
-                vp->bssid[0], vp->bssid[1], vp->bssid[2], vp->bssid[3],
-                vp->bssid[4], vp->bssid[5]);
-    }
-    if (bridge[0]) fprintf(f, "bridge=%s\n", bridge);
-    vap_write_channel(f, freq, vap_mgr_width(chv, cl));
-
-    int have_psk = ri.valid && (ri.akm_psk || ri.akm_psk256);
-    int have_sae = ri.valid && (ri.akm_sae || ri.akm_owe) &&
-                   hostapd_has_sae_override();
-
-    if (have_psk || have_sae) {
-        int first = 1;
-        fprintf(f, "wpa=2\nwpa_key_mgmt=");
-        if (ri.akm_psk) {
-            fprintf(f, "WPA-PSK");
-            first = 0;
-        }
-        if (ri.akm_psk256) {
-            fprintf(f, "%sWPA-PSK-SHA256", first ? "" : " ");
-            first = 0;
-        }
-        if (have_sae && ri.akm_sae) {
-            fprintf(f, "%sSAE", first ? "" : " ");
-            first = 0;
-        }
-        if (have_sae && ri.akm_owe) {
-            fprintf(f, "%sOWE", first ? "" : " ");
-            first = 0;
-        }
-        fprintf(f, "\nrsn_pairwise=CCMP\nwpa_group_rekey=0\nwpa_ptk_rekey=0\n");
-        fprintf(f, "ieee80211w=%d\n", ri.mfpr ? 2 : (ri.mfpc ? 1 : 0));
-        if (have_sae && ri.mfpc)
-            fprintf(f, "group_mgmt_cipher=AES-128-CMAC\n");
-        if (have_sae && ri.akm_sae)
-            fprintf(f, "sae_pwe=2\n");
-        fprintf(f, "external_rsn_auth=1\n");
-        /* 9999a: also relay the raw Auth/AssocReq, which is the only way to
-         * feed the manager on radios that cannot afford a monitor VIF. */
-        if (hostapd_has_opt("external_rsn_sae"))
-            fprintf(f, "external_rsn_sae=1\n");
-        if (c->ext_auth_dir)
-            fprintf(f, "ext_auth_socket=%s/ext-auth-%s\n", c->ext_auth_dir,
-                    ifname);
-        /* W46: the manager also owns the 802.11 Auth exchange (SAE/OWE).
-         * Only emitted when the patched hostapd advertises the option; an
-         * unpatched binary never sees an unknown keyword. */
-        if (have_sae)
-            fprintf(f, "external_rsn_sae=1\n");
-    } else {
-        /* open, unsupported AKM, or an unpatched hostapd without SAE support */
-        fprintf(f, "wpa=0\n");
-    }
-    /* The station compares the RSN IE in M3 with the one in our beacon and
-       drops the handshake on any difference.  When the build can take the
-       manager's exact IE, hand it over verbatim.  For SAE/OWE the blob also
-       carries the RSNXE, which the station compares separately. */
-    if (ri.valid && hostapd_has_rsn_override() && ie && il) {
-        size_t p = 0;
-        uint8_t blob[257];
-        size_t bl = 0;
-        int want_rsnxe = have_sae;
-
-        while (p + 2 <= il) {
-            uint8_t id = ie[p], l = ie[p + 1];
-            if (p + 2 + l > il) break;
-            if (id == 48 || (want_rsnxe && id == 244)) {
-                if (bl + 2 + l <= sizeof(blob)) {
-                    memcpy(blob + bl, ie + p, 2 + (size_t)l);
-                    bl += 2 + (size_t)l;
-                }
-            }
-            p += 2 + l;
-        }
-        if (bl) {
-            fprintf(f, "external_rsn_ie=");
-            for (size_t i = 0; i < bl; i++) fprintf(f, "%02x", blob[i]);
-            fprintf(f, "\n");
-        }
-    }
-    fprintf(f, "ignore_broadcast_ssid=0\nap_isolate=0\n");
-    if (getenv("CAPAGENT_HOSTAPD_DEBUG"))
-        fprintf(f, "logger_syslog=-1\nlogger_stdout_level=3\n");
-    fclose(f);
-
-    {   /* a killed hostapd leaves its per-BSS ctrl socket behind */
-        char ctrl[128];
-        snprintf(ctrl, sizeof(ctrl), "/var/run/hostapd/%s", ifname);
-        unlink(ctrl);
-    }
-    pid_t pid = fork();
-    if (pid == 0) {
-        int fd = open(logf, O_CREAT | O_WRONLY | O_TRUNC, 0600);
-        if (fd >= 0) { dup2(fd, 1); dup2(fd, 2); close(fd); }
-        if (getenv("CAPAGENT_HOSTAPD_DEBUG"))
-            execl(hostapd_exe_path(), "hostapd", "-dd",
-                  "-P", pidf, path, (char *)NULL);
-        else
-            execl(hostapd_exe_path(), "hostapd", "-B", "-P", pidf, path,
-                  (char *)NULL);
-        _exit(127);
-    }
-    if (pid < 0) {
-        fprintf(stderr, "vap: fork hostapd %s: %s\n", ifname, strerror(errno));
-        return -1;
-    }
-    {
-        /* hostapd -B daemonizes: the direct child exits once setup is done,
-           so reap it (otherwise every failed BSS leaves a zombie) and use
-           its status to tell "started" from "config/driver refused".  Never
-           block the TLS loop on a slow setup (DFS/ACS): poll for 3 s. */
-        int st = 0, reaped = 0;
-        for (int i = 0; i < 30; i++) {
-            pid_t r = waitpid(pid, &st, WNOHANG);
-            if (r == pid) { reaped = 1; break; }
-            if (r < 0) break;
-            usleep(100000);
-        }
-        if (reaped && (!WIFEXITED(st) || WEXITSTATUS(st) != 0)) {
-            printf("vap: hostapd %s failed to start (status=%d), see %s\n",
-                   ifname, WIFEXITED(st) ? WEXITSTATUS(st) : -1, logf);
-            fflush(stdout);
-            return -1;
-        }
-    }
-    /* Bounded, log-based readiness check: the pid alone proves nothing,
-     * and hostapd -B may write it only while we are waiting. */
-    int ready = vap_wait_ap_enabled(logf, 12000);
-    int hpid = vap_hostapd_pid(ifname);
-    if (ready == 0) {
-        printf("vap: hostapd %s did not enable, see %s\n", ifname, logf);
-        fflush(stdout);
-        if (hpid > 0) kill((pid_t)hpid, SIGTERM);
-        /* Never unlink the pid file here: it may belong to an instance that
-         * is already up (a repeated 0x6016) and unlinking it makes the
-         * watchdog spawn a duplicate.  A stale pid is harmless. */
-        return -1;
-    }
-    if (ready < 0) {
-        /* Still not enabled after 12 s: do not leave it holding the phy. */
-        printf("vap: hostapd %s STUCK (no AP-ENABLED in 12 s), killing pid=%d,"
-               " see %s\n", ifname, hpid, logf);
-        fflush(stdout);
-        if (hpid > 0) kill((pid_t)hpid, SIGKILL);
-        return -1;
-    }
-    usleep(1000 * 1000);    /* let the chanctx settle before the next VAP */
-    printf("vap: hostapd %s ssid=%s freq=%u akm=%s%s%s mfp=%d vlan=%u pid=%d\n",
-           ifname, (const char *)ssid, freq,
-           ri.akm_psk ? "psk" : "", ri.akm_psk256 ? ",psk256" : "",
-           ri.akm_sae ? ",sae" : "", ri.mfpr ? 2 : (ri.mfpc ? 1 : 0),
-           vp ? vp->vlan : 0, hpid);
-    fflush(stdout);
-    if (vp) vp->hostapd_started_at = time(NULL);
-    return hpid > 0 ? hpid : -1;
-}
-
-static int vap_hostapd_start(int port, const char *ifname, int phy, int vapid,
-                             const uint8_t *body, uint16_t len,
-                             struct vap *vp, const struct cfg *c)
-{
-    int lockfd = open("/var/run/cap-vap-start.lock",
-                      O_CREAT | O_RDWR | O_CLOEXEC, 0600);
-    if (lockfd >= 0) flock(lockfd, LOCK_EX);
-    int r = vap_hostapd_start_one(port, ifname, phy, vapid, body, len, vp, c);
-    if (lockfd >= 0) {
-        flock(lockfd, LOCK_UN);
-        close(lockfd);
-    }
-    return r;
-}
 
 /* True when the pid file points at a live hostapd **that we started**.
  * W33: the pid is verified against our own config path.  A stale pid file

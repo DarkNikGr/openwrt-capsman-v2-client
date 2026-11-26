@@ -53,7 +53,7 @@ RouterOS 7.25.1 with a real station; "lab" = CHR 7.25.1 + mac80211-hwsim.
 | `management-protection=disabled` | ✅ live | the current profiles |
 | `management-protection=allowed/required` (PMF) | 🟡 lab only | `ieee80211w` is derived from the RSN caps; not yet exercised live |
 | `group-key-update` | ⚠️ forced off | `wpa_group_rekey=0` on the CAP (the manager owns rekeying) |
-| `wpa3` / SAE (`authentication-types=wpa3-psk`, `wpa2-psk` + SAE) | 🟡 lab | raw Auth relay proven; **not yet live** |
+| `wpa3` / SAE (`authentication-types=wpa3-psk`) | ✅ **live** | generated `sae_pwe=2` + `group_mgmt_cipher=AES-128-CMAC`; `0x201c` len=209 → `0x201b` → `0x201f` PTK + `SET_STATION MFP`, station `authorized: yes` |
 | `owe` | 🟡 lab 14/14 | not yet live |
 | `wpa2-eap` / 802.1X / RADIUS | ❌ untested | EAPOL is relayed, but no live 802.1X server test |
 | `wpa-psk-sha256` | ❌ untested | AKM parsed, not exercised |
@@ -63,7 +63,7 @@ RouterOS 7.25.1 with a real station; "lab" = CHR 7.25.1 + mac80211-hwsim.
 
 | Setting | Status | Evidence / why |
 |---|---|---|
-| `traffic-processing=on-cap` | ✅ live | the supported mode: the manager is the authenticator, the CAP forwards |
+| `traffic-processing=on-cap` | ✅ live | the supported mode: the manager is the authenticator, the CAP forwards. The CAP needs the `br-vlan<N>` bridge to exist (see OPEN-PROBLEMS F49) |
 | `vlan-id` | ✅ live | per-VAP `bridge=` to `br-vlan<N>` |
 | `traffic-processing=on-capsman` (`a2=1`) | 🟡 lab | plaintext datachan framing works; no live traffic test |
 | `traffic-processing=on-capsman-secure` (`a2=2`) | ❌ never | manager-side key install does not run on a radio-less controller |

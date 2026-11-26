@@ -780,7 +780,8 @@ static void own_cleanup_stale(void)
         printf("own: removing stale %s (owner=%s)\n", n,
                e ? own_owner_name(e->owner) : "none");
         {
-            char path[128];
+            /* OWN_TMP_DIR (5) + "/" + d_name (NAME_MAX 255) + NUL. */
+            char path[320];
             snprintf(path, sizeof(path), OWN_TMP_DIR "/%s", n);
             unlink(path);
         }

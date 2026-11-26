@@ -256,7 +256,8 @@ static const char *phy_name_by_index(int idx, char *buf, size_t n)
     if (!d) return buf;
     struct dirent *e;
     while ((e = readdir(d))) {
-        char path[160], line[32];
+        /* "/sys/class/ieee80211/" (21) + d_name (NAME_MAX 255) + "/index" (6). */
+        char path[320], line[32];
         if (e->d_name[0] == '.') continue;
         snprintf(path, sizeof(path), "/sys/class/ieee80211/%s/index",
                  e->d_name);
@@ -265,7 +266,7 @@ static const char *phy_name_by_index(int idx, char *buf, size_t n)
         if (!fgets(line, sizeof(line), f)) { fclose(f); continue; }
         fclose(f);
         if (atoi(line) == idx) {
-            snprintf(buf, n, "%s", e->d_name);
+            if (n) snprintf(buf, n, "%.*s", (int)(n - 1), e->d_name);
             break;
         }
     }

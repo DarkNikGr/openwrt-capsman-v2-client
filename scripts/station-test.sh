@@ -18,7 +18,17 @@ SSID=${1:?ssid}
 PSK=${2:?psk}
 ADDR=${3:-}
 SECS=${4:-40}
+# KEY_MGMT=SAE for a WPA3 test (PMF is mandatory there); default WPA-PSK.
+KEY_MGMT=${KEY_MGMT:-WPA-PSK}
+MFP=${MFP:-}
 
+# The wiphy number changes across driver reloads (phy1, phy6, ...): resolve it
+# from the station interface instead of assuming phy1.  Never delete the netns
+# while the wiphy is still inside it - that destroys the wiphy.
+STATION_IF=${STATION_IF:-wlp39s0}
+if [ -z "${STATION_PHY:-}" ]; then
+	STATION_PHY=$(basename "$(readlink -f "/sys/class/net/$STATION_IF/phy80211")")
+fi
 PHY=${STATION_PHY:-phy1}
 NETNS=${STATION_NETNS:-capsta}
 PIDF=/tmp/$NETNS.pid
@@ -71,7 +81,8 @@ country=GR
 network={
 	ssid="$SSID"
 	psk="$PSK"
-	key_mgmt=WPA-PSK
+	key_mgmt=$KEY_MGMT
+	${MFP:+ieee80211w=$MFP}
 	pairwise=CCMP
 	group=CCMP
 }
