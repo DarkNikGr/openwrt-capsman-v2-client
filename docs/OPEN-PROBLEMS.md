@@ -37,6 +37,8 @@ per radio with `bss=` sections** with no PSK. What is still missing is a stable
 | F18 | The patched `wpad` (999/9997/9998/9999/9999a/9999b, `CONFIG_EXTERNAL_RSN_AUTH=y`) is built and **installed** on the reference Xiaomi and survives reboot: `external_rsn_sae=2`, `EXT_AUTH_MGMT_TX=1`, `external_rsn_ie=7`. The official 24.10.0 SDK ships no hostapd sources, so the build overlays the v24.10.0 package tree into the SDK and builds mbedtls/libubox/ubus/uci first. | `scripts/build-wpad-9999a.sh`, grep on `/usr/sbin/wpad` |
 | F19 | The 2.4 GHz MT7603E brings up **2 BSSes** reliably (`phy0-ap0` + `phy0-ap1` with SSIDs) and fails from 3 BSSes with `Failed to create interface phy0-ap2: -23`. Real phy0 vif usage at that moment was 2/4, so it is not a simple vif-count limit. | live A/B: 2 BSS ok, 3 and 4 BSS fail |
 | F20 | `mon_create(phy0)` refuses on purpose ("4-interface radio; not taking a VAP slot"), so the 2.4 GHz radio has **no** `cm0` and `0x2018` is not relayed from it. The no-monitor path is the `9999a` raw AUTH/ASSOCREQ relay. | live log, `src/mgmt.inc` |
+| F22 | **`-23` is not a driver or vif limit.** hostapd's `nl80211_create_iface()` reads `-ENFILE` from `NL80211_CMD_NEW_INTERFACE` as "this name already exists". With `use_existing=0` it then prints `Failed to create interface phy0-apN: -23`, **deletes the netdev the CAP created** and makes its own, owned by its own netlink socket. The ifindex moves under capagent, which removes the row as an orphan and the BSS churns. Patch `9999c` passes `use_existing=1` for AP BSSes: live `Try to remove and re-create` 3+ -> **0**, both radios `hostapd up with 4 BSS(es)`. A 5th AP vif can be created by hand (`iw phy phy0 interface add probeap99 type __ap`) on the same radio, so the platform allows more than four. | `patches/9999c-…`, live A/B |
+| F23 | With `9999c` hostapd **attaches** to our secondaries (good), but then only the master reaches `AP-ENABLED` and the secondaries stay `type AP` with no SSID: hostapd's static `bss=` path expects to own those netdevs. The OpenWrt model (delete the secondaries, let hostapd create them) does bring all four SSIDs up (W61 measured 28 s stable, zero `-23`), but the journal then loops: a handover row has `ifindex=0`, so the reconcile recreates the netdev it just gave away. Next step is to refresh each row's ifindex **after** `AP-ENABLED` and never treat `ifindex=0` on a handed-over row as "needs a netdev". | live runs `final4`/`final6` |
 | F21 | The inline station harness used `iw phy phy0 set netns`, but the test host's station wiphy is **phy1** (`wlp39s0`), so `wpa_supplicant` never started and every earlier "station not connected / no 0x2018" result was a harness artefact. | `scripts/station-test.sh` (verified: phy1 moved, scan listed SSIDs, host restored) |
 
 ## Open blockers (ranked)
@@ -44,9 +46,12 @@ per radio with `bss=` sections** with no PSK. What is still missing is a stable
 1. **Hardware proof** — the zero-touch image is built and content-verified but
    was never flashed; boot, factory reset, rejoin and 8/8 re-provision are
    unproven. This is the last acceptance gate, not a code change.
-2. **4 BSS on the 2.4 GHz MT7603E** — 2 BSSes work, 3+ fail with `-23` while
-   the radio shows 2/4 vifs in use. This is the only reason the live run does
-   not reach 8/8 SSIDs; tracked as W61.
+2. **BSS ownership between capagent and hostapd** — the `-23` mechanism is
+   solved (F22) but the two writers disagree about who owns a secondary netdev:
+   attaching leaves it unconfigured (F23), handing it over makes the reconcile
+   recreate it. Fix the journal state machine, not the driver: a handed-over
+   row must be refreshed from `if_nametoindex()` after `AP-ENABLED` and must
+   not be recreated while its BSS is in the live config.
 3. **`0x2018` on a radio without a monitor VIF** — `mon_create(phy0)` refuses
    by design, so the 2.4 GHz radio depends on the `9999a` raw
    AUTH/ASSOCREQ relay. W62 is proving that path with the installed `wpad`.
