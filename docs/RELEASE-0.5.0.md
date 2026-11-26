@@ -48,6 +48,24 @@ reproducible zero-touch image and the patches that were missing.
   are numbered F1–F47 in `docs/OPEN-PROBLEMS.md` so the dead ends (monitor VIF,
   vif limits, pid files, buffered hostapd logs) are not re-derived.
 
+## Artifacts
+
+| Asset | Size | What it is |
+|---|---|---|
+| `capagent-mipsel` | 1,075,524 B | bare static client for mips/mipsel OpenWrt (mt7621, the reference Xiaomi) |
+| `capagent-aarch64` | 1,041,520 B | bare static-pie client for aarch64 OpenWrt (WiFi 6/7 APs, Deco BE65 class) |
+| `capagent-mipsel-bundle.tar.gz` | 519,181 B | the mipsel binary + `install.sh` + `capagent.conf.example` |
+| `capagent-aarch64-bundle.tar.gz` | 531,687 B | same for aarch64 |
+| `mi-4a-zero-touch-sysupgrade.bin` | 7,472,226 B | full zero-touch image for the reference Xiaomi (capagent + patched wpad) |
+| `SHA256SUMS` | 456 B | hashes for every asset above |
+
+The bare binaries are the same code as the image (HEAD of `main` at the tag) and
+need only a patched `wpad` on the target for the external-RSN options:
+
+```sh
+MANAGER=10.0.0.1 ./install.sh          # bundle: installs /usr/sbin/capagent + service + conf
+```
+
 ## Verified on
 
 Xiaomi Mi Router 4A Gigabit (ramips/mt7621, OpenWrt 24.10.0, MT7603E +

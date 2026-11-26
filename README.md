@@ -59,7 +59,8 @@ OpenWrt 24.10, MediaTek MT7603E + MT7612E), managed by an
 > Reproduction steps and the message reference:
 > [`docs/MANAGER-ONLY.md`](docs/MANAGER-ONLY.md),
 > [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md),
-> [`docs/FINDINGS.md`](docs/FINDINGS.md).
+> [`docs/FINDINGS.md`](docs/FINDINGS.md). Which manager settings are proven and
+> which are not: [`docs/CAPSMAN-COVERAGE.md`](docs/CAPSMAN-COVERAGE.md).
 
 ---
 
@@ -577,6 +578,7 @@ the stale-ifindex self-test (`--selftest-pmap`, `scripts/test-pmap-refresh.sh`).
 ```
 cap-client/
 ├── docs/
+│   ├── CAPSMAN-COVERAGE.md  # which manager settings are proven and which are not
 │   ├── MANAGER-ONLY.md       # what is proven, what is open, reproduce zero-config
 │   ├── OPEN-PROBLEMS.md      # tracked blockers + verified facts
 │   ├── ARCHITECTURE.md       # datapath modes and split-MAC chain
