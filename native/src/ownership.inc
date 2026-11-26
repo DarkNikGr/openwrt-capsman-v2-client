@@ -781,7 +781,13 @@ static void own_release(struct own_entry *e, const char *why)
         printf("own: %s: stopping hostapd pid=%d (%s)\n", e->ifname, pid, why);
         own_stop_pid(pid);
     }
-    if (ifindex > 0 && !own_nd_has(e->ifname, NULL, 0)) {
+    /* Never delete a netdev while the phy-wide hostapd is running: the BSS is
+       in its config, and removing the interface makes hostapd try to recreate
+       it and fail with -23 (that killed every BSS). */
+    if (ifindex > 0 && vap_phy_pid_for_ifname(e->ifname) > 0) {
+        printf("own: %s: phy hostapd running, keeping netdev (%s)\n",
+               e->ifname, why);
+    } else if (ifindex > 0 && !own_nd_has(e->ifname, NULL, 0)) {
         int rc = vap_netdev_del(ifindex);
         printf("own: %s: delete netdev ifindex=%d rc=%d (%s)\n",
                e->ifname, ifindex, rc, why);
