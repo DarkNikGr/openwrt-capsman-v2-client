@@ -34,12 +34,17 @@ IB_URL=https://downloads.openwrt.org/releases/$VERSION/targets/$TARGET/openwrt-i
 
 say() { echo "[image] $*" >&2; }
 
+for tool in curl tar zstd unsquashfs sha256sum dd; do
+	command -v "$tool" >/dev/null 2>&1 ||
+		{ say "host prerequisite missing: $tool"; exit 1; }
+done
+
 mkdir -p "$WORK"
 SDK=$WORK/sdk
 IB=$WORK/ib
 
 # 1. SDK with our package trees (same overlay the wpad build needs).
-if [ ! -x "$SDK/rules.mk" ]; then
+if [ ! -f "$SDK/rules.mk" ]; then
 	say "building the SDK with the hostapd tree (scripts/build-wpad-9999a.sh)"
 	"$REPO/scripts/build-wpad-9999a.sh" "$WORK/wpad" >&2
 	ln -sfn "$WORK/wpad/sdk" "$SDK"
@@ -51,14 +56,22 @@ sed -i 's/^PKG_RELEASE:=.*/PKG_RELEASE:=99/' "$HK/Makefile"
 rm -rf "$SDK/build_dir/target-mipsel_24kc_musl/hostapd-wpad-full-mbedtls"
 ( cd "$SDK" && make package/network/services/hostapd/compile ) >&2
 
-# 3. capagent package (static binary from native/).
+# 3. capagent package (static binary from native/).  A clean clone does not
+#    contain native/capagent-mipsel (it is a build artefact), so build it from
+#    the SDK's toolchain + the mbedTLS that step 1 just staged.
+CAPAGENT_BIN=$REPO/native/capagent-mipsel
+if [ ! -f "$CAPAGENT_BIN" ]; then
+	say "building capagent-mipsel (scripts/build-mipsel.sh)"
+	CAPAGENT_BIN=$WORK/capagent-mipsel
+	SDK=$SDK OUT=$CAPAGENT_BIN "$REPO/scripts/build-mipsel.sh" >&2
+fi
 rm -rf "$SDK/package/capagent"
 cp -a "$REPO/openwrt/capagent" "$SDK/package/capagent"
 ( cd "$SDK" && make package/capagent/compile \
-	CAPAGENT_BIN="$REPO/native/capagent-mipsel" ) >&2
+	CAPAGENT_BIN="$CAPAGENT_BIN" PKG_VERSION="$(cat "$REPO/VERSION")" ) >&2
 
 # 4. ImageBuilder.
-if [ ! -x "$IB/Makefile" ]; then
+if [ ! -f "$IB/Makefile" ]; then
 	say "downloading the $VERSION ImageBuilder"
 	curl -fsSL -o "$WORK/ib.tar.zst" "$IB_URL"
 	mkdir -p "$IB"
@@ -98,8 +111,9 @@ TMP=$WORK/verify
 rm -rf "$TMP" "$WORK/payload.sqsh"
 mkdir -p "$TMP"
 OFF=$(grep -abo hsqs "$IMG" | head -1 | cut -d: -f1)
+[ -n "$OFF" ] || { say "no squashfs payload found in $IMG"; exit 1; }
 dd if="$IMG" of="$WORK/payload.sqsh" bs=1 skip="$OFF" status=none
-unsquashfs -q -d "$TMP" "$WORK/payload.sqsh" >/dev/null
+unsquashfs -q -no-exit-code -d "$TMP" "$WORK/payload.sqsh" >/dev/null
 
 need() { [ -e "$TMP/$1" ] || { say "MISSING $1"; exit 1; }; }
 need usr/sbin/capagent
@@ -110,6 +124,9 @@ for s in external_rsn_sae EXT_AUTH_MGMT_TX external_rsn_ie; do
 	grep -q "$s" "$TMP/usr/sbin/wpad" ||
 		{ say "the wpad in the image is the stock one (missing $s)"; exit 1; }
 done
+if grep -q "EXT-DBG" "$TMP/usr/sbin/wpad"; then
+	say "the wpad in the image carries EXT-DBG debug probes"; exit 1
+fi
 
 echo "image: $IMG"
 echo "size:  $(stat -c%s "$IMG") bytes"
