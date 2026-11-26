@@ -169,33 +169,41 @@ control plane; only the data path differs.
 
 ## Status
 
+Last updated 2026-11-26 against `main`. "Live" means the reference Xiaomi
+Mi Router 4A + RB1100AHx4 / RouterOS 7.25.1; "lab" means CHR 7.25.1 + hwsim.
+
 | Capability | State |
 |---|---|
-| TLS join (`0x4029` → `0xc029`), certificate enrollment | ✅ |
-| NEWPHY capabilities (`0x001d`), channel selection (`0x000a`/`0x00b7`/`0x0061`) | ✅ |
-| VAP create (`0x500b` → `0xd00b`) | ✅ creates the netdev, manager accepts the reply |
-| VAP destroy (`0x600c`) | ❌ not implemented (no hostapd stop / netdev delete) |
-| Unique vapid per virtual interface | ✅ |
-| Master + virtual interfaces bound & active on the manager | ✅ |
-| SSID / RSN / channel push (`0x6016`, ack `0xe016`) | ✅ received and turned into a BSS |
-| Manager-only VAP creation (zero `wifi-iface`) | ✅ 8/8 on the reference CAP |
-| Per-VAP hostapd (`external_rsn_auth=1`, no PSK) | ✅ 8 instances; 2.4 GHz BSSes up |
-| RSN IE override (`external_rsn_ie`) | ✅ byte-for-byte on host; hardware station proof pending |
-| 5 GHz hostapd start | ❌ VHT80/regulatory config, open |
-| VLAN push (`0x500b` TLV `0x7d`) | ✅ received |
-| Group-key push (`0x201f`) → nl80211 | ✅ |
-| Datachan create (`0x500b` `a2=1`/`a2=2`) | ✅ reachable |
-| Datachan keepalive (UDP 5248) | ✅ |
-| Datachan rekey (`0x402b`) | 🟡 protocol proven; client logs/acks today, key-slot install not merged |
-| Datachan plaintext (`a2=1`) send/receive | 🟡 protocol known; client needs the variant branch |
-| Datachan secure (`a2=2`, AES-256-CCM) | 🟡 codec/keepalive proven; manager key gate open |
-| Association + registration row (`0x2018` Auth + AssocReq) | ✅ live (real RB1100) |
-| EAPOL relay (`0x201b` / `0x201c`) + `0x201f` PTK install | ✅ live; per-BSS extmux relay |
-| Hostapd `external_rsn_auth` / `external_rsn_ie` patches | ✅ patch in `docs/patches/`; image content-verified |
-| Status/traffic (`0x200e` / `0x2015`) | ✅ corrected sender; manager applies fields |
+| TLS join (`0x4029` → `0xc029`) | ✅ live |
+| Certificate enrolment (`0x76` → `0x77`/`0x78`), random CN, re-enrol on expiry/rotation/duplicate | ✅ lab 10/10, live enrolment |
+| NEWPHY capabilities (`0x001d`) | ✅ live |
+| Channel selection (`0x000a`/`0x00b7`/`0x0061`) with one descriptor per (freq, band, width) | ✅ live (`2ghz-n`, `5ghz-ac` start) |
+| VAP create (`0x500b` → `0xd00b`) with a real ifindex | ✅ live 8/8 |
+| VAP destroy (`0x600c`): hostapd stop, netdev delete, vapid release, orphan reaping | ✅ live 3 cycles × 8 VAPs, 0 failures |
+| Manager-only VAP creation (zero `wifi-iface`) | ✅ live 8/8 |
+| Per-VAP hostapd (`external_rsn_auth=1`, **no PSK**) | ✅ live 8 instances |
+| RSN IE override (`external_rsn_ie`) — beacon == manager M3 | ✅ lab byte-for-byte; live station connects with no IE mismatch |
+| 5 GHz per-BSS start (mt76x02 BSS index, `noscan`, regulatory) | ✅ live 8/8 `AP-ENABLED` (4×2.4 + 4×5 VHT80) |
+| VLAN push (`0x500b` `0x7d`) | ✅ live |
+| Group/PTK keys (`0x201f` → nl80211), GTK/IGTK/BIGTK class pairing | ✅ live + lab |
+| Datachan create (`0x500b` `a2=1`) | ✅ live |
+| Datachan keepalive (UDP 5248) | ✅ live |
+| Datachan plaintext (`a2=1`) frames | ✅ live 26 frames |
+| Datachan secure (`a2=2`, AES-256-CCM) | 🟡 code + KAT; never live (manager-side key gate) |
+| Datachan rekey (`0x402b`) | 🟡 protocol proven; slot install not merged |
+| Association + manager registration row (`0x2018`) | ✅ live |
+| EAPOL relay (`0x201b`/`0x201c`) + `0x201f` PTK install | ✅ live (M1→M2→M3); per-BSS extmux relay |
+| Raw Auth/AssocReq relay for 4-interface radios (no monitor VIF) | ✅ code (`58a3149`), needs a wpad with `9999a` |
+| PSK-free WPA2-PSK / WPA2-EAP / open | ✅ lab: 9/9 cells each × 3 datapaths × 3 PMF |
+| PSK-free SAE / OWE | ✅ lab (SAE pass, OWE 14/14) with `9999a`-class patches |
+| Ownership: netifd wins, ubus→uci→file→refuse, MLD never adopted | ✅ live + 27-check selftest |
+| Recovery: new-session deauth, frame deadline, silence reconnect, fail-closed TLS | ✅ lab |
+| Status/traffic (`0x200e`/`0x2015`) | ✅ |
+| Regression harness + committed baselines | ✅ `scripts/w42_harness.py` |
+| CI (host + ASan/UBSan + mipsel qemu) | ✅ `.github/workflows/ci.yml` |
 | PSK / passphrase delivery by CAPsMAN v2 | — not a protocol feature; never sent |
-| Boot-time config pull (PSK fallback) | 🟡 validated prototype; productionization open |
-| Zero-touch image + factory reset | 🟡 image built/verified, never flashed |
+| Boot-time config pull (PSK fallback) | 🟡 prototype only |
+| Zero-touch image + factory reset | 🟡 image built, 55/55 static checks, never flashed |
 
 ### Datachan variants
 
@@ -261,19 +269,26 @@ manager authenticates and the CAP only handles EAPOL and derived keys.
 
 ## Open questions
 
-* Hardware/factory-reset acceptance of the zero-touch image (built, never
-  flashed).
-* 5 GHz hostapd start on the MT7612E (VHT80 centre frequency, HT40, regulatory
-  domain).
-* VAP lifecycle: implement `0x600c` teardown and vapid release.
-* Station-side M3 acceptance with the patched `wpad` on a real client.
-* Manager-side datachan key install on a radio-less manager (the secure c2
-  gate above).
-* Automatic `a2=1` plain vs `a2=2` secure selection in the client (the codec
-  is secure-only today; the wire rule is documented).
-* Multi-VAP datachan TX key selection, PMF/IGTK live validation, and a
-  full hardware matrix on the Xiaomi + RB1100.
-* Rekey/deauth/restart soak tests on real hardware.
+What is genuinely still open, in priority order:
+
+1. **One clean end-to-end live run in manager-only mode.** Every piece is
+   proven separately — 8/8 VAPs, PSK-free configs with the manager's RSN IE,
+   association, M1→M2→M3, `0x201f` keys, DHCP/ping over a *local* BSS — but not
+   all of them in a single undisturbed run since the `0x2018` fallback
+   (`58a3149`) landed. Needs a wpad carrying `9999a` and a quiet window.
+2. **Legacy mode is not fully passive.** `vap_provision()` is gated
+   (`3582444`), but a stale journal (`/var/run/capagent-vaps.state`) still lets
+   the reconcile loop start hostapd on netifd-owned BSSes. The same gate must
+   be applied to the reconcile path.
+3. **Secure datachan (`a2=2`)** — codec and KATs done, manager-side key install
+   never succeeds on a radio-less CHR; unproven on a radio-bearing manager.
+4. **Factory reset on hardware** — the zero-touch image has never been flashed;
+   certificate enrolment removes the need for a baked cert.
+5. **Multi-VAP concurrency** for SAE/OWE/PMF, GTK rekey soak, and a full
+   hardware matrix on Xiaomi + RB1100.
+6. **6 GHz / MLO** — ath12k per-link plumbing (Deco BE65) is not implemented;
+   the Deco is used read-only.
+7. **Boot-time PSK pull** — validated prototype for local forwarding only.
 
 ## How it works
 
