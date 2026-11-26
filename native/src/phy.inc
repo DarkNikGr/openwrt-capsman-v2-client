@@ -43,20 +43,42 @@ static int vap_proc_has_conf(pid_t pid, const char *conf)
     return 0;
 }
 
+/* A zombie still answers kill(pid, 0), so a dead hostapd would look alive and
+ * the reconcile would never restart it.  Read the state from /proc. */
+static int pid_is_zombie(pid_t pid)
+{
+    char p[64], buf[256];
+    snprintf(p, sizeof(p), "/proc/%ld/stat", (long)pid);
+    int fd = open(p, O_RDONLY);
+    if (fd < 0) return 0;
+    ssize_t n = read(fd, buf, sizeof(buf) - 1);
+    close(fd);
+    if (n <= 0) return 0;
+    buf[n] = 0;
+    char *rp = strrchr(buf, ')');
+    if (!rp || rp[1] != ' ') return 0;
+    return rp[2] == 'Z';
+}
+
 static pid_t vap_phy_pid(int phy)
 {
     char conf[128], pidf[128], logf[128];
     vap_phy_paths(phy, conf, sizeof(conf), pidf, sizeof(pidf),
                   logf, sizeof(logf));
     FILE *f = fopen(pidf, "r");
+    long fpid = 0;
+    int fgot = 0;
     if (f) {
-        long pid = 0;
-        int got = fscanf(f, "%ld", &pid);
+        fgot = fscanf(f, "%ld", &fpid);
         fclose(f);
-        if (got == 1 && pid > 0 &&
-            (kill((pid_t)pid, 0) == 0 || errno == EPERM) &&
-            vap_proc_has_conf((pid_t)pid, conf))
-            return (pid_t)pid;
+        if (fgot == 1 && fpid > 0 && pid_is_zombie((pid_t)fpid)) {
+            int wst;
+            waitpid((pid_t)fpid, &wst, WNOHANG);
+            fpid = 0;
+        } else if (fgot == 1 && fpid > 0 &&
+                   (kill((pid_t)fpid, 0) == 0 || errno == EPERM) &&
+                   vap_proc_has_conf((pid_t)fpid, conf))
+            return (pid_t)fpid;
     }
     DIR *d = opendir("/proc");
     if (!d) return 0;
@@ -69,6 +91,9 @@ static pid_t vap_phy_pid(int phy)
         if (vap_proc_has_conf((pid_t)c, conf)) { found = (pid_t)c; break; }
     }
     closedir(d);
+    if (getenv("CAPAGENT_DBG_PID"))
+        printf("dbg-pid: phy%d pidf=%s got=%d pid=%ld scan=%d\n", phy, pidf,
+               fgot, fpid, (int)found);
     return found;
 }
 
@@ -211,37 +236,65 @@ static int vap_phy_apply(int phy, const struct cfg *c)
     if (phy < 0 || phy >= MAX_RADIOS) return -1;
     if (wl_legacy()) return -1;
 
-    /* Only rows whose netdev already exists: hostapd must attach to the
-       interfaces capagent created, never create them itself.  Creating them
-       inside hostapd hits the phy's vif limit and fails with -23 (ENFILE). */
-    /* Leave one interface free for the management monitor VIF: with
-       mgmt_source=monitor capagent needs a slot on the same phy, and asking
-       hostapd for every BSS plus the monitor overruns the driver's vif limit
-       (hostapd then reports -23/ENFILE and the BSSes die). */
-
-    int n = 0;
+    /* Rows with a start body.  The master (lowest vapid) is the netdev hostapd
+     * attaches to with `interface=`; it must exist.  Every other BSS is handed
+     * over: capagent deletes its netdev and hostapd creates it, the OpenWrt
+     * model.  Static `bss=` setup always issues NL80211_CMD_NEW_INTERFACE for
+     * a secondary, so leaving our netdev in place only makes hostapd delete
+     * and re-create it behind our back (the -23 churn). */
+    int n = 0, master = -1;
     for (int i = 0; i < OWN_MAX; i++) {
         struct own_entry *e = &g_own[i];
-        if (!vap_phy_row_ready(e, phy)) {
-            if (e->used && e->active && (e->port >> 8) == phy)
-                printf("vap: phy%d: %s has no netdev, not in the config\n",
-                       phy, e->ifname);
+        if (!e->used || !e->active || !e->start_len || !e->ifname[0] ||
+            (e->port >> 8) != phy)
             continue;
-        }
         n++;
+        if (master < 0 || (e->port & 0xff) < (g_own[master].port & 0xff))
+            master = i;
     }
-    if (!n) return -1;
-    /* Start only when the phy has settled: the driver's real netdev count
-       must be unchanged for 2.5 s and every journaled row must have its
-       netdev.  Rebuilding while interfaces are still being created restarted
-       hostapd mid-flight and lost the BSSes. */
+    if (!n || master < 0) return -1;
+
+    /* Idempotent: a live hostapd that already carries exactly these rows must
+     * not be restarted.  Every caller (reconcile, retry, auto-heal) used to
+     * rebuild the radio, which invalidated the other rows and pulled the phy
+     * into a permanent restart loop. */
+    {
+        pid_t live = vap_phy_pid(phy);
+        if (live > 0) {
+            int same = 1;
+            for (int i = 0; i < OWN_MAX; i++) {
+                struct own_entry *e = &g_own[i];
+                if (!e->used || !e->active || !e->start_len ||
+                    (e->port >> 8) != phy)
+                    continue;
+                if (e->applied_len != e->start_len ||
+                    e->applied_hash != own_body_hash(e->start, e->start_len)) {
+                    same = 0;
+                    break;
+                }
+            }
+            if (same) {
+                for (int i = 0; i < OWN_MAX; i++) {
+                    struct own_entry *e = &g_own[i];
+                    if (!e->used || (e->port >> 8) != phy) continue;
+                    e->pid = (int)live;
+                    if (!e->ifindex) e->ifindex = if_nametoindex(e->ifname);
+                }
+                return (int)live;
+            }
+        }
+    }
+
+    /* Start only when the phy has settled: the driver's netdev count for this
+     * phy must be unchanged for 2.5 s.  Rebuilding while interfaces are still
+     * appearing restarted hostapd mid-flight and lost the BSSes. */
     {
         static int last_count[MAX_RADIOS];
         static uint64_t last_at[MAX_RADIOS];
         char p[96];
+        int real = 0;
         snprintf(p, sizeof(p), "/sys/class/ieee80211/phy%d/device/net",
                  real_phy(phy));
-        int real = 0;
         DIR *d = opendir(p);
         if (d) {
             struct dirent *de;
@@ -255,15 +308,6 @@ static int vap_phy_apply(int phy, const struct cfg *c)
             return -1;
         }
         if (own_now_ms() - last_at[phy] < 2500) return -1;
-        for (int i = 0; i < OWN_MAX; i++) {
-            struct own_entry *e = &g_own[i];
-            if (e->used && e->active && (e->port >> 8) == phy &&
-                e->ifname[0] && if_nametoindex(e->ifname) <= 0)
-                return -1;
-        }
-        printf("vap: phy%d settled with %d netdev(s), starting hostapd\n",
-               phy, real);
-        fflush(stdout);
     }
 
     char conf[128], pidf[128], logf[128];
@@ -271,58 +315,55 @@ static int vap_phy_apply(int phy, const struct cfg *c)
                   logf, sizeof(logf));
     vap_phy_stop(phy);
 
-    /* Free every vif the driver still holds for this phy before asking for
-       the monitor: a row whose netdev is gone but whose ifindex is still
-       allocated keeps the slot, which is why mon_create() reported "no free
-       slot" even though the BSS count looked fine. */
-    for (int i = 0; i < OWN_MAX; i++) {
-        struct own_entry *e = &g_own[i];
-        if (!e->used || (e->port >> 8) != phy) continue;
-        if (e->ifname[0] && if_nametoindex(e->ifname) > 0) continue;
-        if (e->ifindex > 0) {
-            char nm[IF_NAMESIZE];
-            vap_netdev_del(e->ifindex);
-            for (int k = 0; k < 40; k++) {
-                if (!if_indextoname((unsigned)e->ifindex, nm)) break;
-                usleep(25000);
-            }
-            printf("vap: phy%d: freed stale ifindex %d for %s\n", phy,
-                   e->ifindex, e->ifname[0] ? e->ifname : "?");
+    /* The master must exist; create it if the manager's 0x500b was lost. */
+    struct own_entry *m = &g_own[master];
+    if (if_nametoindex(m->ifname) <= 0) {
+        int idx = vap_netdev_create(phy, m->ifname, m->bssid);
+        if (idx <= 0) {
+            printf("vap: phy%d: master %s could not be created\n",
+                   phy, m->ifname);
             fflush(stdout);
-            e->ifindex = 0;
-            g_own_dirty = 1;
+            return -1;
         }
+        m->ifindex = idx;
+        g_own_dirty = 1;
     }
 
-    /* Reserve the management monitor on this phy *before* hostapd starts:
-       whoever asks the driver first gets the last vif slot, and hostapd taking
-       it makes the monitor impossible (-23 for our BSSes). */
-    if (c->mgmt_source == 2 || c->mgmt_source == 0) {
-        int mi = mon_create(phy);
-        if (mi > 0) {
-            char nm[IF_NAMESIZE];
-            if (if_indextoname((unsigned)mi, nm))
-                printf("vap: phy%d monitor %s ifindex=%d reserved\n",
-                       phy, nm, mi);
-        } else {
-            printf("vap: phy%d no free slot for a monitor VIF\n", phy);
+    /* Hand the secondary BSSes over to hostapd. */
+    for (int i = 0; i < OWN_MAX; i++) {
+        struct own_entry *e = &g_own[i];
+        int idx;
+        if (i == master || !e->used || !e->active || !e->start_len ||
+            !e->ifname[0] || (e->port >> 8) != phy)
+            continue;
+        e->handed_over = 1;
+        idx = if_nametoindex(e->ifname);
+        if (idx <= 0) continue;
+        vap_netdev_del(idx);
+        for (int k = 0; k < 40; k++) {
+            if (!if_nametoindex(e->ifname)) break;
+            usleep(25000);
         }
+        printf("vap: phy%d: handed %s over to hostapd (was ifindex %d)\n",
+               phy, e->ifname, idx);
         fflush(stdout);
+        e->ifindex = 0;
+        g_own_dirty = 1;
     }
 
     FILE *f = fopen(conf, "w");
     if (!f) return -1;
-    int first = 1, written = 0;
+    int first = 1;
     for (int i = 0; i < OWN_MAX; i++) {
         struct own_entry *e = &g_own[i];
-        if (!vap_phy_row_ready(e, phy))
+        if (!e->used || !e->active || !e->start_len || !e->ifname[0] ||
+            (e->port >> 8) != phy)
             continue;
         char ctrl[128];
         snprintf(ctrl, sizeof(ctrl), "/var/run/hostapd/%s", e->ifname);
         unlink(ctrl);
         vap_phy_bss(f, first ? "interface" : "bss", e, c, first);
         first = 0;
-        written++;
     }
     if (getenv("CAPAGENT_HOSTAPD_DEBUG"))
         fprintf(f, "logger_syslog=-1\nlogger_stdout_level=3\n");
@@ -336,7 +377,11 @@ static int vap_phy_apply(int phy, const struct cfg *c)
             execl(hostapd_exe_path(), "hostapd", "-dd", "-P", pidf, conf,
                   (char *)NULL);
         else
-            execl(hostapd_exe_path(), "hostapd", "-B", "-P", pidf, conf,
+            /* No -B: hostapd stays our direct child, so (a) its pid is the one
+             * fork() returned instead of a pid file that -B writes late or
+             * leaves empty, and (b) it cannot be reparented and die on its
+             * own after AP-ENABLED (that was the restart loop). */
+            execl(hostapd_exe_path(), "hostapd", "-P", pidf, conf,
                   (char *)NULL);
         _exit(127);
     }
@@ -357,25 +402,33 @@ static int vap_phy_apply(int phy, const struct cfg *c)
     }
     int ready = vap_wait_ap_enabled(logf, 15000);
     pid_t hp = vap_phy_pid(phy);
+    if (hp <= 0) {
+        int wst = 0;
+        if (waitpid(pid, &wst, WNOHANG) == 0) hp = pid;   /* still our child */
+    }
     if (ready <= 0) {
         printf("vap: phy%d hostapd not ready (%d), see %s\n", phy, ready, logf);
         fflush(stdout);
         if (hp > 0) kill(hp, SIGKILL);
         return -1;
     }
-    /* Every journaled VAP of this phy is carried by this one process: record
-     * the pid on all of them, otherwise each row's reconcile thinks its
-     * hostapd is dead and restarts the phy on every tick. */
+
+    /* The master is ours, the secondaries belong to hostapd now.  Record what
+     * the live config carries and refresh every ifindex from the real netdev
+     * so the datapath and the 0x2018 relay address what exists. */
     if (hp > 0) {
         FILE *pf = fopen(pidf, "w");
         if (pf) { fprintf(pf, "%d\n", (int)hp); fclose(pf); }
         for (int i = 0; i < OWN_MAX; i++) {
             struct own_entry *e = &g_own[i];
-            if (e->used && e->active && (e->port >> 8) == phy) {
-                e->pid = (int)hp;
-                e->fail_count = 0;
-                e->retry_at = 0;
-            }
+            if (!e->used || !e->active || (e->port >> 8) != phy) continue;
+            e->pid = (int)hp;
+            e->fail_count = 0;
+            e->retry_at = 0;
+            e->ifindex = if_nametoindex(e->ifname);
+            e->applied_len = e->start_len;
+            e->applied_hash = own_body_hash(e->start, e->start_len);
+            if (e->ifindex > 0) own_mirror(e);
         }
         g_own_dirty = 1;
         own_save();

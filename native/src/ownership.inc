@@ -90,6 +90,9 @@ struct own_entry {
     char ifname[OWN_NAME_MAX];
     char section[OWN_SECTION_MAX];
     uint16_t start_len;         /* last 0x6016 body, for auto-heal */
+    int handed_over;            /* hostapd owns this BSS netdev */
+    uint32_t applied_hash;      /* body hash in the live phy config */
+    uint16_t applied_len;       /* 0 = not in the live config */
     uint8_t start[OWN_START_MAX];
 };
 
@@ -494,10 +497,12 @@ static void own_save(void)
         if (!e->used || !e->ifname[0])
             continue;
         fprintf(f, "port=%04x ifname=%s ifindex=%d owner=%s pid=%d "
-                   "created=%d active=%d bssid=%02x:%02x:%02x:%02x:%02x:%02x "
+                   "created=%d active=%d handed=%d app_len=%u app_hash=%08x "
+                   "bssid=%02x:%02x:%02x:%02x:%02x:%02x "
                    "vlan=%u freq=%u section=%s start=",
                 e->port, e->ifname, e->ifindex, own_owner_name(e->owner),
-                e->pid, e->created, e->active,
+                e->pid, e->created, e->active, e->handed_over,
+                e->applied_len, e->applied_hash,
                 e->bssid[0], e->bssid[1], e->bssid[2],
                 e->bssid[3], e->bssid[4], e->bssid[5],
                 e->vlan, e->freq, e->section[0] ? e->section : "-");
@@ -556,6 +561,12 @@ static void own_load(void)
                 tmp.owner = own_owner_parse(val);
             } else if (!strcmp(key, "pid")) {
                 tmp.pid = atoi(val);
+            } else if (!strcmp(key, "handed")) {
+                tmp.handed_over = atoi(val);
+            } else if (!strcmp(key, "app_len")) {
+                tmp.applied_len = (uint16_t)atoi(val);
+            } else if (!strcmp(key, "app_hash")) {
+                tmp.applied_hash = (uint32_t)strtoul(val, NULL, 16);
             } else if (!strcmp(key, "created")) {
                 tmp.created = atoi(val) ? 1 : 0;
             } else if (!strcmp(key, "active")) {
@@ -976,6 +987,18 @@ static void own_sync_netifd(void)
 }
 
 /* Try to repair CAPAGENT rows; only runs with a usable netifd probe. */
+/* FNV-1a over a 0x6016 body: identifies which configuration the live phy
+ * hostapd carries, so a row whose body is already applied is never rebuilt. */
+static uint32_t own_body_hash(const uint8_t *b, uint16_t n)
+{
+    uint32_t h = 2166136261u;
+    for (uint16_t i = 0; i < n; i++) {
+        h ^= b[i];
+        h *= 16777619u;
+    }
+    return h ? h : 1u;
+}
+
 static void own_reconcile(const struct cfg *c)
 {
     own_sync_netifd();
@@ -1003,6 +1026,21 @@ static void own_reconcile(const struct cfg *c)
         }
 
         ifindex = read_sysfs_int(e->ifname, "ifindex");
+        /* A BSS handed over to the phy hostapd is created by hostapd, not by
+         * us.  Wait for it: recreating it here deletes the netdev hostapd
+         * just made, hostapd's BSS dies and the radio restarts.  That was the
+         * remaining live loop. */
+        if (e->handed_over && e->start_len &&
+            e->applied_len == e->start_len &&
+            e->applied_hash == own_body_hash(e->start, e->start_len)) {
+            pid_t pp = vap_phy_pid_for_ifname(e->ifname);
+            if (pp > 0) {
+                e->pid = (int)pp;
+                e->ifindex = ifindex > 0 ? ifindex : 0;
+                if (ifindex > 0) own_mirror(e);
+                continue;
+            }
+        }
         if (getenv("CAPAGENT_DBG_OWN") && ifindex > 0)
             printf("dbg: %s port=0x%04x pid=%d alive=%d idx=%d active=%d "
                    "start_len=%u owner=%d\n", e->ifname, e->port, e->pid,
@@ -1135,6 +1173,17 @@ static int own_claim(const struct cfg *c, int phy, int vapid,
        netdev/hostapd for the same port (the live restart loop). */
     if (e && e->used && e->ifname[0]) {
         int live = read_sysfs_int(e->ifname, "ifindex");
+        /* Handed over to the phy hostapd: the port already has its BSS, even
+         * when the netdev is not visible yet (hostapd creates it). */
+        if (live <= 0 && e->handed_over &&
+            vap_phy_pid_for_ifname(e->ifname) > 0) {
+            e->owner = OWN_CAPAGENT;
+            if (ifname) snprintf(ifname, ifname_len, "%.*s",
+                                 (int)ifname_len - 1, e->ifname);
+            if (ifindex) *ifindex = 0;
+            if (managed) *managed = 1;
+            return 1;
+        }
         if (live > 0) {
             /* The journal already chose this name for the port: reuse it
                unconditionally, so a later ubus claim or a missing hostapd
