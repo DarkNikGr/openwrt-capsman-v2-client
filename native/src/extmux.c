@@ -928,6 +928,21 @@ int extmux_ptk_installed(struct extmux *m, uint16_t port,
     s->state = EXTMUX_PTK;
     s->authz_want = 1;
     s->deadline = now_ms() + m->fourway_ms;
+    /* If this BSS has no usable hostapd control socket (its abstract source
+     * address can be taken, or hostapd did not create the per-BSS socket),
+     * EXT_AUTH_AUTHORIZE can never be delivered and the session dies on the
+     * 4-way timeout with the station unauthorized - no data passes.  Authorize
+     * through nl80211 immediately instead of waiting for the deadline. */
+    if (v->ctrl_fd < 0 && m->cb.on_direct_authz) {
+        if (m->cb.on_direct_authz(m->cb.ctx, v, mac) == 0) {
+            s->authz_want = 0;
+            v->direct_authz = 1;
+            mlog(m, "extmux: no ctrl socket on %s; authorized " MAC_FMT
+                 " through nl80211", v->ifname, MAC_ARG(mac));
+            sess_authorized(m, v, s);
+            return 0;
+        }
+    }
     mlog(m, "extmux: PTK installed port=0x%04x " MAC_FMT ", authorizing",
          port, MAC_ARG(mac));
     return 0;

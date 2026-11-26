@@ -149,11 +149,16 @@ static void vap_phy_bss(FILE *f, const char *kw, const struct own_entry *e,
     vap_bridge_if_present(e->ifname, e->vlan, bridge, sizeof(bridge));
 
     fprintf(f, "%s=%s\n", kw, e->ifname);
+    /* ctrl_interface must be repeated in EVERY section: hostapd only creates
+     * /var/run/hostapd/<ifname> for the BSSes that carry it, and without that
+     * socket EXT_AUTH_AUTHORIZE cannot be delivered, so the station stays
+     * unauthorized and no data passes (this is exactly what netifd's generated
+     * config does). */
+    if (c->ext_ctrl_dir || c->ext_auth_dir)
+        fprintf(f, "ctrl_interface=%s\n",
+                c->ext_ctrl_dir ? c->ext_ctrl_dir : c->ext_auth_dir);
     if (is_first) {
         fprintf(f, "driver=nl80211\nauth_algs=1\n");
-        if (c->ext_ctrl_dir || c->ext_auth_dir)
-            fprintf(f, "ctrl_interface=%s\n",
-                    c->ext_ctrl_dir ? c->ext_ctrl_dir : c->ext_auth_dir);
         vap_write_channel(f, e->freq, vap_mgr_width(chv, cl));
     }
     if (ssid && sl) fprintf(f, "ssid=%.*s\n", (int)sl, (const char *)ssid);
