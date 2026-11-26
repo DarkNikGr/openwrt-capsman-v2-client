@@ -544,8 +544,10 @@ static void test_pidfile_fallback(void)
     claim_start(&T, 0, 0, "phy0-ap0");
     before = g_starts;
     unlink_pidfile("phy0-ap0", 0);
+    g_find_calls = 0;
     simulate_agent_restart();
     own_service(&T);
+    check(g_find_calls > 0, "missing pid file: process-table fallback used");
     check(g_starts == before, "missing pid file: live hostapd adopted, "
                               "no second daemon");
     check(entry_owner(0) == OWN_CAPAGENT, "missing pid file: still ours");
@@ -555,7 +557,7 @@ static void test_pidfile_fallback(void)
     own_service(&T);
     check(g_starts == before, "empty pid file: no second daemon");
 
-    /* The adopted daemon really dies: the fallback must not keep it alive. */
+    /* The adopted daemon really dies: own_service must restart it. */
     for (int p = 0; p < 4096; p++)
         g_pid_alive[p] = 0;
     unlink_pidfile("phy0-ap0", 0);
@@ -567,6 +569,9 @@ static void test_pidfile_fallback(void)
 static void test_sibling_bss_identity(void)
 {
     int pid1 = 0, pid10 = 0, before;
+    /* Pins the exact-ifname contract ownership.inc needs from
+     * vap_find_hostapd().  vap.inc's real /proc lookup matches with strstr()
+     * and does not meet it yet; this case does not test that code. */
     printf("-- phy0-ap1 vs phy0-ap10 identity --\n");
     set_nd("{}");
     reset_all();
@@ -582,8 +587,10 @@ static void test_sibling_bss_identity(void)
     g_pid_alive[pid1] = 0;
     unlink_pidfile("phy0-ap1", 0);
     before = g_starts;
+    g_find_calls = 0;
     simulate_agent_restart();
     own_service(&T);
+    check(g_find_calls > 0, "phy0-ap1: process-table fallback consulted");
     check(g_starts == before + 1, "phy0-ap1 restarted, not adopted from "
                                   "phy0-ap10");
     check(g_pid_alive[pid10], "phy0-ap10's hostapd untouched");
