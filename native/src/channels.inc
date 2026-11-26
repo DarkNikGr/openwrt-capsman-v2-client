@@ -548,17 +548,35 @@ static void createvap_response(mbedtls_ssl_context *ssl, const uint8_t hdr[10],
                "(owned=%d)\n", phy, vapid, managed);
         vap_bssid_free(phy, bssid);
     } else {
-        /* A pre-existing/adopted netdev keeps its own address (and with it
-         * its driver BSS index); trust sysfs over our plan. */
+        /* The manager assigns every VAP its BSSID and drops a management
+         * frame whose addr1/addr3 is not that BSSID (FINDINGS T13).  For a
+         * netdev we own, make the address match; a netifd-owned/adopted one
+         * keeps its own (read-only contract). */
         uint8_t have[6];
         if (read_sysfs_mac(ifname, have) == 0 &&
             memcmp(have, bssid, 6) != 0) {
-            vap_bssid_free(phy, bssid);
-            memcpy(bssid, have, 6);
-            uint8_t base[6];
-            if (phy_is_mt76x02(phy) && phy_base_mac(phy, base) == 0)
-                g_bss_used[phy % MAX_RADIOS] |=
-                    (uint8_t)(1u << bss_idx_of(base, have));
+            if (managed && set_if_mac(ifname, bssid) == 0) {
+                printf("vap: %s BSSID set to the manager's %02x:%02x:%02x:"
+                       "%02x:%02x:%02x (was %02x:%02x:%02x:%02x:%02x:%02x)\n",
+                       ifname, bssid[0], bssid[1], bssid[2], bssid[3],
+                       bssid[4], bssid[5], have[0], have[1], have[2],
+                       have[3], have[4], have[5]);
+                fflush(stdout);
+            } else {
+                printf("vap: %s keeps its own BSSID %02x:%02x:%02x:%02x:%02x:"
+                       "%02x (manager wants %02x:%02x:%02x:%02x:%02x:%02x, "
+                       "managed=%d, set failed)\n", ifname,
+                       have[0], have[1], have[2], have[3], have[4], have[5],
+                       bssid[0], bssid[1], bssid[2], bssid[3], bssid[4],
+                       bssid[5], managed);
+                fflush(stdout);
+                vap_bssid_free(phy, bssid);
+                memcpy(bssid, have, 6);
+                uint8_t base[6];
+                if (phy_is_mt76x02(phy) && phy_base_mac(phy, base) == 0)
+                    g_bss_used[phy % MAX_RADIOS] |=
+                        (uint8_t)(1u << bss_idx_of(base, have));
+            }
         }
         vapid_set_bssid(phy, mac, bssid);
     }
@@ -601,6 +619,7 @@ static void createvap_response(mbedtls_ssl_context *ssl, const uint8_t hdr[10],
         if (!vp->freq) vp->freq = phy_freq_hint(phy);
         if (!vp->freq) vp->freq = (phy & 1) ? 5180u : 2437u;
         curfreq = vp->freq;
+        memcpy(vp->mgr_bssid, mac, 6);
         memcpy(vp->bssid, bssid, 6);
         vp->ifindex = ifindex;
         if (vp->ifname[0] && strcmp(vp->ifname, ifname)) {

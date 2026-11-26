@@ -45,6 +45,14 @@ SUDO=""
 [ "$(id -u)" -eq 0 ] || SUDO="sudo -n"
 
 cleanup() {
+	# Leave the AP in a clean state: an abrupt teardown (moving the wiphy or
+	# deleting the netns while still associated) leaves hostapd retrying an
+	# authentication response for a station that no longer exists.
+	if [ -n "${IFNAME:-}" ]; then
+		$SUDO ip netns exec "$NETNS" iw dev "$IFNAME" disconnect \
+			>/dev/null 2>&1 || true
+	fi
+	sleep 1
 	if [ -s "$PIDF" ]; then
 		NS=$(cat "$PIDF")
 		$SUDO ip netns exec "$NETNS" iw phy "$PHY" set netns 1 \
@@ -149,6 +157,10 @@ if [ -n "$ADDR" ]; then
 	$SUDO ip netns exec "$NETNS" ping -c 3 -W 2 "$GW" 2>&1 | tail -3 || true
 fi
 
+# SIGTERM makes wpa_supplicant send a Deauthenticate; wait for it so hostapd
+# does not keep a half-associated station.
 kill "$WPID" 2>/dev/null
+wait "$WPID" 2>/dev/null || true
+sleep 1
 [ "$CONNECTED" -eq 1 ] || { say "NOT CONNECTED (log: $LOG)"; exit 1; }
 say "CONNECTED (log: $LOG)"

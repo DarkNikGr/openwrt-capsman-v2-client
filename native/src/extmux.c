@@ -271,6 +271,45 @@ int extmux_add_vap(struct extmux *m, uint16_t port, const char *ifname,
     return 0;
 }
 
+/* Idempotent registration.  A VAP can be recreated with the same ifname while
+ * its ext-auth socket file has been unlinked (hostapd restarted, the directory
+ * was wiped, or a previous close removed it).  Then capagent still thinks the
+ * VAP is registered but hostapd has no path to notify - the manager never sees
+ * the AssocReq and the station times out in ASSOC with no M1.  Rebind instead
+ * of returning early. */
+int extmux_vap_ensure(struct extmux *m, uint16_t port, const char *ifname,
+                      int ifindex, const uint8_t bssid[6])
+{
+    struct extmux_vap *v;
+    char path[256];
+
+    if (!m || !ifname || !*ifname)
+        return -1;
+    v = extmux_vap_by_port(m, port);
+    if (!v)
+        v = extmux_vap_by_ifname(m, ifname);
+    if (!v)
+        return extmux_add_vap(m, port, ifname, ifindex, bssid);
+
+    v->ifindex = ifindex;
+    snprintf(path, sizeof(path), "%s/ext-auth-%s", m->ext_dir, v->ifname);
+    if (access(path, F_OK) == 0)
+        return 0;
+    if (v->ext_fd >= 0) {
+        close(v->ext_fd);
+        v->ext_fd = -1;
+    }
+    if (v->ctrl_fd >= 0) {
+        close(v->ctrl_fd);
+        v->ctrl_fd = -1;
+    }
+    if (bind_ext_socket(m, v) != 0)
+        return -1;
+    mlog(m, "extmux: %s socket was missing, rebound (port=0x%04x ifindex=%d)",
+         v->ifname, port, ifindex);
+    return 0;
+}
+
 int extmux_del_vap(struct extmux *m, uint16_t port)
 {    struct extmux_vap *v = extmux_vap_by_port(m, port);
     char path[256];

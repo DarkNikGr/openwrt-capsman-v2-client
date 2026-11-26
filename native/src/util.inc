@@ -116,6 +116,45 @@ static int read_sysfs_mac(const char *ifname, uint8_t mac[6])
     return 0;
 }
 
+/* Set a netdev's MAC address.  Most drivers require the interface to be down,
+ * so take it down and restore its flags.  Used for the manager-assigned BSSID
+ * of an AP netdev we own. */
+static int set_if_mac(const char *name, const uint8_t mac[6])
+{
+    int fd = socket(AF_INET, SOCK_DGRAM | SOCK_CLOEXEC, 0);
+    if (fd < 0) return -1;
+    struct ifreq ifr;
+    unsigned flags = 0;
+    memset(&ifr, 0, sizeof(ifr));
+    { size_t nl = strlen(name);
+      if (nl >= IFNAMSIZ) nl = IFNAMSIZ - 1;
+      memcpy(ifr.ifr_name, name, nl); ifr.ifr_name[nl] = 0; }
+    if (ioctl(fd, SIOCGIFFLAGS, &ifr) == 0) {
+        flags = (unsigned)ifr.ifr_flags;
+        if (flags & IFF_UP) {
+            ifr.ifr_flags = (short)(flags & ~IFF_UP);
+            ioctl(fd, SIOCSIFFLAGS, &ifr);
+        }
+    }
+    memset(&ifr, 0, sizeof(ifr));
+    { size_t nl = strlen(name);
+      if (nl >= IFNAMSIZ) nl = IFNAMSIZ - 1;
+      memcpy(ifr.ifr_name, name, nl); ifr.ifr_name[nl] = 0; }
+    ifr.ifr_hwaddr.sa_family = ARPHRD_ETHER;
+    memcpy(ifr.ifr_hwaddr.sa_data, mac, 6);
+    int r = ioctl(fd, SIOCSIFHWADDR, &ifr);
+    if (flags & IFF_UP) {
+        memset(&ifr, 0, sizeof(ifr));
+        { size_t nl = strlen(name);
+      if (nl >= IFNAMSIZ) nl = IFNAMSIZ - 1;
+      memcpy(ifr.ifr_name, name, nl); ifr.ifr_name[nl] = 0; }
+        ifr.ifr_flags = (short)flags;
+        ioctl(fd, SIOCSIFFLAGS, &ifr);
+    }
+    close(fd);
+    return r;
+}
+
 static void read_trim(const char *path, char *out, size_t n)
 {
     out[0] = 0;

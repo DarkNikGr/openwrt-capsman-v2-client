@@ -32,6 +32,7 @@
 #include <linux/netlink.h>
 #include <linux/rtnetlink.h>   /* RTM_NEWLINK: create br-vlan<N> on demand */
 #include <linux/if_link.h>
+#include <linux/if_arp.h>
 #include <linux/genetlink.h>
 #include <linux/nl80211.h>
 #include <linux/if_ether.h>

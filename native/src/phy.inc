@@ -152,6 +152,18 @@ static void vap_phy_bss(FILE *f, const char *kw, const struct own_entry *e,
     vap_bridge_if_present(e->ifname, e->vlan, bridge, sizeof(bridge));
 
     fprintf(f, "%s=%s\n", kw, e->ifname);
+    /* CAPsMAN assigns each VAP its BSSID and drops management frames whose
+     * addr1/addr3 is not it (FINDINGS T13).  The driver derives its own
+     * addresses for secondary BSSes, so hand hostapd the manager's address
+     * explicitly; it applies it when it creates the interface. */
+    {
+        struct vap *vp = vap_get(e->port >> 8, e->port & 0xff);
+        if (vp && (vp->mgr_bssid[0] | vp->mgr_bssid[1] | vp->mgr_bssid[2] |
+                   vp->mgr_bssid[3] | vp->mgr_bssid[4] | vp->mgr_bssid[5]))
+            fprintf(f, "bssid=%02x:%02x:%02x:%02x:%02x:%02x\n",
+                    vp->mgr_bssid[0], vp->mgr_bssid[1], vp->mgr_bssid[2],
+                    vp->mgr_bssid[3], vp->mgr_bssid[4], vp->mgr_bssid[5]);
+    }
     /* ctrl_interface must be repeated in EVERY section: hostapd only creates
      * /var/run/hostapd/<ifname> for the BSSes that carry it, and without that
      * socket EXT_AUTH_AUTHORIZE cannot be delivered, so the station stays

@@ -123,6 +123,8 @@ void extmux_free(struct extmux *m);
 /* Bind all VAP sockets, before hostapd starts accepting clients. */
 int  extmux_add_vap(struct extmux *m, uint16_t port, const char *ifname,
                     int ifindex, const uint8_t bssid[6]);
+int  extmux_vap_ensure(struct extmux *m, uint16_t port, const char *ifname,
+                       int ifindex, const uint8_t bssid[6]);
 int  extmux_del_vap(struct extmux *m, uint16_t port);
 /* W33: the netdev was recreated (new ifindex); refresh the BSS and every
  * session that uses it before the next hostapd/direct transaction. */

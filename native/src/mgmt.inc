@@ -795,6 +795,16 @@ static int ext_auth_bind(struct vap *v, const char *dir)
     int fd;
 
     if (!v->used || !v->ifname[0]) return -1;
+    /* A VAP can be recreated while a previous binding still looks alive (the
+     * ifname repeats).  If the socket file is gone - hostapd recreated the
+     * interface, the directory was wiped, or ext_auth_close() unlinked it -
+     * rebind, otherwise hostapd has no path to notify and the manager never
+     * sees the AssocReq (no M1, no 4-way). */
+    if (v->extfd >= 0 && v->extpath[0] && access(v->extpath, F_OK) != 0) {
+        close(v->extfd);
+        v->extfd = -1;
+        v->extpath[0] = 0;
+    }
     if (v->extfd >= 0) return 0;
     snprintf(path, sizeof(path), "%s/ext-auth-%s", dir, v->ifname);
     fd = socket(AF_UNIX, SOCK_DGRAM, 0);
@@ -1600,11 +1610,8 @@ static void cap_vap_ready(int phy, int vapid, int ifindex, const char *ifname,
 
     vp = vap_get(phy, vapid);
     if (g_extmux) {
-        if (extmux_vap_by_port(g_extmux, port) ||
-            extmux_vap_by_ifname(g_extmux, ifname))
-            return;
-        if (extmux_add_vap(g_extmux, port, ifname, ifindex,
-                           mac ? mac : (vp ? vp->bssid : NULL)) == 0) {
+        if (extmux_vap_ensure(g_extmux, port, ifname, ifindex,
+                              mac ? mac : (vp ? vp->bssid : NULL)) == 0) {
             printf("EXTMUX: registered %s port=0x%04x ifindex=%d\n",
                    ifname, port, ifindex);
             fflush(stdout);

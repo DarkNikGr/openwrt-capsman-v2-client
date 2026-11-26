@@ -208,6 +208,45 @@ static void test_bare_command(void)
     remove(dir);
 }
 
+/* Case 1b: the ext-auth socket file can disappear while the VAP entry still
+ * looks registered (hostapd recreated the BSS, the directory was wiped).  The
+ * manager then never receives the AssocReq, so ensure must rebind it instead
+ * of returning "already mapped". */
+static void test_ensure_rebind(void)
+{
+    char dir[] = "/tmp/extmux-test-XXXXXX";
+    char path[256];
+    struct fake f;
+    struct counts c = {0};
+    struct extmux_cb cb = {
+        .log = cb_log, .ctx = &c,
+        .on_eapol = cb_eapol, .on_delsta = cb_delsta,
+        .on_deauth = cb_deauth, .on_direct_tx = cb_direct_tx,
+        .on_direct_authz = cb_direct_authz, .on_authorized = cb_authorized,
+    };
+    struct extmux *m;
+
+    printf("case 1b: ext-auth socket vanished -> ensure rebinds\n");
+    if (!mkdtemp(dir)) { failures++; return; }
+    CHECK(fake_open(&f, dir, "wlanD", "OK\n") == 0, "fake hostapd bind");
+    m = extmux_new(dir, dir, &cb);
+    CHECK(m != NULL, "extmux_new");
+    CHECK(extmux_vap_ensure(m, 0x0004, "wlanD", 10, NULL) == 0, "ensure add");
+    snprintf(path, sizeof(path), "%s/ext-auth-wlanD", dir);
+    CHECK(access(path, F_OK) == 0, "socket exists after add");
+    unlink(path);
+    CHECK(access(path, F_OK) != 0, "socket removed");
+    CHECK(extmux_vap_ensure(m, 0x0004, "wlanD", 11, NULL) == 0,
+          "ensure rebind");
+    CHECK(access(path, F_OK) == 0, "socket recreated after ensure");
+    /* A second ensure on a live socket is a no-op and stays successful. */
+    CHECK(extmux_vap_ensure(m, 0x0004, "wlanD", 11, NULL) == 0, "ensure noop");
+    extmux_free(m);
+    close(f.fd);
+    remove(path);
+    remove(dir);
+}
+
 /* Case 2: a hostapd that rejects EXT_AUTH_TX must switch the BSS to the
  * direct path exactly once, and never log per frame. */
 static void test_reject_fallback(void)
@@ -306,6 +345,7 @@ static void test_authz_fallback(void)
 int main(void)
 {
     test_bare_command();
+    test_ensure_rebind();
     test_reject_fallback();
     test_authz_fallback();
     if (failures) {
