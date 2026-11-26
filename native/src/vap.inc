@@ -311,17 +311,114 @@ static int vap_netdev_create(int phy, const char *ifname, const uint8_t mac[6])
 }
 
 /* Join an existing bridge if the VLAN bridge is present (best effort). */
+/* Create br-vlan<N> when the manager asks for a VLAN datapath and the bridge
+ * does not exist.  Without it hostapd starts the BSS unbridged and an on-cap
+ * datapath has nowhere to forward: the station authenticates and then nothing
+ * passes (F49).  A bridge that already exists (netifd, the image, an operator)
+ * is left untouched. */
+static int rtnl_addattr(struct nlmsghdr *n, size_t maxlen, int type,
+                        const void *data, size_t len)
+{
+    size_t alen = RTA_LENGTH(len);
+    size_t newlen = NLMSG_ALIGN(n->nlmsg_len) + RTA_ALIGN(alen);
+    if (newlen > maxlen) return -1;
+    struct rtattr *rta = (struct rtattr *)((char *)n + NLMSG_ALIGN(n->nlmsg_len));
+    rta->rta_type = type;
+    rta->rta_len = (unsigned short)alen;
+    if (len) memcpy(RTA_DATA(rta), data, len);
+    n->nlmsg_len = (uint32_t)newlen;
+    return 0;
+}
+
+static struct rtattr *rtnl_nest_start(struct nlmsghdr *n, size_t maxlen, int type)
+{
+    struct rtattr *nest =
+        (struct rtattr *)((char *)n + NLMSG_ALIGN(n->nlmsg_len));
+    if (rtnl_addattr(n, maxlen, type, NULL, 0) < 0) return NULL;
+    return nest;
+}
+
+static void rtnl_nest_end(struct nlmsghdr *n, struct rtattr *nest)
+{
+    nest->rta_len = (unsigned short)((char *)n + n->nlmsg_len - (char *)nest);
+}
+
+static int vap_bridge_create(const char *name)
+{
+    int fd = socket(AF_NETLINK, SOCK_RAW | SOCK_CLOEXEC, NETLINK_ROUTE);
+    if (fd < 0) return -1;
+    struct {
+        struct nlmsghdr n;
+        struct ifinfomsg i;
+        char attrs[256];
+    } req;
+    memset(&req, 0, sizeof(req));
+    req.n.nlmsg_len = NLMSG_LENGTH(sizeof(struct ifinfomsg));
+    req.n.nlmsg_type = RTM_NEWLINK;
+    req.n.nlmsg_flags = NLM_F_REQUEST | NLM_F_ACK | NLM_F_CREATE | NLM_F_EXCL;
+    req.n.nlmsg_seq = 1;
+    req.i.ifi_family = AF_UNSPEC;
+    struct rtattr *li;
+    if (rtnl_addattr(&req.n, sizeof(req), IFLA_IFNAME, name,
+                     strlen(name) + 1) < 0 ||
+        !(li = rtnl_nest_start(&req.n, sizeof(req), IFLA_LINKINFO)))
+        goto fail;
+    if (rtnl_addattr(&req.n, sizeof(req), IFLA_INFO_KIND, "bridge", 7) < 0)
+        goto fail;
+    rtnl_nest_end(&req.n, li);
+
+    struct sockaddr_nl sa;
+    memset(&sa, 0, sizeof(sa));
+    sa.nl_family = AF_NETLINK;
+    if (sendto(fd, &req, req.n.nlmsg_len, 0, (struct sockaddr *)&sa,
+               sizeof(sa)) < 0)
+        goto fail;
+    char resp[512];
+    ssize_t rn = recv(fd, resp, sizeof(resp), 0);
+    close(fd);
+    if (rn < (ssize_t)sizeof(struct nlmsghdr)) return -1;
+    struct nlmsghdr *rnl = (struct nlmsghdr *)resp;
+    if (rnl->nlmsg_type == NLMSG_ERROR) {
+        struct nlmsgerr *err = (struct nlmsgerr *)NLMSG_DATA(rnl);
+        return err->error;
+    }
+    return 0;
+fail:
+    close(fd);
+    return -1;
+}
+
 static void vap_bridge_if_present(const char *ifname, unsigned vlan,
                                   char *out, size_t outlen)
 {
     out[0] = 0;
     if (!vlan) return;
-    char br[32];
+    char br[32], p[96];
     snprintf(br, sizeof(br), "br-vlan%u", vlan);
-    if (access("/sys/class/net", F_OK) != 0) return;
-    char p[64];
     snprintf(p, sizeof(p), "/sys/class/net/%s", br);
-    if (access(p, F_OK) != 0) return;
+    if (access(p, F_OK) != 0) {
+        int rc = vap_bridge_create(br);
+        if (rc == 0) {
+            struct ifreq ifr;
+            int fd = socket(AF_INET, SOCK_DGRAM, 0);
+            if (fd >= 0) {
+                memset(&ifr, 0, sizeof(ifr));
+                snprintf(ifr.ifr_name, IFNAMSIZ, "%s", br);
+                if (ioctl(fd, SIOCGIFFLAGS, &ifr) == 0) {
+                    ifr.ifr_flags |= IFF_UP;
+                    ioctl(fd, SIOCSIFFLAGS, &ifr);
+                }
+                close(fd);
+            }
+            printf("vap: created bridge %s for vlan %u\n", br, vlan);
+            fflush(stdout);
+        } else {
+            printf("vap: cannot create bridge %s (rc=%d), BSS stays unbridged\n",
+                   br, rc);
+            fflush(stdout);
+            return;
+        }
+    }
     snprintf(out, outlen, "%s", br);
     (void)ifname;
 }
