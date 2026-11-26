@@ -66,6 +66,20 @@ if [ ! -x "$IB/Makefile" ]; then
 	rm -f "$WORK/ib.tar.zst"
 fi
 
+# 4b. Bake a manager address if one is given.  MANAGER=auto (the shipped
+# default) relies on DHCP option 138, which OpenWrt's udhcpc does not export to
+# the agent, so a site either bakes its manager here or edits
+# /etc/cap/capagent.conf once.
+FILES_OPT=""
+if [ -n "${MANAGER:-}" ]; then
+	F=$WORK/files
+	rm -rf "$F"; mkdir -p "$F/etc/cap"
+	sed "s|^MANAGER=.*|MANAGER=$MANAGER|" \
+		"$REPO/openwrt/capagent/files/capagent.conf" > "$F/etc/cap/capagent.conf"
+	FILES_OPT="FILES=$F"
+	say "baking MANAGER=$MANAGER into /etc/cap/capagent.conf"
+fi
+
 mkdir -p "$IB/packages"
 cp "$SDK"/bin/packages/mipsel_24kc/base/wpad-mbedtls_*.ipk "$IB/packages/"
 cp "$SDK"/bin/packages/mipsel_24kc/base/hostapd-common_*.ipk "$IB/packages/"
@@ -73,7 +87,8 @@ cp "$SDK"/bin/packages/mipsel_24kc/base/capagent_*.ipk "$IB/packages/"
 
 # 5. Build.  wpad-basic-mbedtls is removed so the patched wpad is the only one.
 ( cd "$IB" && make image PROFILE="$PROFILE" \
-	PACKAGES="-wpad-basic-mbedtls wpad-mbedtls hostapd-common capagent" ) >&2
+	PACKAGES="-wpad-basic-mbedtls wpad-mbedtls hostapd-common capagent" \
+	$FILES_OPT ) >&2
 
 IMG=$(ls "$IB"/bin/targets/$TARGET/*sysupgrade.bin | head -1)
 [ -n "$IMG" ] || { say "no sysupgrade image produced"; exit 1; }
