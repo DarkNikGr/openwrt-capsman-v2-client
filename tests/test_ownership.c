@@ -179,6 +179,18 @@ static size_t parse_hex(const char *s, uint8_t *out, size_t max)
     return n;
 }
 
+/* The full build gets these from policy.inc and vap.inc.  The unit test only
+ * links ownership.inc, so stub them here: the policy is "capagent owns the
+ * BSSes" and liveness is driven exclusively by the pid files the test writes. */
+static int g_test_wl_legacy;
+static int wl_legacy(void) { return g_test_wl_legacy; }
+static int wl_own(void) { return !g_test_wl_legacy; }
+static pid_t vap_find_hostapd(const char *ifname)
+{
+    (void)ifname;
+    return 0;
+}
+
 #include "ownership.inc"
 
 /* ---- test harness ----------------------------------------------------- */
