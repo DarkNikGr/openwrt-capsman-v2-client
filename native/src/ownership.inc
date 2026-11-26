@@ -1148,6 +1148,18 @@ static int own_claim(const struct cfg *c, int phy, int vapid,
     snprintf(conv, sizeof(conv), "phy%d-ap%d", phy, vapid);
     snprintf(alt, sizeof(alt), "cap%d-%d", phy, vapid);
 
+    /* Own mode: a stale AP netdev with the conventional name but no hostapd
+       (left by a previous run) used to be treated as foreign, which pushed the
+       master VAP to the capN-M alias.  Reclaim the name by deleting it. */
+    if (wl_own() && !own_nd_has(conv, NULL, 0)) {
+        int ci = read_sysfs_int(conv, "ifindex");
+        if (ci > 0 && iface_is_ap(ci) && own_hostapd_pid(conv) <= 0) {
+            printf("own: reclaiming stale %s (ifindex=%d)\n", conv, ci);
+            fflush(stdout);
+            vap_netdev_del(ci);
+        }
+    }
+
 #define OWN_ADD_CAND(nm, safe)                                             \
     do {                                                                   \
         const char *nm_ = (nm);                                            \
