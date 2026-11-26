@@ -50,6 +50,9 @@ define Package/capagent/install
 	$(INSTALL_BIN) ./files/capagent.init $(1)/etc/init.d/capagent
 	$(INSTALL_DIR) $(1)/etc/cap
 	$(INSTALL_CONF) ./files/capagent.conf $(1)/etc/cap/capagent.conf
+	# first-boot zone for the on-cap VLAN bridges (br-vlan*)
+	$(INSTALL_DIR) $(1)/etc/uci-defaults
+	$(INSTALL_BIN) ./files/99-cap-firewall $(1)/etc/uci-defaults/99-cap-firewall
 endef
 
 $(eval $(call BuildPackage,capagent))

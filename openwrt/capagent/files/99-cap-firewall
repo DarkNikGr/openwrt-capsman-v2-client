@@ -1,0 +1,20 @@
+#!/bin/sh
+# Give the on-cap VLAN bridges a firewall zone.
+#
+# With traffic-processing=on-cap the agent bridges every BSS into br-vlan<N>
+# (it creates the bridge on demand).  Those devices are not in any zone, so the
+# default input policy rejects everything addressed to the CAP itself - a
+# station can associate and be authorized yet no DHCP/ping reaches the router.
+# A wildcard device zone is supported by fw4, so one section covers every VLAN
+# the manager may use.
+[ -f /etc/config/firewall ] || exit 0
+uci -q get firewall.capvlan >/dev/null && exit 0
+
+uci set firewall.capvlan=zone
+uci set firewall.capvlan.name='capvlan'
+uci set firewall.capvlan.device='br-vlan*'
+uci set firewall.capvlan.input='ACCEPT'
+uci set firewall.capvlan.output='ACCEPT'
+uci set firewall.capvlan.forward='REJECT'
+uci commit firewall
+exit 0

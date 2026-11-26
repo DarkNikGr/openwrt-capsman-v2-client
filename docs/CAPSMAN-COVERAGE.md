@@ -51,7 +51,7 @@ RouterOS 7.25.1 with a real station; "lab" = CHR 7.25.1 + mac80211-hwsim.
 | `authentication-types=wpa2-psk` | ✅ **live** | 4-way via the manager, `authorized: yes`, ping |
 | `passphrase` | ✅ by design | stays on the manager: the CAP never receives it and generates no PSK |
 | `management-protection=disabled` | ✅ live | the current profiles |
-| `management-protection=allowed/required` (PMF) | 🟡 lab only | `ieee80211w` is derived from the RSN caps; not yet exercised live |
+| `management-protection=required` (PMF) | ✅ **live** | manager sets MFPR; the CAP writes `ieee80211w=2` and reproduces the RSN IE (`caps=0x02c0`); station with MFP=2 → `authorized: yes`, `SET_STATION MFP ret=0`, ping 3/3 0% loss |
 | `group-key-update` | ⚠️ forced off | `wpa_group_rekey=0` on the CAP (the manager owns rekeying) |
 | `wpa3` / SAE (`authentication-types=wpa3-psk`) | ✅ **live** | generated `sae_pwe=2` + `group_mgmt_cipher=AES-128-CMAC`; `0x201c` len=209 → `0x201b` → `0x201f` PTK + `SET_STATION MFP`, station `authorized: yes` |
 | `owe` | 🟡 lab 14/14 | not yet live |
