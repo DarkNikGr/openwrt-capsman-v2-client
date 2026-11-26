@@ -146,6 +146,14 @@ Resolved and merged into `main`:
 
 Still open:
 
+0. **Duplicate VAP rows give two hostapd instances per BSS.** In the live
+   manager-only run the same port ends up with two names
+   (`/tmp/vap-phy0-ap1.conf` and `/tmp/vap-cap0-1.conf`), the second hostapd
+   fails with `nl80211 driver initialization failed`, and the reconcile loop
+   retries every tick (7-12 starts). `own_hostapd_pid()` now falls back to the
+   process table (`b9ea94c`), but the root cause is the claim path producing a
+   second name/row for the same port. Fix: one row per port, rename only on a
+   real netifd conflict, and never start a second instance while one is alive.
 1. **0x2018 relay on a 4-interface radio**: the MT7603E allows four interfaces
    and all four are BSSes, so the monitor VIF is refused; hostapd owns
    `REGISTER_FRAME`. Fixed in `58a3149` by forwarding hostapd's raw
