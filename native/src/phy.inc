@@ -357,7 +357,11 @@ static int vap_phy_apply(int phy, const struct cfg *c)
      * interface=/bss= section.  Appended at the end they were parsed as
      * per-BSS keys, so -dd stayed at INFO and every failure was invisible. */
     if (getenv("CAPAGENT_HOSTAPD_DEBUG"))
-        fprintf(f, "logger_syslog=-1\nlogger_syslog_level=0\n"
+        /* stdout to a file is block-buffered, so a long-running hostapd
+         * leaves its last lines unwritten and every diagnostic read from
+         * /tmp/vap-phyN.log is truncated.  Syslog is flushed per message, so
+         * the debug build logs there too and `logread` is the real trace. */
+        fprintf(f, "logger_syslog=0\nlogger_syslog_level=1\n"
                    "logger_stdout=-1\nlogger_stdout_level=0\n");
     int first = 1;
     for (int i = 0; i < OWN_MAX; i++) {

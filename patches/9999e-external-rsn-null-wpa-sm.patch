@@ -1,0 +1,36 @@
+hostapd: do not dereference sta->wpa_sm when the RSN authenticator is external
+
+A CAP with external_rsn_auth has no local WPA state machine, so
+sta->wpa_sm is NULL.  handle_auth() called wpa_auth_sm_event(sta->wpa_sm,
+WPA_AUTH) unconditionally in the open-system (and SAE) success path, which
+SIGSEGVs the whole hostapd right after 'authentication OK'.  The radio then
+never processes the Association Request, so no AssocResp is ever sent.
+
+--- a/src/ap/ieee802_11.c	2026-11-26 17:04:06.196976430 +0200
++++ b/src/ap/ieee802_11.c	2026-11-26 17:04:06.210579053 +0200
+@@ -966,7 +966,8 @@
+ 	sta->flags |= WLAN_STA_AUTH;
+ 	sta->auth_alg = WLAN_AUTH_SAE;
+ 	mlme_authenticate_indication(hapd, sta);
+-	wpa_auth_sm_event(sta->wpa_sm, WPA_AUTH);
++	if (sta->wpa_sm)
++		wpa_auth_sm_event(sta->wpa_sm, WPA_AUTH);
+ 	sae_set_state(sta, SAE_ACCEPTED, "Accept Confirm");
+ 	crypto_bignum_deinit(sta->sae->peer_commit_scalar_accepted, 0);
+ 	sta->sae->peer_commit_scalar_accepted = sta->sae->peer_commit_scalar;
+@@ -3258,7 +3259,14 @@
+ 			       HOSTAPD_LEVEL_DEBUG,
+ 			       "authentication OK (open system)");
+ 		sta->flags |= WLAN_STA_AUTH;
+-		wpa_auth_sm_event(sta->wpa_sm, WPA_AUTH);
++		/*
++		 * With an external RSN authenticator there is no local WPA state
++		 * machine: sta->wpa_sm is NULL and wpa_auth_sm_event() dereferences
++		 * it, so hostapd SIGSEGVs right after the open-system auth and the
++		 * radio never gets to process the Association Request.
++		 */
++		if (sta->wpa_sm)
++			wpa_auth_sm_event(sta->wpa_sm, WPA_AUTH);
+ 		sta->auth_alg = WLAN_AUTH_OPEN;
+ 		mlme_authenticate_indication(hapd, sta);
+ 		break;

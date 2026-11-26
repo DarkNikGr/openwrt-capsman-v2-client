@@ -16,6 +16,7 @@ Apply order is lexicographic, after the stock OpenWrt patches:
 | `9999b-external-rsn-tx-retval.patch` | W53: only a negative `hostapd_wpa_auth_send_eapol()` return is an error; the nl80211 `PF_PACKET` path returns the byte count, so a transmitted frame used to answer `FAIL` | yes |
 | `9999c-hostapd-use-existing-bss.patch` | W63: pass `use_existing` for every AP BSS, so a BSS netdev created by the CAP is attached instead of deleted and re-created (that moved the ifindex under the CAP and caused the restart loop) | yes |
 | `9999d-hostapd-set-mode-ealready.patch` | W64: `SET_INTERFACE` returning `-EALREADY` ("Match already configured") is success — a CAP that brings the BSS up as AP before hostapd starts made the whole radio fail to initialise | yes |
+| `9999e-external-rsn-null-wpa-sm.patch` | W65: `wpa_auth_sm_event(sta->wpa_sm, WPA_AUTH)` crashes when the RSN authenticator is external (no local `wpa_sm`); it SIGSEGV'd hostapd right after `authentication OK`, so no AssocResp was ever sent | yes |
 
 ## Build
 
