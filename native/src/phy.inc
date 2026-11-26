@@ -204,9 +204,6 @@ static int vap_phy_apply(int phy, const struct cfg *c)
        mgmt_source=monitor capagent needs a slot on the same phy, and asking
        hostapd for every BSS plus the monitor overruns the driver's vif limit
        (hostapd then reports -23/ENFILE and the BSSes die). */
-    int cap = phy_max_vifs(phy);
-    if (cap > 0 && (c->mgmt_source == 2 || c->mgmt_source == 0))
-        cap -= 1;
 
     int n = 0;
     for (int i = 0; i < OWN_MAX; i++) {
@@ -217,19 +214,43 @@ static int vap_phy_apply(int phy, const struct cfg *c)
                        phy, e->ifname);
             continue;
         }
-        if (cap > 0 && n >= cap) {
-            printf("vap: phy%d: BSS cap %d reached, %s left for the monitor\n",
-                   phy, cap, e->ifname);
-            fflush(stdout);
-            break;
-        }
         n++;
     }
     if (!n) return -1;
-    /* Debounce: wait until the manager stops sending start bodies for this
-       radio, otherwise the config is rebuilt (and hostapd restarted) once per
-       VAP and the last BSS/monitor slot is lost. */
-    if (own_now_ms() - g_phy_start_ms[phy] < OWN_PHY_DEBOUNCE_MS) return -1;
+    /* Start only when the phy has settled: the driver's real netdev count
+       must be unchanged for 2.5 s and every journaled row must have its
+       netdev.  Rebuilding while interfaces are still being created restarted
+       hostapd mid-flight and lost the BSSes. */
+    {
+        static int last_count[MAX_RADIOS];
+        static uint64_t last_at[MAX_RADIOS];
+        char p[96];
+        snprintf(p, sizeof(p), "/sys/class/ieee80211/phy%d/device/net",
+                 real_phy(phy));
+        int real = 0;
+        DIR *d = opendir(p);
+        if (d) {
+            struct dirent *de;
+            while ((de = readdir(d)))
+                if (de->d_name[0] != '.') real++;
+            closedir(d);
+        }
+        if (real != last_count[phy]) {
+            last_count[phy] = real;
+            last_at[phy] = own_now_ms();
+            return -1;
+        }
+        if (own_now_ms() - last_at[phy] < 2500) return -1;
+        for (int i = 0; i < OWN_MAX; i++) {
+            struct own_entry *e = &g_own[i];
+            if (e->used && e->active && (e->port >> 8) == phy &&
+                e->ifname[0] && if_nametoindex(e->ifname) <= 0)
+                return -1;
+        }
+        printf("vap: phy%d settled with %d netdev(s), starting hostapd\n",
+               phy, real);
+        fflush(stdout);
+    }
 
     char conf[128], pidf[128], logf[128];
     vap_phy_paths(phy, conf, sizeof(conf), pidf, sizeof(pidf),
@@ -282,7 +303,6 @@ static int vap_phy_apply(int phy, const struct cfg *c)
         struct own_entry *e = &g_own[i];
         if (!vap_phy_row_ready(e, phy))
             continue;
-        if (cap > 0 && first == 0 && written >= cap) break;
         char ctrl[128];
         snprintf(ctrl, sizeof(ctrl), "/var/run/hostapd/%s", e->ifname);
         unlink(ctrl);
