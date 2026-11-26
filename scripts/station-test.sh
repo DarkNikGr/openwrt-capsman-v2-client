@@ -76,10 +76,18 @@ network={
 	group=CCMP
 }
 EOF
-: > "$LOG"
-$SUDO ip netns exec "$NETNS" wpa_supplicant -B -i "$IFNAME" -c "$CONF" \
-	-f "$LOG" -P /tmp/$NETNS-wpa.pid >/dev/null 2>&1 ||
-	{ say "wpa_supplicant failed to start"; cat "$LOG"; exit 1; }
+$SUDO rm -f "$LOG"
+$SUDO rm -rf "/tmp/$NETNS-ctrl"
+# Foreground with -dd, not -B: wpa_supplicant -B detaches and its -f log could
+# stay empty, so an earlier run "measured" nothing and the assoc frames seen in
+# the CAP log were from a neighbour's client, not ours.
+$SUDO ip netns exec "$NETNS" sh -c \
+	"exec wpa_supplicant -dd -i '$IFNAME' -c '$CONF' >'$LOG' 2>&1" &
+WPID=$!
+sleep 4
+kill -0 "$WPID" 2>/dev/null ||
+	{ say "wpa_supplicant exited immediately:"; tail -6 "$LOG"; exit 1; }
+say "wpa_supplicant pid $WPID, interface $IFNAME"
 
 say "waiting ${SECS}s for association to $SSID"
 i=0
@@ -98,6 +106,9 @@ grep -aE "Trying to associate|Associated with|4-Way Handshake|CTRL-EVENT-CONNECT
 $SUDO ip netns exec "$NETNS" iw dev "$IFNAME" link 2>&1 | head -6 || true
 $SUDO ip netns exec "$NETNS" iw dev "$IFNAME" station dump 2>/dev/null |
 	grep -E "authorized|authenticated|signal" | head -4 || true
+
+kill "$WPID" 2>/dev/null
+sleep 1
 
 if [ -n "$ADDR" ]; then
 	$SUDO ip netns exec "$NETNS" ip addr add "$ADDR" dev "$IFNAME" 2>/dev/null || true
