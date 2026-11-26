@@ -43,10 +43,16 @@ OpenWrt 24.10, MediaTek MT7603E + MT7612E), managed by an
 >
 > What does **not** work yet:
 >
-> * **The live manager-only acceptance is not green.** 5 GHz brings up all four
->   BSSes with SSIDs; the 2.4 GHz MT7603E comes up with 2 BSSes but reports
->   `Failed to create interface phy0-ap2: -23` at 3-4 BSSes, so fewer than 8
->   SSIDs appear and no station has completed 4-way → DHCP → ping on hardware.
+> * **A station now completes the 4-way with no PSK on the CAP — live.**
+>   `authorized: yes`, `authenticated: yes`, EAPOL `0x201c` (M1) → `0x201b`
+>   (M2) → `0x201f` PTK install, and `ping` 3/3 over the manager's VLAN. The
+>   last blocker was a hostapd SIGSEGV in `__check_assoc_ies`: with an external
+>   authenticator there is no local `wpa_sm`, and the SAE skip path fell through
+>   to `wpa_auth_get_pairwise(NULL)` (patch `9999a`).
+> * **The SSID count is not reproducible yet.** The same binary produced 8/8,
+>   4/8, 2/2 and 1/2 across runs; `-23` is hostapd's reading of `NEW_INTERFACE`
+>   returning `-ENFILE` for a name that already exists (a name collision, not a
+>   vif limit), and the intermittent per-radio start still needs its root cause.
 > * **No monitor VIF on the 2.4 GHz radio.** `mon_create(phy0)` refuses a
 >   "4-interface radio", so `0x2018` is not relayed for 2.4 unless the
 >   no-monitor ext-auth path (`9999a`) carries it; that path is what W62 is
