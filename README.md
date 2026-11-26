@@ -9,7 +9,7 @@ Reference hardware: **Xiaomi Mi Router 4A Gigabit Edition** (ramips/mt7621,
 OpenWrt 24.10, MediaTek MT7603E + MT7612E), managed by an
 **RB1100AHx4 / RouterOS 7.25.1**.
 
-> ## ⚠️ STATUS: NOT SOLVED — closer, but no hardware/factory-reset proof
+> ## ⚠️ STATUS: NOT SOLVED — the CAP protocol works, the live gate does not
 >
 > **The goal is a CAP that behaves 100% like a genuine MikroTik CAP: the CAP
 > gets everything (SSID, security, VLAN, channel) from the official CAPsMAN v2
@@ -23,47 +23,48 @@ OpenWrt 24.10, MediaTek MT7603E + MT7612E), managed by an
 > * the CAP joins the official manager and stays `state="Ok"`;
 > * the manager sees the radios, their MACs and capabilities (`NEWPHY`);
 > * with **zero `wifi-iface`** in `/etc/config/wireless` the manager provisions
->   **8/8 VAPs** (`0x500b` create + `0x6016` start for both radios, 6 `0x201f`
->   key installs) and accepts our `0xd00b` reply;
-> * the CAP **creates the AP netdev** from `0x500b` and **starts one hostapd
->   per VAP** from `0x6016` — SSID, channel and RSN IE from the manager,
->   `external_rsn_auth=1`, **no PSK on the CAP**;
+>   **8/8 VAPs** (`0x500b` create + `0x6016` start for both radios) and accepts
+>   our `0xd00b` reply; the CAP creates the AP netdevs with the manager's own
+>   `phyN-apM` names (`ownership=own`);
+> * **one hostapd per radio with `bss=` sections** replaces the old
+>   one-process-per-VAP model, which deadlocked on the phy. A single process
+>   now carries 4 BSSes and its pid is resolved from `/proc` (the `-P` file is
+>   left empty by `-B`), so the reconcile loop no longer restarts it;
+> * hostapd only ever **attaches** to netdevs the CAP already created (a BSS
+>   without a netdev is skipped), which removed the `-23 (ENFILE)` storm;
+> * the CAP starts the radio only after its netdev count has been **stable for
+>   2.5 s**, instead of rebuilding on every `0x6016`;
+> * the patched `wpad` with the full external-RSN set is **built and installed**
+>   (`external_rsn_sae=2`, `EXT_AUTH_MGMT_TX=1`, `external_rsn_ie=7`, survives
+>   reboot) using [`scripts/build-wpad-9999a.sh`](scripts/build-wpad-9999a.sh);
 > * the manager is the RSN authenticator: the EAPOL relay is proven on the real
->   RB1100 (STA M2 → `0x201b` → manager → `0x201c` M3);
-> * hostapd can advertise the manager's **exact RSN IE** (patch
->   [`docs/patches/9997-external-rsn-ie.patch`](docs/patches/9997-external-rsn-ie.patch)),
->   which removes the station's `IE in 3/4 msg does not match` cause; verified
->   byte-for-byte on the host and in the mipsel `wpad` parse.
+>   RB1100 (STA M2 → `0x201b` → manager → `0x201c` M3), and the lab completes
+>   WPA2-PSK (10/10), SAE and OWE (14/14) with a key-free CAP.
 >
 > What does **not** work yet:
 >
+> * **The live manager-only acceptance is not green.** 5 GHz brings up all four
+>   BSSes with SSIDs; the 2.4 GHz MT7603E comes up with 2 BSSes but reports
+>   `Failed to create interface phy0-ap2: -23` at 3-4 BSSes, so fewer than 8
+>   SSIDs appear and no station has completed 4-way → DHCP → ping on hardware.
+> * **No monitor VIF on the 2.4 GHz radio.** `mon_create(phy0)` refuses a
+>   "4-interface radio", so `0x2018` is not relayed for 2.4 unless the
+>   no-monitor ext-auth path (`9999a`) carries it; that path is what W62 is
+>   proving.
+> * **Earlier station runs were invalid.** The inline harness moved `phy0`,
+>   which does not exist on the test host (the station wiphy is `phy1`), so
+>   `wpa_supplicant` never started. Use
+>   [`scripts/station-test.sh`](scripts/station-test.sh) instead; it moves the
+>   wiphy into a netns, verifies the run and restores the host.
 > * **No hardware/factory-reset proof.** A zero-touch sysupgrade image (client
 >   + patched `wpad` in ROM, no SSH/firewall/DHCP) passes 55/55 static content
 >   checks but has **never been flashed**; boot, factory reset, rejoin and 8/8
 >   re-provision are unverified on the device.
-> * **The live manager-only acceptance is not green end to end yet.** The last
->   run with `1a5f48c` created 8 VAPs and generated correct PSK-free configs,
->   but a 5 GHz `hostapd` still ended in state `D` and a netifd-named
->   `phy0-ap0` was created alongside the ownership table's `cap0-*` names, so
->   fewer than 8 SSIDs came up and no station completed the 4-way.
-> * **5 GHz per-BSS start** works in isolation (8/8 `AP-ENABLED`, W54/W56:
->   mt76x02 derives its BSS index from MAC byte 0, VHT80 needs `noscan`, the
->   monitor must not take index 0) but is not stable under the full
->   manager-only run with the ownership renaming.
-> * **Repeated `0x6016`** can still spawn extra hostapd attempts in that same
->   run; W52's budget/serialisation is in `main` and needs re-validation in a
->   quiet window.
-> * The station-side M3 acceptance **is** observed now: the exact RSN IE
->   (`external_rsn_ie`) removed `IE in 3/4 msg does not match`, and the lab
->   completes WPA2-PSK (10/10), SAE and OWE (14/14) with a key-free CAP.
-> * There is still **no configuration tree** in CAPsMAN v2. The manager sends
->   SSID + RSN/WPA IE + channel and the CAP builds the BSS from that; it never
->   sends the passphrase, because it is the authenticator.
+> * There is still **no configuration tree** in CAPsMAN v2. The manager keeps
+>   the passphrase and is the authenticator; it never sends the PSK to the CAP.
 > * A factory reset still wipes the client and its certificate, but the agent
->   now **re-enrols automatically** on first boot (no certificate baked into
->   the image) as long as the manager keeps `require-peer-certificate=no`
->   (the RouterOS default). See
->   [Certificate lifecycle](#certificate-lifecycle-zero-touch-enrolment).
+>   **re-enrols automatically** on first boot as long as the manager keeps
+>   `require-peer-certificate=no` (the RouterOS default).
 >
 > Until the image is flashed and a factory reset is proven, **do not treat the
 > current setup as the goal**. See

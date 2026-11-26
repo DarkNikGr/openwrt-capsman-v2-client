@@ -6,9 +6,10 @@ clients connect with the manager's credentials, and **nothing on the CAP needs
 SSH, a local wireless file or a second service**.
 
 Current reality: the control plane joins, the manager provisions 8/8 VAPs with
-no local `wifi-iface`, and the CAP creates the netdevs and starts one hostapd
-per VAP with no PSK. What is still missing is the 5 GHz start, VAP teardown and
-the **hardware/factory-reset proof** — see `docs/MANAGER-ONLY.md`.
+no local `wifi-iface`, and the CAP creates the netdevs and runs **one hostapd
+per radio with `bss=` sections** with no PSK. What is still missing is a stable
+4-BSS start on the 2.4 GHz MT7603E, the `0x2018` relay on that radio, and the
+**hardware/factory-reset proof** — see `docs/MANAGER-ONLY.md`.
 
 ---
 
@@ -29,16 +30,30 @@ the **hardware/factory-reset proof** — see `docs/MANAGER-ONLY.md`.
 | F11 | The zero-touch sysupgrade image (capagent + certificate + CA + patched `wpad`, no SSH/firewall/DHCP) is built and passes 55/55 static content checks, but it has **never been flashed**, so boot, factory reset and rejoin are unverified on hardware. | image content check, `docs/MANAGER-ONLY.md` §2.3 |
 | F12 | The 5 GHz start failure is a config-shape problem (VHT80 without `vht_oper_centr_freq_seg0_idx`, no HT40 secondary, no `country_code`), not DFS or a driver limit. A candidate fix was investigated but is **not merged** in 0.4.0. | `docs/MANAGER-ONLY.md` §2.2 |
 | F13 | The VAP lifecycle is single-implementation: W34 ownership/journal + W38/W25/W28 teardown. Live: 3 × create/start/destroy cycles of 4 BSSes on phy0 with zero netdev/hostapd/pid/conf/socket left and `0x47` slots 0..3 reused every cycle; local hwsim: 5 cycles + duplicate 0x6016 ignore/restart + 3 × 8 VAPs. | W52 `REPORT.md`, `docs/W52-LIFECYCLE.md` |
+| F14 | One hostapd process per VAP deadlocks the phy (one instance in state `D`, BSSes die within ~1 s even after `AP-ENABLED`). One hostapd **per phy** with `interface=` + `bss=` sections carries 4 BSSes and 4 SSIDs in one process. | `native/src/phy.inc`, live `vap: phy0 hostapd up with 4 BSS(es)` |
+| F15 | `hostapd -B` leaves the `-P` pid file empty, so "pid file unreadable" must never mean "instance dead": resolve the pid from `/proc` by our exact `vap-phyN.conf` path and write the pid file ourselves. Without this the 1 s reconcile restarted the radio 37 times in ~2 min. | `vap_phy_pid()`, live `dbg: … pid=9041 alive=1` on every row |
+| F16 | hostapd must only ever **attach** to netdevs that already exist. Handing it a BSS without a netdev makes it call `NEW_INTERFACE`, hit the driver's vif limit and fail `-23 (ENFILE)`, which kills the whole instance. | `vap_phy_row_ready()`, `-23` 12 -> 0 in one run |
+| F17 | Naming: in own mode (zero `wifi-iface`) the manager's `phyN-apM` names are used, and a netifd claim on a name that does not exist is stale and must be ignored. With a legacy config still in place the policy is `legacy` and every claim fell back to `capN-M` — that was the real reason for the earlier `cap0-*` runs, not the candidate order. | `wl: ownership=own (ubus: 0 netifd ifnames)`, `iw dev` shows `phy0-ap0..3`, `phy1-ap0..6` |
+| F18 | The patched `wpad` (999/9997/9998/9999/9999a/9999b, `CONFIG_EXTERNAL_RSN_AUTH=y`) is built and **installed** on the reference Xiaomi and survives reboot: `external_rsn_sae=2`, `EXT_AUTH_MGMT_TX=1`, `external_rsn_ie=7`. The official 24.10.0 SDK ships no hostapd sources, so the build overlays the v24.10.0 package tree into the SDK and builds mbedtls/libubox/ubus/uci first. | `scripts/build-wpad-9999a.sh`, grep on `/usr/sbin/wpad` |
+| F19 | The 2.4 GHz MT7603E brings up **2 BSSes** reliably (`phy0-ap0` + `phy0-ap1` with SSIDs) and fails from 3 BSSes with `Failed to create interface phy0-ap2: -23`. Real phy0 vif usage at that moment was 2/4, so it is not a simple vif-count limit. | live A/B: 2 BSS ok, 3 and 4 BSS fail |
+| F20 | `mon_create(phy0)` refuses on purpose ("4-interface radio; not taking a VAP slot"), so the 2.4 GHz radio has **no** `cm0` and `0x2018` is not relayed from it. The no-monitor path is the `9999a` raw AUTH/ASSOCREQ relay. | live log, `src/mgmt.inc` |
+| F21 | The inline station harness used `iw phy phy0 set netns`, but the test host's station wiphy is **phy1** (`wlp39s0`), so `wpa_supplicant` never started and every earlier "station not connected / no 0x2018" result was a harness artefact. | `scripts/station-test.sh` (verified: phy1 moved, scan listed SSIDs, host restored) |
 
 ## Open blockers (ranked)
 
 1. **Hardware proof** — the zero-touch image is built and content-verified but
    was never flashed; boot, factory reset, rejoin and 8/8 re-provision are
    unproven. This is the last acceptance gate, not a code change.
-2. **5 GHz hostapd start** on the MT7612E: the generated config needs a
-   regulatory domain, HT40 secondary and `vht_oper_centr_freq_seg0_idx` before
-   VHT80 can resolve a channel. Candidate fix not merged (F12).
-3. ~~**VAP lifecycle**~~ — solved in W52: `0x600c` parses the target
+2. **4 BSS on the 2.4 GHz MT7603E** — 2 BSSes work, 3+ fail with `-23` while
+   the radio shows 2/4 vifs in use. This is the only reason the live run does
+   not reach 8/8 SSIDs; tracked as W61.
+3. **`0x2018` on a radio without a monitor VIF** — `mon_create(phy0)` refuses
+   by design, so the 2.4 GHz radio depends on the `9999a` raw
+   AUTH/ASSOCREQ relay. W62 is proving that path with the installed `wpad`.
+4. **Live station gate** — no station has completed 4-way → authorized →
+   DHCP → ping on hardware. All earlier negative results are void (F21); use
+   `scripts/station-test.sh`.
+5. ~~**VAP lifecycle**~~ — solved in W52: `0x600c` parses the target
    (header port, body `0x47`/`0x08`), stops hostapd, drops the ext-auth
    socket/datachan key, deletes the netdev only when the ownership table
    proves it ours, waits for it to disappear, then releases the id.  A
@@ -46,15 +61,13 @@ the **hardware/factory-reset proof** — see `docs/MANAGER-ONLY.md`.
    body), never stacks; a failed start is retried 5 times and reported.  A
    5 s watchdog reaps orphan hostapd/pid/conf/socket/netdev objects.  See
    `docs/W52-LIFECYCLE.md`, `docs/W38-LIFECYCLE.md` and the live W52 run.
-4. **Station-side M3 acceptance** with the patched `wpad` on real hardware
-   (one `wpa_supplicant -dd` connect); the IE bytes are already equal.
-5. **Zero-touch boot** — the client and hostapd must live in ROM (custom
+6. **Zero-touch boot** — the client and hostapd must live in ROM (custom
    image). The certificate no longer does: since W43 the agent generates its
    key + CSR and enrols on first boot when `/etc/cap` is empty, then re-joins
    with the stored certificate (manager `require-peer-certificate=no`, the
    default). Still open: client + hostapd in ROM, and the manager-only BSS
-   path below.
-6. **No manual fallback allowed** — no SSH-driven bootstrap, no local
+   path above.
+7. **No manual fallback allowed** — no SSH-driven bootstrap, no local
    `wireless` file, no second daemon on the manager.
 
 ## Research tracks (20)

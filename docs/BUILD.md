@@ -158,6 +158,44 @@ context in `hostapd_cli.c` and `src/ap/hostapd.c`; with `999` it lands after
 `999-external-rsn-auth.patch`, so copying the repo series over it is a
 same-name overwrite, not a duplicate.
 
+### Fast path (verified 2026-11-26 on this host)
+
+`scripts/build-wpad-9999a.sh` does the whole thing. It is the canonical recipe;
+the manual steps below are kept for reference.
+
+```sh
+scripts/build-wpad-9999a.sh /tmp/wpad-build
+# -> /tmp/wpad-build/sdk/bin/packages/mipsel_24kc/base/wpad-mbedtls_*.ipk
+```
+
+Four things that the manual recipe did not mention and that each broke a build:
+
+1. **The official 24.10.0 SDK ships no `package/network/services/hostapd`.**
+   It is an image-builder SDK: toolchain + prebuilt ipks only. The package tree
+   must come from the **source** clone, at the matching **tag** `v24.10.0`
+   (the branch tip wants `libubox/avl.h` that the 24.10.0 staging lacks).
+2. **mbedtls is not staged in the SDK**, so `crypto_mbedtls.c` fails on
+   `mbedtls/version.h`. Build `package/libs/mbedtls/compile` first.
+3. **libubox/ubus/uci must be built** (staging has no `libubus.h`), with
+   `-DBUILD_LUA=OFF` and the `*-lua` sub-packages removed, because the SDK has
+   no `liblua`.
+4. **Trim the hostapd variants.** Building every variant fails on the
+   openssl/wolfssl ones; keep only `wpad-mbedtls` + `hostapd-common`.
+
+Host prerequisites: a *complete* Perl (`FindBin`, `threads`, `Time::Piece`).
+On Fedora: `dnf install perl-core perl-Time-Piece`. `prepare-tmpinfo` aborts
+otherwise, before any patch is applied.
+
+`opkg install --force-reinstall` refuses the local file and can even delete
+`/usr/sbin/wpad`, so install by extraction:
+
+```sh
+mkdir -p /tmp/pk && cd /tmp/pk
+tar xzf wpad-mbedtls_*.ipk && tar xzf data.tar.gz && cp -a . /
+grep -ac external_rsn_sae /usr/sbin/wpad    # 2
+grep -ac EXT_AUTH_MGMT_TX /usr/sbin/wpad    # 1
+```
+
 ### Steps
 
 ```sh
