@@ -188,12 +188,22 @@ static int vap_phy_apply(int phy, const struct cfg *c)
     if (phy < 0 || phy >= MAX_RADIOS) return -1;
     if (wl_legacy()) return -1;
 
+    /* Only rows whose netdev already exists: hostapd must attach to the
+       interfaces capagent created, never create them itself.  Creating them
+       inside hostapd hits the phy's vif limit and fails with -23 (ENFILE). */
     int n = 0;
     for (int i = 0; i < OWN_MAX; i++) {
         struct own_entry *e = &g_own[i];
-        if (e->used && e->active && e->start_len && e->ifname[0] &&
-            (e->port >> 8) == phy)
-            n++;
+        if (!e->used || !e->active || !e->start_len || !e->ifname[0] ||
+            (e->port >> 8) != phy)
+            continue;
+        if (if_nametoindex(e->ifname) <= 0) {
+            printf("vap: phy%d: %s has no netdev, not in the config\n",
+                   phy, e->ifname);
+            fflush(stdout);
+            continue;
+        }
+        n++;
     }
     if (!n) return -1;
 
@@ -209,6 +219,8 @@ static int vap_phy_apply(int phy, const struct cfg *c)
         struct own_entry *e = &g_own[i];
         if (!e->used || !e->active || !e->start_len || !e->ifname[0] ||
             (e->port >> 8) != phy)
+            continue;
+        if (if_nametoindex(e->ifname) <= 0)
             continue;
         char ctrl[128];
         snprintf(ctrl, sizeof(ctrl), "/var/run/hostapd/%s", e->ifname);
