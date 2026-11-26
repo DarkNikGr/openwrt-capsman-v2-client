@@ -531,10 +531,10 @@ static void createvap_response(mbedtls_ssl_context *ssl, const uint8_t hdr[10],
     snprintf(pref, sizeof(pref), "phy%d-ap%d", phy, vapid);
     /* W34: one ownership decision for 0x500b and 0x6016.  netifd wins its
      * names; the manager VAP moves to cap<phy>-<vapid> instead. */
+    /* The master VAP must take the manager's phyN-ap0 name; a configured
+       alias here made it claim capN-0 instead, which broke the monitor VIF
+       mapping and the 0x2018 relay. */
     const char *preferred = NULL;
-    if (vapid == 0 && phy < MAX_RADIOS && c->ifnames[phy][0] &&
-        strcmp(c->ifnames[phy], pref) != 0)
-        preferred = c->ifnames[phy];
     int managed = 0;
     int ifindex = 0;
     own_claim(c, phy, vapid, preferred, bssid, ifname, sizeof(ifname),
