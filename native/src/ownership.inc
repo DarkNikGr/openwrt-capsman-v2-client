@@ -1183,7 +1183,10 @@ static int own_claim(const struct cfg *c, int phy, int vapid,
         (mac[0] | mac[1] | mac[2] | mac[3] | mac[4] | mac[5]) &&
         ifindex_by_mac_ap(mac, phy, macname, sizeof(macname)) > 0)
         OWN_ADD_CAND(macname, 1);
-    OWN_ADD_CAND(conv, 0);
+    /* In own mode there is no netifd to consult, so the conventional name is
+       as safe as the alias; marking it unsafe made the loop pick capN-M
+       whenever the ubus probe was not ready yet. */
+    OWN_ADD_CAND(conv, wl_own() ? 1 : 0);
     OWN_ADD_CAND(alt, 1);
 #undef OWN_ADD_CAND
 
