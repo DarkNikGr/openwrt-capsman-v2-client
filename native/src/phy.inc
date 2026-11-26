@@ -236,6 +236,29 @@ static int vap_phy_apply(int phy, const struct cfg *c)
                   logf, sizeof(logf));
     vap_phy_stop(phy);
 
+    /* Free every vif the driver still holds for this phy before asking for
+       the monitor: a row whose netdev is gone but whose ifindex is still
+       allocated keeps the slot, which is why mon_create() reported "no free
+       slot" even though the BSS count looked fine. */
+    for (int i = 0; i < OWN_MAX; i++) {
+        struct own_entry *e = &g_own[i];
+        if (!e->used || (e->port >> 8) != phy) continue;
+        if (e->ifname[0] && if_nametoindex(e->ifname) > 0) continue;
+        if (e->ifindex > 0) {
+            char nm[IF_NAMESIZE];
+            vap_netdev_del(e->ifindex);
+            for (int k = 0; k < 40; k++) {
+                if (!if_indextoname((unsigned)e->ifindex, nm)) break;
+                usleep(25000);
+            }
+            printf("vap: phy%d: freed stale ifindex %d for %s\n", phy,
+                   e->ifindex, e->ifname[0] ? e->ifname : "?");
+            fflush(stdout);
+            e->ifindex = 0;
+            g_own_dirty = 1;
+        }
+    }
+
     /* Reserve the management monitor on this phy *before* hostapd starts:
        whoever asks the driver first gets the last vif slot, and hostapd taking
        it makes the monitor impossible (-23 for our BSSes). */
