@@ -522,7 +522,21 @@ static int nl_mgmt_tx(int ifindex, uint32_t freq, const uint8_t *fr, size_t len)
     }
     nlb_put(&m, NL80211_ATTR_FRAME, fr, len);
     nlb_flag(&m, NL80211_ATTR_DONT_WAIT_FOR_ACK);
-    return nl_send_ack(g_nl_cmd_fd, &m);
+    int rc = nl_send_ack(g_nl_cmd_fd, &m);
+    /* cfg80211 rejects NL80211_CMD_FRAME with -EINVAL when NL80211_ATTR_WIPHY_FREQ
+     * names a channel the interface is not on: the manager's 0x2019 carries its
+     * configured frequency (2437) while the CAP may be on 2412.  Retry without
+     * the frequency so the frame goes out on the current channel. */
+    if (rc == -EINVAL && freq) {
+        nlb_init(&m, NL80211_CMD_FRAME, NLM_F_ACK);
+        nlb_u32(&m, NL80211_ATTR_IFINDEX, (uint32_t)ifindex);
+        nlb_put(&m, NL80211_ATTR_FRAME, fr, len);
+        nlb_flag(&m, NL80211_ATTR_DONT_WAIT_FOR_ACK);
+        rc = nl_send_ack(g_nl_cmd_fd, &m);
+        if (rc == 0)
+            printf("nl_mgmt_tx: retried without freq %u (EINVAL)\n", freq);
+    }
+    return rc;
 }
 
 /* ---------------- TLV iterator (u16 tag | u16 len | value) ------------- */
