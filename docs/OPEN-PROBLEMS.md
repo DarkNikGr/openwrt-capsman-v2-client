@@ -146,7 +146,17 @@ Resolved and merged into `main`:
 
 Still open:
 
-0. **Duplicate VAP rows give two hostapd instances per BSS.** In the live
+0. **One hostapd process per VAP contends on the phy.** After the pid-file
+   fallback (`3492186`) the live manager-only run reaches 4/4 VAPs, every
+   hostapd logs `AP-ENABLED`, and then the instances die within ~1 s; one is
+   caught in state `D` inside nl80211. The same happens with a single VAP, so
+   it is not sibling contention on the management side: OpenWrt and netifd run
+   **one hostapd per phy with `bss=` sections**, while this CAP starts one
+   process per VAP. The structural fix is to generate one config per phy
+   (interface= + bss=) and start it once, then ADD/ENABLE new BSSes through the
+   hostapd control socket instead of spawning a new daemon.
+   Earlier symptom (kept for the record): **duplicate VAP rows gave two
+   hostapd instances per BSS**. In the live
    manager-only run the same port ends up with two names
    (`/tmp/vap-phy0-ap1.conf` and `/tmp/vap-cap0-1.conf`), the second hostapd
    fails with `nl80211 driver initialization failed`, and the reconcile loop
