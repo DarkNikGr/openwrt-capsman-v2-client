@@ -182,6 +182,15 @@ static void vap_phy_bss(FILE *f, const char *kw, const struct own_entry *e,
     fprintf(f, "ignore_broadcast_ssid=0\nap_isolate=0\n");
 }
 
+/* A journal row is only written into the phy config when its netdev exists
+ * right now: hostapd must never create an interface itself (that hits the
+ * phy vif limit and fails with -23/ENFILE). */
+static int vap_phy_row_ready(const struct own_entry *e, int phy)
+{
+    return e->used && e->active && e->start_len && e->ifname[0] &&
+           (e->port >> 8) == phy && if_nametoindex(e->ifname) > 0;
+}
+
 /* (Re)start the single hostapd for this phy with every journaled VAP. */
 static int vap_phy_apply(int phy, const struct cfg *c)
 {
@@ -194,13 +203,10 @@ static int vap_phy_apply(int phy, const struct cfg *c)
     int n = 0;
     for (int i = 0; i < OWN_MAX; i++) {
         struct own_entry *e = &g_own[i];
-        if (!e->used || !e->active || !e->start_len || !e->ifname[0] ||
-            (e->port >> 8) != phy)
-            continue;
-        if (if_nametoindex(e->ifname) <= 0) {
-            printf("vap: phy%d: %s has no netdev, not in the config\n",
-                   phy, e->ifname);
-            fflush(stdout);
+        if (!vap_phy_row_ready(e, phy)) {
+            if (e->used && e->active && (e->port >> 8) == phy)
+                printf("vap: phy%d: %s has no netdev, not in the config\n",
+                       phy, e->ifname);
             continue;
         }
         n++;
@@ -221,10 +227,7 @@ static int vap_phy_apply(int phy, const struct cfg *c)
     int first = 1;
     for (int i = 0; i < OWN_MAX; i++) {
         struct own_entry *e = &g_own[i];
-        if (!e->used || !e->active || !e->start_len || !e->ifname[0] ||
-            (e->port >> 8) != phy)
-            continue;
-        if (if_nametoindex(e->ifname) <= 0)
+        if (!vap_phy_row_ready(e, phy))
             continue;
         char ctrl[128];
         snprintf(ctrl, sizeof(ctrl), "/var/run/hostapd/%s", e->ifname);
