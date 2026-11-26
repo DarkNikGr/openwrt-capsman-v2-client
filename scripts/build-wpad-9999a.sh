@@ -24,8 +24,15 @@ SDK_URL=https://downloads.openwrt.org/releases/24.10.0/targets/ramips/mt7621/ope
 say() { echo "[wpad-build] $*" >&2; }
 
 # Host prerequisites: OpenWrt's prepare-tmpinfo needs a *complete* perl.
-perl -e 'use FindBin; use threads; use Time::Piece' 2>/dev/null ||
-	die_msg="install perl core modules (Fedora: perl-core perl-Time-Piece)"
+if ! perl -e 'use FindBin; use threads; use Time::Piece' 2>/dev/null; then
+	say "host prerequisite missing: a complete Perl (FindBin, threads, Time::Piece)"
+	say "  Fedora: dnf install perl-core perl-Time-Piece"
+	exit 1
+fi
+for tool in curl tar zstd git python3 make; do
+	command -v "$tool" >/dev/null 2>&1 ||
+		{ say "host prerequisite missing: $tool"; exit 1; }
+done
 
 mkdir -p "$WORK"
 SRC=$WORK/owrt
@@ -37,7 +44,7 @@ if [ ! -d "$SRC/package/network/services/hostapd" ]; then
 		https://github.com/openwrt/openwrt.git "$SRC"
 fi
 
-if [ ! -x "$SDK/rules.mk" ]; then
+if [ ! -f "$SDK/rules.mk" ]; then
 	say "downloading the 24.10.0 mt7621 SDK"
 	curl -fsSL --retry 2 -o "$WORK/sdk.tar.zst" "$SDK_URL"
 	mkdir -p "$SDK"
@@ -84,11 +91,21 @@ for line in s.splitlines():
 open(p, 'w').write('\n'.join(out) + '\n')
 PY
 
-# 4. libubox/ubus/uci: drop the Lua bindings (the SDK has no liblua)
+# 4. libubox/ubus/uci: drop the Lua bindings (the SDK has no liblua).
+#    Only the *target* CMAKE_OPTIONS matter: libubox already sets BUILD_LUA=OFF
+#    for its host variant, so a bare grep for that string skipped the edit and
+#    the target build then failed on the missing liblua.
 for mk in libs/libubox system/ubus system/uci; do
 	f="$SDK/package/$mk/Makefile"
-	grep -q BUILD_LUA=OFF "$f" && continue
-	sed -i 's|^CMAKE_OPTIONS += \\|CMAKE_OPTIONS += \\\n\t-DBUILD_LUA=OFF \\|' "$f"
+	if ! python3 - "$f" <<'PY'
+import sys
+s = open(sys.argv[1]).read()
+target = s.split('CMAKE_HOST_OPTIONS', 1)[0]
+sys.exit(0 if '-DBUILD_LUA=OFF' in target else 1)
+PY
+	then
+		sed -i 's|^CMAKE_OPTIONS += \\|CMAKE_OPTIONS += \\\n\t-DBUILD_LUA=OFF \\|' "$f"
+	fi
 	sed -i 's|^PKG_BUILD_DEPENDS:=lua|PKG_BUILD_DEPENDS:=|' "$f"
 	sed -i '/define Package\/libubox-lua/,/endef/d' "$f"
 	sed -i '/define Package\/libubus-lua/,/endef/d' "$f"
