@@ -63,7 +63,7 @@ RouterOS 7.25.1 with a real station; "lab" = CHR 7.25.1 + mac80211-hwsim.
 
 | Setting | Status | Evidence / why |
 |---|---|---|
-| `traffic-processing=on-cap` | ✅ live | the supported mode: the manager is the authenticator, the CAP forwards. The CAP needs the `br-vlan<N>` bridge to exist (see OPEN-PROBLEMS F49) |
+| `traffic-processing=on-cap` | ✅ **live, ping 0% loss** | the supported mode: the manager is the authenticator, the CAP forwards. The agent creates `br-vlan<N>` on demand; put that device in a firewall zone if traffic must reach the CAP itself |
 | `vlan-id` | ✅ live | per-VAP `bridge=` to `br-vlan<N>` |
 | `traffic-processing=on-capsman` (`a2=1`) | 🟡 lab | plaintext datachan framing works; no live traffic test |
 | `traffic-processing=on-capsman-secure` (`a2=2`) | ❌ never | manager-side key install does not run on a radio-less controller |
