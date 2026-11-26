@@ -1079,6 +1079,26 @@ static int own_claim(const struct cfg *c, int phy, int vapid,
     state = own_probe(0);
     e = own_by_port(port);
 
+    /* One row per port: once the VAP is up and its hostapd is alive, keep it.
+       Re-claiming with a different preferred name used to create a second
+       netdev/hostapd for the same port (the live restart loop). */
+    if (e && e->used && e->ifname[0]) {
+        int live = read_sysfs_int(e->ifname, "ifindex");
+        if (live > 0) {
+            int lpid = own_hostapd_pid(e->ifname);
+            if (lpid > 0) {
+                e->ifindex = live;
+                e->pid = lpid;
+                e->owner = OWN_CAPAGENT;
+                if (ifname) snprintf(ifname, ifname_len, "%.*s",
+                                     (int)ifname_len - 1, e->ifname);
+                if (ifindex) *ifindex = live;
+                if (managed) *managed = 1;
+                return 1;
+            }
+        }
+    }
+
     snprintf(conv, sizeof(conv), "phy%d-ap%d", phy, vapid);
     snprintf(alt, sizeof(alt), "cap%d-%d", phy, vapid);
 
