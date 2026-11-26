@@ -193,6 +193,29 @@ static int nl_set_iftype(int ifindex, uint32_t type)
     return nl_send_ack(g_nl_cmd_fd, &m);
 }
 
+/* Fix the radio's TX power (dBm), the way `iw dev X set txpower fixed` does.
+ * hostapd 2.11 has no tx-power config item ("unknown configuration item
+ * 'txpower'"), and CAPsMAN sends the value as a radio setting in 0x500b
+ * TLV 0x61, so it is applied through nl80211 after the BSS is up.
+ * NL80211_TX_POWER_AUTOMATIC clears a fixed setting. */
+static int nl_set_txpower(int ifindex, int dbm)
+{
+    struct nl_buf m;
+    if (ifindex <= 0 || nl_cmd_open() != 0) return -ENODEV;
+    nlb_init(&m, NL80211_CMD_SET_WIPHY, NLM_F_ACK);
+    nlb_u32(&m, NL80211_ATTR_IFINDEX, (uint32_t)ifindex);
+    if (dbm > 0) {
+        nlb_u32(&m, NL80211_ATTR_WIPHY_TX_POWER_SETTING,
+                NL80211_TX_POWER_FIXED);
+        nlb_u32(&m, NL80211_ATTR_WIPHY_TX_POWER_LEVEL,
+                (uint32_t)(dbm * 100));
+    } else {
+        nlb_u32(&m, NL80211_ATTR_WIPHY_TX_POWER_SETTING,
+                NL80211_TX_POWER_AUTOMATIC);
+    }
+    return nl_send_ack(g_nl_cmd_fd, &m);
+}
+
 /* Current nl80211 iftype of a netdev (AP_VLAN detection for the bridge). */
 static int nl_get_iftype(int ifindex){
     if (ifindex <= 0 || nl_cmd_open() != 0) return -1;

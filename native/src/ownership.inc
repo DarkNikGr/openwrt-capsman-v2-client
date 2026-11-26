@@ -107,6 +107,10 @@ struct own_entry {
  * find a free vif slot. */
 static uint64_t g_phy_start_ms[MAX_RADIOS];
 
+/* TX power the manager put in 0x500b TLV 0x61 (dBm).  It is a radio setting,
+ * so it goes in the phy-wide hostapd section, not in a BSS. */
+static int g_phy_txpower[MAX_RADIOS];
+
 static struct own_entry g_own[OWN_MAX];
 static const char *g_own_path;
 static int g_own_dirty;

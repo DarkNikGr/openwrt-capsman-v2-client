@@ -140,6 +140,9 @@ static void vap_phy_bss(FILE *f, const char *kw, const struct own_entry *e,
     find_el(e->start, e->start_len, 0x03, &ssid, &sl);
     find_el(e->start, e->start_len, 0x04, &ie, &il);
     find_el(e->start, e->start_len, 0x0a, &chv, &cl);
+    const uint8_t *dtv = NULL;
+    uint16_t dtl = 0;
+    find_el(e->start, e->start_len, 0x24, &dtv, &dtl);
 
     struct rsn_info ri;
     rsn_parse(ie, il, &ri);
@@ -160,6 +163,11 @@ static void vap_phy_bss(FILE *f, const char *kw, const struct own_entry *e,
     if (is_first) {
         fprintf(f, "driver=nl80211\nauth_algs=1\n");
         vap_write_channel(f, e->freq, vap_mgr_width(chv, cl));
+    }
+    /* dtim-period is per VAP (0x6016 TLV 0x24, a u32). */
+    if (dtv && dtl >= 4) {
+        uint32_t d = rd32(dtv);
+        if (d) fprintf(f, "dtim_period=%u\n", d);
     }
     if (ssid && sl) fprintf(f, "ssid=%.*s\n", (int)sl, (const char *)ssid);
     fprintf(f, "bssid=%02x:%02x:%02x:%02x:%02x:%02x\n",
@@ -537,6 +545,24 @@ static int vap_phy_apply(int phy, const struct cfg *c)
         }
         g_own_dirty = 1;
         own_save();
+    }
+    /* The manager's tx power is a radio setting (0x500b TLV 0x61).  It is
+     * applied after the BSS exists because nl80211 needs a live wdev, and
+     * values outside a plausible dBm range mean "no explicit setting". */
+    if (phy >= 0 && phy < MAX_RADIOS) {
+        int dbm = g_phy_txpower[phy];
+        if (dbm > 40) dbm = 0;
+        for (int i = 0; i < OWN_MAX; i++) {
+            struct own_entry *e = &g_own[i];
+            if (e->used && e->active && e->ifindex > 0 &&
+                (e->port >> 8) == phy) {
+                int tr = nl_set_txpower(e->ifindex, dbm);
+                if (dbm > 0)
+                    printf("vap: phy%d tx-power %d dBm (nl80211 ret=%d)\n",
+                           phy, dbm, tr);
+                break;
+            }
+        }
     }
     printf("vap: phy%d hostapd up with %d BSS(es) pid=%d\n", phy, n, (int)hp);
     fflush(stdout);

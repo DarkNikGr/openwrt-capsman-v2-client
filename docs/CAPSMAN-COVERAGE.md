@@ -63,6 +63,9 @@ RouterOS 7.25.1 with a real station; "lab" = CHR 7.25.1 + mac80211-hwsim.
 
 | Setting | Status | Evidence / why |
 |---|---|---|
+| `tx-power` (configuration) | 🟡 applied, driver pins it | the manager sends it in `0x500b` TLV `0x61` (`0x500b: phy0 tx-power=17 dBm`); the agent fixes the radio power through `NL80211_CMD_SET_WIPHY` (`ret=0`). The reference mt76 driver keeps reporting 20 dBm for every value (`iw dev … set txpower fixed 1200` behaves identically), so the setting is a no-op on this hardware but the path is implemented and verified |
+| `dtim-period` (configuration) | ✅ live | `0x6016` TLV `0x24` (u32) is written as `dtim_period=` in that BSS only (`dtim_period=4` for the master, 1 for the others); hostapd starts with 8/8 SSIDs |
+| multi-passphrase / PPSK | ❌ not available | RouterOS 7.25.1 exposes only a `multi-passphrase-group` boolean (no passphrase-group object, `/interface wifi security multi-passphrase` does not exist), so there is nothing to provision. Even with it, the manager is the RSN authenticator, so per-station passphrases are inherently manager-side and need no CAP change |
 | `traffic-processing=on-cap` | ✅ **live, ping 0% loss** | the supported mode: the manager is the authenticator, the CAP forwards. The agent creates `br-vlan<N>` on demand; put that device in a firewall zone if traffic must reach the CAP itself |
 | `vlan-id` | ✅ live | per-VAP `bridge=` to `br-vlan<N>` |
 | `traffic-processing=on-capsman` (`a2=1`) | 🟡 lab | plaintext datachan framing works; no live traffic test |

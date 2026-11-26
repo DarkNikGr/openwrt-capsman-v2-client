@@ -388,6 +388,15 @@ static int run_once(struct cfg *c)
             int a2 = find_el(body, len, 0xa2, &a2v, &a2l) && a2l ? a2v[0] : -1;
             if (find_el(body, len, 0x0a, &cv, &cl) && cl)
                 vchan_from_tlv((phy << 8) | vap, cv, cl);
+            const uint8_t *tp = NULL; uint16_t tl = 0;
+            if (find_el(body, len, 0x61, &tp, &tl) && tl >= 4 &&
+                phy >= 0 && phy < MAX_RADIOS) {
+                int dbm = (int)rd32(tp);
+                if (dbm > 0 && dbm != g_phy_txpower[phy]) {
+                    g_phy_txpower[phy] = dbm;
+                    printf("0x500b: phy%d tx-power=%d dBm\n", phy, dbm);
+                }
+            }
             printf("RX 0x500b phy=%d vap=%d a2=%d len=%d\n", phy, vap, a2, len);
             fflush(stdout);
             if (phy >= 0 && phy < c->nradios)
