@@ -44,7 +44,7 @@ LIBS   := $(MBEDTLS_LIB)/libmbedtls.a \
           $(MBEDTLS_LIB)/libmbedcrypto.a
 
 SRCS   := capagent.c src/extmux.c
-HDRS   := src/*.inc src/extmux.h
+HDRS   := src/*.inc src/*.h
 
 all: capagent-mipsel
 

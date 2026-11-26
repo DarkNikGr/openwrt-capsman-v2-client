@@ -55,7 +55,7 @@ RouterOS 7.25.1 with a real station; "lab" = CHR 7.25.1 + mac80211-hwsim.
 | `group-key-update` | ⚠️ forced off | `wpa_group_rekey=0` on the CAP (the manager owns rekeying) |
 | `wpa3` / SAE (`authentication-types=wpa3-psk`) | ✅ **live** | generated `sae_pwe=2` + `group_mgmt_cipher=AES-128-CMAC`; `0x201c` len=209 → `0x201b` → `0x201f` PTK + `SET_STATION MFP`, station `authorized: yes` |
 | `owe` | 🟡 lab 14/14 | not yet live |
-| `wpa2-eap` / 802.1X / RADIUS | ❌ untested | EAPOL is relayed, but no live 802.1X server test |
+| `wpa2-eap` / 802.1X / RADIUS | 🟡 code + manager wired | the RSN policy now emits `wpa_key_mgmt=WPA-EAP` (+`WPA-EAP-SHA256`) and `external_rsn_auth=1`; a FreeRADIUS 3.2.8 server answers `eapol_test` (PEAP/MSCHAPv2, TTLS/PAP). Live the manager's RADIUS request is rejected with `invalid Message-Authenticator` (see F52), so the 4-way never starts |
 | `wpa-psk-sha256` | ❌ untested | AKM parsed, not exercised |
 | `wps` | ❌ unsupported | not implemented |
 

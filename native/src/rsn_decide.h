@@ -24,6 +24,8 @@ struct rsn_info {
     int valid;
     int group;          /* 4 = CCMP, 2 = TKIP */
     int pairwise;       /* 4 = CCMP */
+    int akm_eap;              /* 802.1X (CAPsMAN owns the EAP exchange) */
+    int akm_eap256;
     int akm_psk;
     int akm_psk256;
     int akm_sae;
@@ -58,6 +60,8 @@ static void rsn_parse(const uint8_t *ie, size_t len, struct rsn_info *ri)
                 for (int i = 0; i < ac && k + 4 + 4 * (size_t)i + 3 < n; i++) {
                     const uint8_t *a = r + k + 2 + 4 * (size_t)i;
                     if (a[0] == 0x00 && a[1] == 0x0f && a[2] == 0xac) {
+                        if (a[3] == 1)  ri->akm_eap = 1;
+                        if (a[3] == 5)  ri->akm_eap256 = 1;
                         if (a[3] == 2)  ri->akm_psk = 1;
                         if (a[3] == 6)  ri->akm_psk256 = 1;
                         if (a[3] == 8)  ri->akm_sae = 1;
@@ -109,13 +113,21 @@ static void rsn_policy_from_ie(const struct rsn_info *ri, int sae_override,
 
     int have_psk = ri->valid && (ri->akm_psk || ri->akm_psk256);
     int have_sae = ri->valid && (ri->akm_sae || ri->akm_owe) && sae_override;
+    int have_eap = ri->valid && (ri->akm_eap || ri->akm_eap256);
 
-    p->external_auth = have_sae;
+    /* 802.1X is also a split-MAC exchange here: the manager terminates EAP
+     * with its RADIUS server, so hostapd must relay EAPOL and run no local
+     * 802.1X state machine, exactly like SAE/OWE. */
+    p->external_auth = have_sae || have_eap;
     p->want_rsnxe = have_sae;
-    if (!have_psk && !have_sae) return;
+    if (!have_psk && !have_sae && !have_eap) return;
 
     p->wpa = 2;
     size_t len = 0;
+    if (ri->akm_eap)    rsn_key_mgmt_add(p->key_mgmt, sizeof(p->key_mgmt),
+                                         &len, "WPA-EAP");
+    if (ri->akm_eap256) rsn_key_mgmt_add(p->key_mgmt, sizeof(p->key_mgmt),
+                                         &len, "WPA-EAP-SHA256");
     if (ri->akm_psk)    rsn_key_mgmt_add(p->key_mgmt, sizeof(p->key_mgmt),
                                          &len, "WPA-PSK");
     if (ri->akm_psk256) rsn_key_mgmt_add(p->key_mgmt, sizeof(p->key_mgmt),

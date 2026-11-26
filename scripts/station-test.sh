@@ -21,6 +21,11 @@ SECS=${4:-40}
 # KEY_MGMT=SAE for a WPA3 test (PMF is mandatory there); default WPA-PSK.
 KEY_MGMT=${KEY_MGMT:-WPA-PSK}
 MFP=${MFP:-}
+# EAP (KEY_MGMT=WPA-EAP): EAP=PEAP|TTLS, IDENTITY=..., PASSWORD=...
+EAP=${EAP:-PEAP}
+IDENTITY=${IDENTITY:-}
+PASSWORD=${PASSWORD:-}
+EAP_PHASE2=${EAP_PHASE2:-auth=MSCHAPV2}
 
 # The wiphy number changes across driver reloads (phy1, phy6, ...): resolve it
 # from the station interface instead of assuming phy1.  Never delete the netns
@@ -78,6 +83,23 @@ $SUDO ip netns exec "$NETNS" ip link set "$IFNAME" up
 cat > "$CONF" <<EOF
 ctrl_interface=/tmp/$NETNS-ctrl
 country=GR
+EOF
+if [ "$KEY_MGMT" = "WPA-EAP" ]; then
+	cat >> "$CONF" <<EOF
+network={
+	ssid="$SSID"
+	key_mgmt=WPA-EAP
+	eap=$EAP
+	identity="$IDENTITY"
+	password="$PASSWORD"
+	phase2="$EAP_PHASE2"
+	${MFP:+ieee80211w=$MFP}
+	pairwise=CCMP
+	group=CCMP
+}
+EOF
+else
+	cat >> "$CONF" <<EOF
 network={
 	ssid="$SSID"
 	psk="$PSK"
@@ -87,6 +109,7 @@ network={
 	group=CCMP
 }
 EOF
+fi
 $SUDO rm -f "$LOG"
 $SUDO rm -rf "/tmp/$NETNS-ctrl"
 # Foreground with -dd, not -B: wpa_supplicant -B detaches and its -f log could
