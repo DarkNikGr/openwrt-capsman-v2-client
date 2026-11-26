@@ -240,6 +240,7 @@ static void put32(uint8_t *p, uint32_t v) { p[0]=v>>24; p[1]=v>>16; p[2]=v>>8; p
 #include "src/mlme.inc"   /* W36: in-CAP MLME for one VAP (no hostapd) */
 #include "src/vap.inc"    /* manager-driven VAP creation + hostapd (0x500b/0x6016) */
 #include "src/ownership.inc"   /* W34 netdev ownership: netifd vs capagent */
+#include "src/phy.inc"    /* one hostapd per phy, every VAP as a bss= section */
 #include "src/discovery.inc"   /* manager discovery and MAC/ifname resolution */
 #include "src/stats.inc"   /* 0x200e signal + 0x2015 counters/rates */
 #include "src/lab.inc"   /* CAPAGENT_LAB: hwsim AP, mgmt relay, test injection */

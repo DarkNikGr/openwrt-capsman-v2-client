@@ -38,6 +38,13 @@ struct vap {
        exchange, so 0x2019 Auth frames must go through this BSS's hostapd). */
     int mfp;
     int external_auth;
+    /* Per-phy hostapd: the manager's start body for this VAP, kept so one
+       hostapd process can carry every BSS of the radio (bss= sections). */
+    int have_start;
+    uint8_t st_ssid[33];
+    uint8_t st_ie[512];
+    uint16_t st_ie_len;
+    uint16_t st_ssid_len;
     /* W33 ownership bookkeeping.  Only a netdev we created may ever be
        deleted, and only a hostapd we started may ever be stopped. */
     int we_created;

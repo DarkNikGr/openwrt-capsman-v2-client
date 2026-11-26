@@ -417,6 +417,12 @@ static int own_hostapd_pid(const char *ifname)
 
     if (!own_name_ok(ifname))
         return 0;
+    /* The VAP may live in the phy-wide hostapd (bss= section): its own pid
+     * file does not exist, the phy one does. */
+    {
+        pid_t ph = vap_phy_pid_for_ifname(ifname);
+        if (ph > 0) return (int)ph;
+    }
     snprintf(pidf, sizeof(pidf), OWN_RUN_DIR "/vap-%s.pid", ifname);
     f = fopen(pidf, "r");
     if (!f)
@@ -876,8 +882,10 @@ static void own_try_start(const struct cfg *c, struct own_entry *e)
 
     e->starting = 1;
     e->starting_at = now;
-    pid = vap_hostapd_start(e->port, e->ifname, e->port >> 8, e->port & 0x0f,
-                            e->start, e->start_len, &vp, c);
+    (void)vp;
+    /* One hostapd per phy: this row is a bss= section of it, so the start
+     * rebuilds the phy config with every journaled VAP. */
+    pid = vap_phy_apply(e->port >> 8, c);
     e->starting = 0;
     if (pid > 0) {
         e->pid = pid;

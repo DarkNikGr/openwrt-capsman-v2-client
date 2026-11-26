@@ -400,6 +400,10 @@ static int vap_wait_ap_enabled(const char *logf, int ms)
 }
 
 /* Build and start a hostapd instance for one provisioned VAP. */
+static int  vap_phy_apply(int phy, const struct cfg *c);
+static void vap_phy_stop(int phy);
+static pid_t vap_phy_pid_for_ifname(const char *ifname);
+
 static int vap_hostapd_start_one(int port, const char *ifname, int phy, int vapid,
                                  const uint8_t *body, uint16_t len,
                                  struct vap *vp, const struct cfg *c)
