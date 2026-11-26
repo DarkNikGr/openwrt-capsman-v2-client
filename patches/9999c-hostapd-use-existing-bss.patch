@@ -1,0 +1,37 @@
+hostapd: attach to an existing BSS netdev instead of replacing it
+
+A CAP that creates its own BSS interfaces hands hostapd a name that already
+exists.  NL80211_CMD_NEW_INTERFACE then answers -ENFILE, and with
+use_existing = 0 hostapd removes the caller's interface and creates its own,
+so the ifindex moves under the control plane and the BSS is torn down again.
+
+--- a/src/ap/hostapd.c	2026-11-26 12:27:23.436628189 +0200
++++ b/src/ap/hostapd.c	2026-11-26 12:27:23.467242624 +0200
+@@ -1462,11 +1462,26 @@
+ #endif /* CONFIG_IEEE80211BE */
+ 
+ 		hapd->interface_added = 1;
++		/*
++		 * A control plane that creates the BSS netdevs itself (a CAP
++		 * driven by an external manager) hands hostapd an interface
++		 * that already exists.  With use_existing = 0 hostapd reads the
++		 * -ENFILE answer from NL80211_CMD_NEW_INTERFACE as "someone
++		 * else owns this name", deletes the interface and creates it
++		 * again owned by its own netlink socket.  The ifindex then
++		 * changes under the control plane, which sees its netdev
++		 * disappear and tears the BSS down again: the restart loop.
++		 *
++		 * use_existing only has an effect in exactly that case (the
++		 * name already exists); a name that does not exist is created
++		 * as before.  For an AP interface the intent is always "use it
++		 * if it is there", so pass it unconditionally.
++		 */
+ 		if (hostapd_if_add(hapd->iface->bss[0], WPA_IF_AP_BSS,
+ 				   conf->iface, addr, hapd,
+ 				   &hapd->drv_priv, force_ifname, if_addr,
+ 				   conf->bridge[0] ? conf->bridge : NULL,
+-				   first == -1)) {
++				   1)) {
+ 			wpa_printf(MSG_ERROR, "Failed to add BSS (BSSID="
+ 				   MACSTR ")", MAC2STR(hapd->own_addr));
+ 			hapd->interface_added = 0;

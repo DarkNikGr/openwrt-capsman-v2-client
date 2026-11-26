@@ -57,7 +57,8 @@ done
 
 # 2. patches + the external-RSN build flag
 for f in 999-external-rsn-auth 9997-external-rsn-ie 9998-external-rsn-eapol-rx \
-	 9999-external-rsn-no-psk 9999a-external-rsn-sae 9999b-external-rsn-tx-retval; do
+         9999-external-rsn-no-psk 9999a-external-rsn-sae \
+         9999b-external-rsn-tx-retval 9999c-hostapd-use-existing-bss; do
 	cp "$REPO/patches/$f.patch" \
 	   "$SDK/package/network/services/hostapd/patches/$f.patch"
 done
