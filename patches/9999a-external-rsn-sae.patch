@@ -154,7 +154,7 @@ diff --git a/src/ap/ap_config.c b/src/ap/ap_config.c
 index 8f70004..11b7b5c 100644
 --- a/src/ap/ap_config.c
 +++ b/src/ap/ap_config.c
-@@ -1292,14 +1292,25 @@ static int hostapd_config_check_bss(struct hostapd_bss_config *bss,
+@@ -1292,14 +1292,26 @@ static int hostapd_config_check_bss(struct hostapd_bss_config *bss,
  				    struct hostapd_config *conf,
  				    int full_config)
  {
@@ -181,7 +181,8 @@ index 8f70004..11b7b5c 100644
 +		u32 allowed = WPA_KEY_MGMT_PSK | WPA_KEY_MGMT_PSK_SHA256;
 +
 +		if (bss->external_rsn_sae)
-+			allowed |= WPA_KEY_MGMT_SAE | WPA_KEY_MGMT_OWE;
++			allowed |= WPA_KEY_MGMT_SAE | WPA_KEY_MGMT_OWE |
++			           WPA_KEY_MGMT_IEEE8021X | WPA_KEY_MGMT_IEEE8021X_SHA256;
  		if (bss->wpa != WPA_PROTO_RSN || bss->osen) {
  			wpa_printf(MSG_ERROR,
  				   "external_rsn_auth requires WPA2/RSN (wpa=2)");
