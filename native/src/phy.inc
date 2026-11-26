@@ -353,6 +353,12 @@ static int vap_phy_apply(int phy, const struct cfg *c)
 
     FILE *f = fopen(conf, "w");
     if (!f) return -1;
+    /* Logger options are global: hostapd only honours them before the first
+     * interface=/bss= section.  Appended at the end they were parsed as
+     * per-BSS keys, so -dd stayed at INFO and every failure was invisible. */
+    if (getenv("CAPAGENT_HOSTAPD_DEBUG"))
+        fprintf(f, "logger_syslog=-1\nlogger_syslog_level=2\n"
+                   "logger_stdout=-1\nlogger_stdout_level=2\n");
     int first = 1;
     for (int i = 0; i < OWN_MAX; i++) {
         struct own_entry *e = &g_own[i];
@@ -365,8 +371,6 @@ static int vap_phy_apply(int phy, const struct cfg *c)
         vap_phy_bss(f, first ? "interface" : "bss", e, c, first);
         first = 0;
     }
-    if (getenv("CAPAGENT_HOSTAPD_DEBUG"))
-        fprintf(f, "logger_syslog=-1\nlogger_stdout_level=3\n");
     fclose(f);
 
     pid_t pid = fork();
