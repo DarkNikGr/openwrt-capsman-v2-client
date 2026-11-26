@@ -109,6 +109,26 @@ static const uint8_t ie_8021x[] = {
     0x00, 0x00,
 };
 
+static const uint8_t ie_8021x256[] = {
+    0x30, 0x14,
+    0x01, 0x00,
+    0x00, 0x0f, 0xac, 0x04,
+    0x01, 0x00, 0x00, 0x0f, 0xac, 0x04,
+    0x01, 0x00, 0x00, 0x0f, 0xac, 0x05,             /* AKM 5 = 802.1X-SHA256 */
+    0x00, 0x00,
+};
+
+/* AKM 4 = FT-PSK: a fast-transition suite this CAP does not implement, so the
+ * policy must produce no RSN config rather than silently mislabelling it. */
+static const uint8_t ie_ft[] = {
+    0x30, 0x14,
+    0x01, 0x00,
+    0x00, 0x0f, 0xac, 0x04,
+    0x01, 0x00, 0x00, 0x0f, 0xac, 0x04,
+    0x01, 0x00, 0x00, 0x0f, 0xac, 0x04,             /* AKM 4 = FT-PSK */
+    0x00, 0x00,
+};
+
 /* SAE + RSNXE, surrounded by the SSID and a vendor IE as in the real 191-byte
  * 0x6016 blob.  Element 244 must be relayed for SAE/OWE, and only there. */
 static const uint8_t ie_local[] = {
@@ -315,14 +335,39 @@ static void case_psk256(void)
 
 /* An AKM the CAP cannot mirror and a missing IE both mean "open" (wpa=0),
  * never a half-configured PSK BSS. */
-static void case_unsupported(void)
+/* 802.1X is split-MAC too: the manager terminates EAP against RADIUS, so the
+ * CAP reproduces the AKM and enables the external authentication switch. */
+static void case_eap(void)
 {
     struct rsn_info ri;
     struct rsn_policy rp;
     char conf[256];
 
     conf_of(ie_8021x, sizeof(ie_8021x), 1, &ri, &rp, conf, sizeof(conf));
-    assert(ri.valid && !ri.akm_psk && !ri.akm_sae && !ri.akm_owe);
+    assert(ri.valid && ri.akm_eap && !ri.akm_psk);
+    assert(strcmp(rp.key_mgmt, "WPA-EAP") == 0);
+    assert(rp.external_auth == 1);
+    assert(rp.ieee80211w == 0);
+    expect_line(conf, "wpa_key_mgmt=WPA-EAP");
+    expect_line(conf, "external_rsn_auth=1");
+    expect_absent(conf, "sae_pwe");
+
+    conf_of(ie_8021x256, sizeof(ie_8021x256), 1, &ri, &rp, conf, sizeof(conf));
+    assert(ri.valid && ri.akm_eap256 && !ri.akm_eap);
+    assert(strcmp(rp.key_mgmt, "WPA-EAP-SHA256") == 0);
+    assert(rp.external_auth == 1);
+    expect_line(conf, "wpa_key_mgmt=WPA-EAP-SHA256");
+}
+
+static void case_unsupported(void)
+{
+    struct rsn_info ri;
+    struct rsn_policy rp;
+    char conf[256];
+
+    conf_of(ie_ft, sizeof(ie_ft), 1, &ri, &rp, conf, sizeof(conf));
+    assert(ri.valid && !ri.akm_psk && !ri.akm_sae && !ri.akm_owe &&
+           !ri.akm_eap && !ri.akm_eap256);
     assert(rp.wpa == 0 && rp.key_mgmt[0] == 0);
     assert(strcmp(conf, "wpa=0\n") == 0);
 
@@ -405,9 +450,10 @@ int main(void)
     case_sae_only();
     case_owe();
     case_psk256();
+    case_eap();
     case_unsupported();
     case_blob();
     case_truncation();
-    puts("RSN decision (PSK/MFPC/MFPR/SAE/OWE/PSK256): PASS");
+    puts("RSN decision (PSK/MFPC/MFPR/SAE/OWE/PSK256/EAP): PASS");
     return 0;
 }

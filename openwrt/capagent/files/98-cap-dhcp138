@@ -1,0 +1,16 @@
+#!/bin/sh
+# Ask the DHCP client for option 138 (the CAPsMAN manager address) so that
+# MANAGER=auto works on a zero-touch image with no baked address.
+[ -f /etc/config/network ] || exit 0
+
+have=$(uci -q get network.wan.reqopts)
+case " $have " in
+*" 138 "*) exit 0 ;;
+esac
+if [ -n "$have" ]; then
+	uci -q set network.wan.reqopts="$have 138"
+else
+	uci -q set network.wan.reqopts="138"
+fi
+uci -q commit network
+exit 0

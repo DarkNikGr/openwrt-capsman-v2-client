@@ -60,6 +60,25 @@ static const char *choose_manager(struct cfg *c, char *buf, size_t n)
         }
     }
     if (!spec || !*spec || !strcmp(spec, "auto")) {
+        /* RouterOS CAPsMAN advertises its address in DHCP option 138; the
+         * lease hook in /etc/udhcpc.user.d writes it here.  A live lease is
+         * authoritative: it is faster than the broadcast and it survives a
+         * manager that answers discovery only after the WAN is up. */
+        FILE *dh = fopen("/tmp/cap-manager", "r");
+        if (dh) {
+            char line[64] = "";
+            if (fgets(line, sizeof(line), dh)) {
+                line[strcspn(line, "\r\n")] = 0;
+                if (line[0] && strcmp(line, "0.0.0.0")) {
+                    fclose(dh);
+                    printf("discovery: manager %s from DHCP option 138\n", line);
+                    fflush(stdout);
+                    snprintf(buf, n, "%s", line);
+                    return buf;
+                }
+            }
+            fclose(dh);
+        }
         if (discover_manager(c->discovery_if, atoi(c->port), buf, n) == 0) {
             if (c->lock_to_manager) {
                 FILE *f = fopen("/etc/cap/manager.lock", "w");

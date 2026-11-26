@@ -50,9 +50,14 @@ define Package/capagent/install
 	$(INSTALL_BIN) ./files/capagent.init $(1)/etc/init.d/capagent
 	$(INSTALL_DIR) $(1)/etc/cap
 	$(INSTALL_CONF) ./files/capagent.conf $(1)/etc/cap/capagent.conf
-	# first-boot zone for the on-cap VLAN bridges (br-vlan*)
+	# first-boot zone for the on-cap VLAN bridges (br-vlan*), and the DHCP
+	# option 138 request that makes MANAGER=auto work on a clean image
 	$(INSTALL_DIR) $(1)/etc/uci-defaults
 	$(INSTALL_BIN) ./files/99-cap-firewall $(1)/etc/uci-defaults/99-cap-firewall
+	$(INSTALL_BIN) ./files/98-cap-dhcp138 $(1)/etc/uci-defaults/98-cap-dhcp138
+	# lease hook: decode option 138 into /tmp/cap-manager
+	$(INSTALL_DIR) $(1)/etc/udhcpc.user.d
+	$(INSTALL_BIN) ./files/99-cap-dhcp138 $(1)/etc/udhcpc.user.d/99-cap-dhcp138
 endef
 
 $(eval $(call BuildPackage,capagent))

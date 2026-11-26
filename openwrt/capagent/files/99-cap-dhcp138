@@ -1,0 +1,25 @@
+#!/bin/sh
+# RouterOS CAPsMAN advertises its own address in DHCP option 138 (RFC 4578,
+# "CAPWAP AC address").  udhcpc exports it as hex ("0a000001"), so decode it
+# and hand it to capagent, whose MANAGER=auto path prefers this file over the
+# broadcast and over any baked address.
+#
+# Nothing is written for a lease without option 138, so a network whose DHCP
+# server is not a CAPsMAN manager leaves the previous value untouched.
+[ -n "$opt138" ] || exit 0
+[ "$interface" = "lo" ] && exit 0
+
+case "$opt138" in
+????????) ;;
+*) exit 0 ;;
+esac
+
+set -- $(printf '%s\n' "$opt138" | sed 's/../0x& /g')
+[ $# -eq 4 ] || exit 0
+ip=$(printf '%d.%d.%d.%d' "$1" "$2" "$3" "$4" 2>/dev/null) || exit 0
+case "$ip" in
+0.0.0.0|255.255.255.255) exit 0 ;;
+esac
+
+printf '%s\n' "$ip" > /tmp/cap-manager.tmp && mv /tmp/cap-manager.tmp /tmp/cap-manager
+exit 0
