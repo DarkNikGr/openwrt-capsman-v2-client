@@ -1130,17 +1130,18 @@ static int own_claim(const struct cfg *c, int phy, int vapid,
     if (e && e->used && e->ifname[0]) {
         int live = read_sysfs_int(e->ifname, "ifindex");
         if (live > 0) {
+            /* The journal already chose this name for the port: reuse it
+               unconditionally, so a later ubus claim or a missing hostapd
+               cannot rename phyN-apM to capN-M between ticks. */
             int lpid = own_hostapd_pid(e->ifname);
-            if (lpid > 0) {
-                e->ifindex = live;
-                e->pid = lpid;
-                e->owner = OWN_CAPAGENT;
-                if (ifname) snprintf(ifname, ifname_len, "%.*s",
-                                     (int)ifname_len - 1, e->ifname);
-                if (ifindex) *ifindex = live;
-                if (managed) *managed = 1;
-                return 1;
-            }
+            e->ifindex = live;
+            if (lpid > 0) e->pid = lpid;
+            e->owner = OWN_CAPAGENT;
+            if (ifname) snprintf(ifname, ifname_len, "%.*s",
+                                 (int)ifname_len - 1, e->ifname);
+            if (ifindex) *ifindex = live;
+            if (managed) *managed = 1;
+            return 1;
         }
     }
 
@@ -1183,7 +1184,8 @@ static int own_claim(const struct cfg *c, int phy, int vapid,
            stale (e.g. left over from a removed wifi-iface).  Only honour it
            when there really is an interface: otherwise fall through and use
            the manager's own phyN-apM name instead of the capN-M fallback. */
-        if (own_nd_has(nm, NULL, 0) && read_sysfs_int(nm, "ifindex") > 0) {
+        if (!wl_own() && own_nd_has(nm, NULL, 0) &&
+            read_sysfs_int(nm, "ifindex") > 0) {
             /* netifd always wins the name; remember its ifindex so a legacy
              * 0xd00b can report the existing BSS read-only. */
             int nidx = read_sysfs_int(nm, "ifindex");
