@@ -200,6 +200,14 @@ static int vap_phy_apply(int phy, const struct cfg *c)
     /* Only rows whose netdev already exists: hostapd must attach to the
        interfaces capagent created, never create them itself.  Creating them
        inside hostapd hits the phy's vif limit and fails with -23 (ENFILE). */
+    /* Leave one interface free for the management monitor VIF: with
+       mgmt_source=monitor capagent needs a slot on the same phy, and asking
+       hostapd for every BSS plus the monitor overruns the driver's vif limit
+       (hostapd then reports -23/ENFILE and the BSSes die). */
+    int cap = phy_max_vifs(phy);
+    if (cap > 0 && (c->mgmt_source == 2 || c->mgmt_source == 0))
+        cap -= 1;
+
     int n = 0;
     for (int i = 0; i < OWN_MAX; i++) {
         struct own_entry *e = &g_own[i];
@@ -208,6 +216,12 @@ static int vap_phy_apply(int phy, const struct cfg *c)
                 printf("vap: phy%d: %s has no netdev, not in the config\n",
                        phy, e->ifname);
             continue;
+        }
+        if (cap > 0 && n >= cap) {
+            printf("vap: phy%d: BSS cap %d reached, %s left for the monitor\n",
+                   phy, cap, e->ifname);
+            fflush(stdout);
+            break;
         }
         n++;
     }
@@ -224,16 +238,18 @@ static int vap_phy_apply(int phy, const struct cfg *c)
 
     FILE *f = fopen(conf, "w");
     if (!f) return -1;
-    int first = 1;
+    int first = 1, written = 0;
     for (int i = 0; i < OWN_MAX; i++) {
         struct own_entry *e = &g_own[i];
         if (!vap_phy_row_ready(e, phy))
             continue;
+        if (cap > 0 && first == 0 && written >= cap) break;
         char ctrl[128];
         snprintf(ctrl, sizeof(ctrl), "/var/run/hostapd/%s", e->ifname);
         unlink(ctrl);
         vap_phy_bss(f, first ? "interface" : "bss", e, c, first);
         first = 0;
+        written++;
     }
     if (getenv("CAPAGENT_HOSTAPD_DEBUG"))
         fprintf(f, "logger_syslog=-1\nlogger_stdout_level=3\n");
