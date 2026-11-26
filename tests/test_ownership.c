@@ -137,21 +137,26 @@ static int vap_netdev_del(int ifindex)
     return -1;
 }
 
-static int vap_hostapd_start(int port, const char *ifname, int phy, int vapid,
-                             const uint8_t *body, uint16_t len,
-                             const struct vap *vp, const struct cfg *c)
-{
-    (void)port; (void)phy; (void)vapid; (void)body; (void)len;
-    (void)vp; (void)c;
-    int pid = 3000 + ++g_starts;
-    char p[128];
-    FILE *f;
+/* One hostapd per phy: the start returns the phy process, and every row of
+ * that phy resolves to it.  The tests drive liveness through g_pid_alive. */
+static pid_t g_test_phy_pid;
 
+static int vap_phy_apply(int phy, const struct cfg *c)
+{
+    (void)phy; (void)c;
+    int pid = 3000 + ++g_starts;
+    g_test_phy_pid = pid;
     g_pid_alive[pid] = 1;
-    snprintf(p, sizeof(p), OWN_RUN_DIR "/vap-%s.pid", ifname);
-    f = fopen(p, "w");
-    if (f) { fprintf(f, "%d\n", pid); fclose(f); }
     return pid;
+}
+
+static pid_t vap_phy_pid_for_ifname(const char *ifname)
+{
+    (void)ifname;
+    if (g_test_phy_pid > 0 && g_test_phy_pid < 4096 &&
+        g_pid_alive[g_test_phy_pid])
+        return g_test_phy_pid;
+    return 0;
 }
 
 static void cap_vap_ready(int phy, int vapid, int ifindex, const char *ifname,

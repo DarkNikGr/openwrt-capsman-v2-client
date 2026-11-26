@@ -273,6 +273,15 @@ static const char *phy_name_by_index(int idx, char *buf, size_t n)
     return buf;
 }
 
+/* `iw` used for capability probes.  On OpenWrt it is /usr/sbin/iw; a host
+ * or lab build may need a different binary (or a shim that trims a radio's
+ * huge virtual channel list), so allow an explicit override. */
+static const char *iw_exe(void)
+{
+    const char *p = getenv("CAPAGENT_IW");
+    return (p && *p) ? p : "/usr/sbin/iw";
+}
+
 /* Ciphers, chain masks and AP-interface limit from `iw phy phyN info`. */
 static int nl_get_wiphy_ciphers(int phy, uint8_t *out, int outmax);
 
@@ -283,7 +292,7 @@ static void read_phy_caps(int phy, struct phy_caps *pc)
     int in_ciph = 0;
     memset(pc, 0, sizeof(*pc));
     phy_name_by_index(phy, pname, sizeof(pname));
-    snprintf(cmd, sizeof(cmd), "/usr/sbin/iw phy %s info 2>/dev/null", pname);
+    snprintf(cmd, sizeof(cmd), "%s phy %s info 2>/dev/null", iw_exe(), pname);
     FILE *fp = popen(cmd, "r");
     if (fp) {
         while (fgets(line, sizeof(line), fp)) {
@@ -359,7 +368,7 @@ static void read_phy_bands(int phy, struct phy_bands *pb)
     int have2 = 0, have5 = 0, have6 = 0;
     memset(pb, 0, sizeof(*pb));
     phy_name_by_index(phy, pname, sizeof(pname));
-    snprintf(cmd, sizeof(cmd), "/usr/sbin/iw phy %s info 2>/dev/null", pname);
+    snprintf(cmd, sizeof(cmd), "%s phy %s info 2>/dev/null", iw_exe(), pname);
     FILE *fp = popen(cmd, "r");
     if (fp) {
         while (fgets(line, sizeof(line), fp)) {

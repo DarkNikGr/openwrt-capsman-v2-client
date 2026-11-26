@@ -1202,12 +1202,11 @@ static int own_claim(const struct cfg *c, int phy, int vapid,
 
         if (state != OWN_PROBE_OK && !cand[i].safe_unknown)
             continue;                      /* cannot verify netifd right now */
-        /* A netifd claim on a name that does not exist on the system is
-           stale (e.g. left over from a removed wifi-iface).  Only honour it
-           when there really is an interface: otherwise fall through and use
-           the manager's own phyN-apM name instead of the capN-M fallback. */
-        if (!wl_own() && own_nd_has(nm, NULL, 0) &&
-            read_sysfs_int(nm, "ifindex") > 0) {
+        /* netifd always wins a name it claims.  The claim is checked against
+           its own ubus data, not against a live ifindex: netifd may create
+           the BSS a moment after the probe, and taking the name here would
+           collide with it. */
+        if (own_nd_has(nm, NULL, 0)) {
             /* netifd always wins the name; remember its ifindex so a legacy
              * 0xd00b can report the existing BSS read-only. */
             int nidx = read_sysfs_int(nm, "ifindex");
@@ -1259,25 +1258,6 @@ static int own_claim(const struct cfg *c, int phy, int vapid,
 
         if (own_forced_readonly(c))
             continue;                  /* forced legacy: read-only */
-
-        /* Own mode with the monitor relay: reserve the monitor VIF *before*
-           the last BSS takes the final slot, otherwise mon_create() has no
-           vif left (4/4 on the MT7603E) and the 0x2018 relay dies. */
-        if (!wl_legacy() && (c->mgmt_source == 2 || c->mgmt_source == 0)) {
-            int used = 0, hasmon = 0, maxv = phy_max_vifs(phy);
-            for (int w = 0; w < 16; w++)
-                if (g_vap[phy % MAX_RADIOS][w].used) used++;
-            for (int mi = 0; mi < g_mon_n; mi++)
-                if (g_mon[mi].phy == phy && g_mon[mi].fd >= 0) hasmon = 1;
-            if (maxv > 0 && !hasmon && used >= maxv - 1) {
-                if (mon_create(phy) <= 0) {
-                    printf("own: phy%d: no vif for the monitor, leaving %s "
-                           "uncreated\n", phy, nm);
-                    fflush(stdout);
-                    continue;
-                }
-            }
-        }
 
         idx = vap_netdev_create(phy, nm, mac);
         if (idx > 0) {

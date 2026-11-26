@@ -169,7 +169,12 @@ static int hostapd_has_mgmt_tx(void)
 /* Generic probe: does the installed wpad understand this config keyword? */
 static int hostapd_has_opt(const char *needle)
 {
-    FILE *f = fopen("/usr/sbin/wpad", "rb");
+    /* Honour CAPAGENT_HOSTAPD like hostapd_binary_has(): the host/lab build
+     * is not at /usr/sbin, and probing a different binary than the one we
+     * exec makes the generated config disagree with the daemon. */
+    const char *env = getenv("CAPAGENT_HOSTAPD");
+    FILE *f = (env && *env) ? fopen(env, "rb") : NULL;
+    if (!f) f = fopen("/usr/sbin/wpad", "rb");
     if (!f) f = fopen("/usr/sbin/hostapd", "rb");
     if (!f) return 0;
     size_t nl = strlen(needle), hit = 0;
@@ -383,8 +388,16 @@ static int vap_wait_ap_enabled(const char *logf, int ms)
     for (int i = 0; i < ms / 100; i++) {
         FILE *f = fopen(logf, "r");
         if (f) {
-            char b[4096];
-            size_t n = fread(b, 1, sizeof(b) - 1, f);
+            /* A -dd run writes megabytes before AP-ENABLED; scanning only
+             * the first 4 KiB reported "not ready" for a BSS that was up. */
+            char b[65536];
+            size_t n;
+            if (fseek(f, 0, SEEK_END) == 0 &&
+                ftell(f) > (long)(sizeof(b) - 1))
+                fseek(f, -(long)(sizeof(b) - 1), SEEK_END);
+            else
+                fseek(f, 0, SEEK_SET);
+            n = fread(b, 1, sizeof(b) - 1, f);
             fclose(f);
             b[n] = 0;
             if (strstr(b, "AP-ENABLED") ||

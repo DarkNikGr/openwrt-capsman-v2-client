@@ -1423,18 +1423,39 @@ static int xm_on_eapol(void *ctx, const struct extmux_vap *v,
     return 0;
 }
 
-/* W12/W46: hostapd relays the raw Auth (SAE commit/confirm) and AssocReq
- * over the per-VAP socket; forward them to the manager as 0x2018. */
+/* The manager allocates the Peer only from an 802.11 Authentication frame;
+ * an Association Request for an unknown MAC is logged as "no sta" and
+ * dropped (docs/FINDINGS.md).  hostapd relays SAE Auth itself, but for a
+ * WPA2-PSK BSS it answers open-system Auth locally and only relays the
+ * AssocReq, so with no monitor VIF the manager never sees an Auth.  Build
+ * the open-system Auth request that hostapd answered on air and report it
+ * first: Auth(alg=0,seq=1) then the real AssocReq. */
+static void send_open_auth_2018(mbedtls_ssl_context *ssl, int port,
+                                const uint8_t bssid[6], const uint8_t sta[6],
+                                uint32_t freq, uint8_t width, uint8_t band)
+{
+    uint8_t fr[30];
+    memset(fr, 0, sizeof(fr));
+    fr[0] = 0xb0;                       /* management, Authentication */
+    memcpy(fr + 4, bssid, 6);           /* addr1 = BSSID */
+    memcpy(fr + 10, sta, 6);            /* addr2 = STA */
+    memcpy(fr + 16, bssid, 6);          /* addr3 = BSSID */
+    fr[26] = 1;                         /* auth transaction sequence 1 */
+    mgmt_send_2018(ssl, port, fr, sizeof(fr), freq, width, band, 0,
+                   "auth-synth");
+}
+
 static void xm_on_mgmt(void *ctx, const struct extmux_vap *v,
                        const uint8_t *fr, size_t len)
 {
     struct xm_ctx *x = ctx;
     uint32_t freq = 0;
     uint8_t width = 1, band = 0;
+    struct vap *vp;
 
     if (!x || !v || !fr || len < 24) return;
+    vp = vap_by_ifindex(v->ifindex);
     if (!vchan_get(v->port, &freq, &width, &band) || !freq) {
-        struct vap *vp = vap_by_ifindex(v->ifindex);
         if (vp && vp->freq) freq = vp->freq;
     }
     if (!freq) return;
@@ -1443,6 +1464,11 @@ static void xm_on_mgmt(void *ctx, const struct extmux_vap *v,
            ((fr[0] >> 4) & 0xf) == 11 ? "auth" : "assocreq",
            v->port, len, freq);
     fflush(stdout);
+    /* SAE/OWE: hostapd already sent the real Auth frames.  PSK: supply the
+     * open-system Auth that hostapd kept local. */
+    if (((fr[0] >> 4) & 0xf) == 0 && (!vp || !vp->external_auth))
+        send_open_auth_2018(x->ssl, v->port, fr + 16, fr + 10, freq, width,
+                            band);
     mgmt_send_2018(x->ssl, v->port, fr, len, freq, width, band, 0, "ext");
 }
 

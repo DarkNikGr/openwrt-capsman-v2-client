@@ -22,6 +22,27 @@ static void vap_phy_paths(int phy, char *conf, size_t cl, char *pidf, size_t pl,
  * fall back to a /proc scan for our exact config path: every journal row of
  * the phy resolves to the same process, which stops the 1 s reconcile from
  * restarting the whole phy. */
+/* /proc/<pid>/cmdline is NUL-separated: strstr() stops at the first NUL and
+ * therefore never sees the config path.  Match each argument exactly.  This
+ * matters for a foreground (-dd) hostapd, which leaves no pid file at all. */
+static int vap_proc_has_conf(pid_t pid, const char *conf)
+{
+    char p[64], buf[4096];
+    snprintf(p, sizeof(p), "/proc/%ld/cmdline", (long)pid);
+    int fd = open(p, O_RDONLY);
+    if (fd < 0) return 0;
+    ssize_t n = read(fd, buf, sizeof(buf) - 1);
+    close(fd);
+    if (n <= 0) return 0;
+    size_t cl = strlen(conf);
+    for (ssize_t off = 0; off < n; ) {
+        size_t l = strnlen(buf + off, (size_t)(n - off));
+        if (l == cl && !memcmp(buf + off, conf, cl)) return 1;
+        off += (ssize_t)l + 1;
+    }
+    return 0;
+}
+
 static pid_t vap_phy_pid(int phy)
 {
     char conf[128], pidf[128], logf[128];
@@ -33,7 +54,8 @@ static pid_t vap_phy_pid(int phy)
         int got = fscanf(f, "%ld", &pid);
         fclose(f);
         if (got == 1 && pid > 0 &&
-            (kill((pid_t)pid, 0) == 0 || errno == EPERM))
+            (kill((pid_t)pid, 0) == 0 || errno == EPERM) &&
+            vap_proc_has_conf((pid_t)pid, conf))
             return (pid_t)pid;
     }
     DIR *d = opendir("/proc");
@@ -44,15 +66,7 @@ static pid_t vap_phy_pid(int phy)
         char *end = NULL;
         long c = strtol(de->d_name, &end, 10);
         if (!end || *end || c <= 0) continue;
-        char p[64], buf[4096];
-        snprintf(p, sizeof(p), "/proc/%ld/cmdline", c);
-        int fd = open(p, O_RDONLY);
-        if (fd < 0) continue;
-        ssize_t n = read(fd, buf, sizeof(buf) - 1);
-        close(fd);
-        if (n <= 0) continue;
-        buf[n] = 0;
-        if (strstr(buf, conf)) { found = (pid_t)c; break; }
+        if (vap_proc_has_conf((pid_t)c, conf)) { found = (pid_t)c; break; }
     }
     closedir(d);
     return found;
