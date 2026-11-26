@@ -1172,7 +1172,11 @@ static int own_claim(const struct cfg *c, int phy, int vapid,
 
         if (state != OWN_PROBE_OK && !cand[i].safe_unknown)
             continue;                      /* cannot verify netifd right now */
-        if (own_nd_has(nm, NULL, 0)) {
+        /* A netifd claim on a name that does not exist on the system is
+           stale (e.g. left over from a removed wifi-iface).  Only honour it
+           when there really is an interface: otherwise fall through and use
+           the manager's own phyN-apM name instead of the capN-M fallback. */
+        if (own_nd_has(nm, NULL, 0) && read_sysfs_int(nm, "ifindex") > 0) {
             /* netifd always wins the name; remember its ifindex so a legacy
              * 0xd00b can report the existing BSS read-only. */
             int nidx = read_sysfs_int(nm, "ifindex");
