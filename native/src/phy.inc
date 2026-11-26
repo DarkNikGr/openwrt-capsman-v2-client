@@ -148,6 +148,15 @@ static void vap_phy_bss(FILE *f, const char *kw, const struct own_entry *e,
     rsn_parse(ie, il, &ri);
     struct rsn_policy rp;
     rsn_policy_from_ie(&ri, hostapd_has_sae_override(), &rp);
+    if (rp.ft) {
+        uint8_t md[2];
+        if (rsn_mde_mdid(ie, il, md))
+            snprintf(rp.mdid, sizeof(rp.mdid), "%02x%02x", md[0], md[1]);
+        else
+            printf("vap: %s has an FT AKM but no Mobility Domain element; "
+                   "falling back to the non-FT AKM\n", e->ifname);
+        fflush(stdout);
+    }
     char bridge[32] = "";
     vap_bridge_if_present(e->ifname, e->vlan, bridge, sizeof(bridge));
 

@@ -87,7 +87,7 @@ RouterOS 7.25.1 with a real station; "lab" = CHR 7.25.1 + mac80211-hwsim.
 | Manager discovery via DHCP option 138 | ❌ not consumed | OpenWrt's `udhcpc` does not export it; the address is baked |
 | `upgrade-policy` | ❌ untested | no CAP firmware upgrade path |
 | ACL / `access-list`, `multi-passphrase`, VLAN pooling | ❌ untested | not implemented |
-| 802.11k/v/r steering hints | ❌ untested | not implemented |
+| 802.11k/v/r steering hints | 🟡 FT implemented, not exercisable | rsn_decide maps AKM 3/4 to `FT-EAP`/`FT-PSK` and adds `mobility_domain` from the MDE; RouterOS 7.25.1 sends neither (F61), so the BSS still comes up as plain PSK. 11k/11v (RRM/BSSTM) are not implemented |
 | 6 GHz / MLO (`ath12k`) | ❌ not implemented | the Deco BE65 is used read-only |
 | Sniffer (`/tool sniffer` over CAPsMAN) | ❌ untested | not implemented |
 

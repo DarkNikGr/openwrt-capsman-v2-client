@@ -118,8 +118,18 @@ static const uint8_t ie_8021x256[] = {
     0x00, 0x00,
 };
 
-/* AKM 4 = FT-PSK: a fast-transition suite this CAP does not implement, so the
+/* AKM 4 = FT-PSK (used by the FT cases below). */
+/* AKM 11 = 802.1X Suite B 192: a suite this CAP does not implement, so the
  * policy must produce no RSN config rather than silently mislabelling it. */
+static const uint8_t ie_unknown[] = {
+    0x30, 0x14,
+    0x01, 0x00,
+    0x00, 0x0f, 0xac, 0x04,
+    0x01, 0x00, 0x00, 0x0f, 0xac, 0x04,
+    0x01, 0x00, 0x00, 0x0f, 0xac, 0x0b,             /* AKM 11 */
+    0x00, 0x00,
+};
+
 static const uint8_t ie_ft[] = {
     0x30, 0x14,
     0x01, 0x00,
@@ -335,6 +345,64 @@ static void case_psk256(void)
 
 /* An AKM the CAP cannot mirror and a missing IE both mean "open" (wpa=0),
  * never a half-configured PSK BSS. */
+/* FT-PSK (AKM 4) with a Mobility Domain element (54, MDID a1b2). */
+static const uint8_t ie_ft_psk_mde[] = {
+    0x30, 0x14,
+    0x01, 0x00,
+    0x00, 0x0f, 0xac, 0x04,
+    0x01, 0x00, 0x00, 0x0f, 0xac, 0x04,
+    0x01, 0x00, 0x00, 0x0f, 0xac, 0x04,             /* AKM 4 = FT-PSK */
+    0x00, 0x00,
+    0x36, 0x03, 0xa1, 0xb2, 0x01,                   /* MDE: MDID a1b2 */
+};
+
+/* FT-802.1X (AKM 3), same MDE. */
+static const uint8_t ie_ft_eap_mde[] = {
+    0x30, 0x14,
+    0x01, 0x00,
+    0x00, 0x0f, 0xac, 0x04,
+    0x01, 0x00, 0x00, 0x0f, 0xac, 0x04,
+    0x01, 0x00, 0x00, 0x0f, 0xac, 0x03,             /* AKM 3 = FT-802.1X */
+    0x00, 0x00,
+    0x36, 0x03, 0xa1, 0xb2, 0x01,
+};
+
+/* 802.11r: with an MDE the config must carry FT-PSK + mobility_domain; without
+ * one the BSS falls back to the plain AKM so hostapd still starts. */
+static void case_ft(void)
+{
+    struct rsn_info ri;
+    struct rsn_policy rp;
+    char conf[320];
+    uint8_t md[2];
+
+    conf_of(ie_ft_psk_mde, sizeof(ie_ft_psk_mde), 1, &ri, &rp, conf,
+            sizeof(conf));
+    assert(ri.valid && ri.akm_ft_psk && !ri.akm_psk);
+    assert(rp.ft == 1);
+    assert(rsn_mde_mdid(ie_ft_psk_mde, sizeof(ie_ft_psk_mde), md) == 1);
+    snprintf(rp.mdid, sizeof(rp.mdid), "%02x%02x", md[0], md[1]);
+    rsn_conf_write(conf, sizeof(conf), &rp);
+    expect_line(conf, "wpa_key_mgmt=FT-PSK");
+    expect_line(conf, "mobility_domain=a1b2");
+    expect_line(conf, "ft_over_ds=1");
+    expect_line(conf, "external_rsn_auth=1");
+
+    conf_of(ie_ft_eap_mde, sizeof(ie_ft_eap_mde), 1, &ri, &rp, conf,
+            sizeof(conf));
+    assert(ri.valid && ri.akm_ft_eap);
+    assert(rp.ft == 1 && rp.external_auth == 1);
+    assert(strcmp(rp.key_mgmt, "FT-EAP") == 0);
+    assert(strcmp(rp.key_mgmt_base, "") == 0);
+
+    /* No MDE: rsn_conf_write must use the plain set (empty here, so it keeps
+     * the FT name rather than emitting a broken empty list). */
+    conf_of(ie_ft, sizeof(ie_ft), 1, &ri, &rp, conf, sizeof(conf));
+    assert(rp.ft == 1 && rp.key_mgmt_base[0] == 0);
+    assert(strcmp(rp.key_mgmt, "FT-PSK") == 0);
+    assert(rsn_mde_mdid(ie_ft, sizeof(ie_ft), md) == 0);
+}
+
 /* 802.1X is split-MAC too: the manager terminates EAP against RADIUS, so the
  * CAP reproduces the AKM and enables the external authentication switch. */
 static void case_eap(void)
@@ -365,9 +433,9 @@ static void case_unsupported(void)
     struct rsn_policy rp;
     char conf[256];
 
-    conf_of(ie_ft, sizeof(ie_ft), 1, &ri, &rp, conf, sizeof(conf));
+    conf_of(ie_unknown, sizeof(ie_unknown), 1, &ri, &rp, conf, sizeof(conf));
     assert(ri.valid && !ri.akm_psk && !ri.akm_sae && !ri.akm_owe &&
-           !ri.akm_eap && !ri.akm_eap256);
+           !ri.akm_eap && !ri.akm_eap256 && !ri.akm_ft_psk);
     assert(rp.wpa == 0 && rp.key_mgmt[0] == 0);
     assert(strcmp(conf, "wpa=0\n") == 0);
 
@@ -451,9 +519,10 @@ int main(void)
     case_owe();
     case_psk256();
     case_eap();
+    case_ft();
     case_unsupported();
     case_blob();
     case_truncation();
-    puts("RSN decision (PSK/MFPC/MFPR/SAE/OWE/PSK256/EAP): PASS");
+    puts("RSN decision (PSK/MFPC/MFPR/SAE/OWE/PSK256/EAP/FT): PASS");
     return 0;
 }

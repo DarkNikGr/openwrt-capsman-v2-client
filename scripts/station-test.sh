@@ -26,6 +26,8 @@ EAP=${EAP:-PEAP}
 IDENTITY=${IDENTITY:-}
 PASSWORD=${PASSWORD:-}
 EAP_PHASE2=${EAP_PHASE2:-auth=MSCHAPV2}
+# 802.11r: MDID=hex (e.g. a1b2) with KEY_MGMT=FT-PSK|FT-EAP
+MDID=${MDID:-}
 
 # The wiphy number changes across driver reloads (phy1, phy6, ...): resolve it
 # from the station interface instead of assuming phy1.  Never delete the netns
@@ -112,6 +114,7 @@ network={
 	ssid="$SSID"
 	psk="$PSK"
 	key_mgmt=$KEY_MGMT
+	${MDID:+mobility_domain=$MDID}
 	${MFP:+ieee80211w=$MFP}
 	pairwise=CCMP
 	group=CCMP

@@ -26,6 +26,8 @@ struct rsn_info {
     int pairwise;       /* 4 = CCMP */
     int akm_eap;              /* 802.1X (CAPsMAN owns the EAP exchange) */
     int akm_eap256;
+    int akm_ft_eap;           /* 3 = FT-802.1X (802.11r) */
+    int akm_ft_psk;           /* 4 = FT-PSK (802.11r) */
     int akm_psk;
     int akm_psk256;
     int akm_sae;
@@ -61,6 +63,8 @@ static void rsn_parse(const uint8_t *ie, size_t len, struct rsn_info *ri)
                     const uint8_t *a = r + k + 2 + 4 * (size_t)i;
                     if (a[0] == 0x00 && a[1] == 0x0f && a[2] == 0xac) {
                         if (a[3] == 1)  ri->akm_eap = 1;
+                        if (a[3] == 3)  ri->akm_ft_eap = 1;
+                        if (a[3] == 4)  ri->akm_ft_psk = 1;
                         if (a[3] == 5)  ri->akm_eap256 = 1;
                         if (a[3] == 2)  ri->akm_psk = 1;
                         if (a[3] == 6)  ri->akm_psk256 = 1;
@@ -85,6 +89,10 @@ static void rsn_parse(const uint8_t *ie, size_t len, struct rsn_info *ri)
 struct rsn_policy {
     int wpa;             /* 0 = open/unsupported, 2 = WPA2/WPA3 */
     char key_mgmt[64];   /* hostapd wpa_key_mgmt list, space separated */
+    char key_mgmt_base[64]; /* same without the FT-* AKMs (fallback when the
+                               manager sends no Mobility Domain element) */
+    int ft;              /* the manager advertised an 802.11r AKM */
+    char mdid[5];        /* mobility domain from element 54 (4 hex chars) */
     int ieee80211w;      /* 0 = disabled, 1 = capable, 2 = required */
     int group_mgmt_cmac; /* emit group_mgmt_cipher=AES-128-CMAC */
     int sae_pwe;         /* 0 = no line, 2 = sae_pwe=2 */
@@ -114,13 +122,18 @@ static void rsn_policy_from_ie(const struct rsn_info *ri, int sae_override,
     int have_psk = ri->valid && (ri->akm_psk || ri->akm_psk256);
     int have_sae = ri->valid && (ri->akm_sae || ri->akm_owe) && sae_override;
     int have_eap = ri->valid && (ri->akm_eap || ri->akm_eap256);
+    int have_ft = ri->valid && (ri->akm_ft_eap || ri->akm_ft_psk);
 
     /* 802.1X is also a split-MAC exchange here: the manager terminates EAP
      * with its RADIUS server, so hostapd must relay EAPOL and run no local
      * 802.1X state machine, exactly like SAE/OWE. */
-    p->external_auth = have_sae || have_eap;
+    /* FT-EAP carries 802.1X inside the FT exchange, so the manager owns the
+     * Auth there too.  FT-PSK keeps hostapd's open-system Auth (which we
+     * mirror to the manager as 0x2018) exactly like plain PSK. */
+    p->external_auth = have_sae || have_eap || (have_ft && ri->akm_ft_eap);
     p->want_rsnxe = have_sae;
-    if (!have_psk && !have_sae && !have_eap) return;
+    p->ft = have_ft;
+    if (!have_psk && !have_sae && !have_eap && !have_ft) return;
 
     p->wpa = 2;
     size_t len = 0;
@@ -136,6 +149,18 @@ static void rsn_policy_from_ie(const struct rsn_info *ri, int sae_override,
         rsn_key_mgmt_add(p->key_mgmt, sizeof(p->key_mgmt), &len, "SAE");
     if (have_sae && ri->akm_owe)
         rsn_key_mgmt_add(p->key_mgmt, sizeof(p->key_mgmt), &len, "OWE");
+    /* Plain (non-FT) view of the same set: used when the manager advertises
+     * FT but no Mobility Domain element, because hostapd refuses FT without
+     * mobility_domain and the BSS would not start at all. */
+    memcpy(p->key_mgmt_base, p->key_mgmt, sizeof(p->key_mgmt_base));
+    if (have_ft) {
+        if (ri->akm_ft_eap)
+            rsn_key_mgmt_add(p->key_mgmt, sizeof(p->key_mgmt), &len,
+                             "FT-EAP");
+        if (ri->akm_ft_psk)
+            rsn_key_mgmt_add(p->key_mgmt, sizeof(p->key_mgmt), &len,
+                             "FT-PSK");
+    }
 
     p->ieee80211w = ri->mfpr ? 2 : (ri->mfpc ? 1 : 0);
     p->group_mgmt_cmac = have_sae && ri->mfpc;
@@ -164,14 +189,41 @@ static size_t rsn_conf_write(char *out, size_t n, const struct rsn_policy *p)
                      "%s"
                      "%s"
                      "external_rsn_auth=1\n",
-                     p->key_mgmt, p->ieee80211w,
+                     (p->ft && p->mdid[0]) ? p->key_mgmt :
+                         (p->key_mgmt_base[0] ? p->key_mgmt_base
+                                             : p->key_mgmt),
+                     p->ieee80211w,
                      p->group_mgmt_cmac ?
                          "group_mgmt_cipher=AES-128-CMAC\n" : "",
                      p->sae_pwe ? "sae_pwe=2\n" : "");
     }
     if (r < 0) return 0;
+    if (p->wpa && p->ft && p->mdid[0]) {
+        int r2 = snprintf(out + r, n - (size_t)r,
+                          "mobility_domain=%s\nft_over_ds=1\n", p->mdid);
+        if (r2 > 0) r += r2;
+    }
     if ((size_t)r >= n) { out[n - 1] = 0; return n - 1; }
     return (size_t)r;
+}
+
+/* Mobility Domain element (54), 3 bytes: MDID (2, top bit reserved) + FT
+ * capability.  Returns 1 and fills out[0..1] when present. */
+static int rsn_mde_mdid(const uint8_t *ie, size_t len, uint8_t out[2])
+{
+    size_t p = 0;
+    if (!ie) return 0;
+    while (p + 2 <= len) {
+        uint8_t id = ie[p], l = ie[p + 1];
+        if (p + 2 + l > len) break;
+        if (id == 54 && l >= 3) {
+            out[0] = ie[p + 2];
+            out[1] = ie[p + 3];
+            return 1;
+        }
+        p += 2 + l;
+    }
+    return 0;
 }
 
 /* Copy element 48 — and element 244 (RSNXE) when want_rsnxe — out of an IE
