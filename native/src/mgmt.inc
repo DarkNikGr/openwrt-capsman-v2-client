@@ -737,14 +737,12 @@ static void mgmt_vap_del(int phy)
     for (int w = 0; w < 16; w++)
         if (g_vap[phy][w].used)
             return;                     /* another VAP still needs it */
-    for (int i = 0; i < g_mon_n; i++) {
-        if (g_mon[i].phy != phy || g_mon[i].fd < 0) continue;
-        close(g_mon[i].fd);
-        g_mon[i].fd = -1;
-        g_mon[i].ifindex = -1;
-        printf("mon: phy%d monitor closed (last VAP destroyed)\n", phy);
-        fflush(stdout);
-    }
+    /* Keep the monitor VIF alive for the whole session.  The manager's
+       start/destroy churn freed every g_vap entry for a moment, which closed
+       the monitor and then could not get the slot back (4/4 vifs), so the
+       0x2018 relay died.  One idle monitor costs one vif per phy and is far
+       cheaper than losing the relay. */
+    (void)phy;
 }
 
 /* Production nl80211 event service. */
