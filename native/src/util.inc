@@ -348,6 +348,8 @@ struct phy_bands {
 
 static void iface_chan(const char *ifn, unsigned *freq, unsigned *width);
 
+#include "iw_freq.inc"
+
 /* Supported frequencies/bands of a radio, from `iw phy phyN info`.  Falls
    back to the legacy 2.4/5 GHz tables only when iw gives nothing. */
 static void read_phy_bands(int phy, struct phy_bands *pb)
@@ -361,9 +363,8 @@ static void read_phy_bands(int phy, struct phy_bands *pb)
     FILE *fp = popen(cmd, "r");
     if (fp) {
         while (fgets(line, sizeof(line), fp)) {
-            unsigned f;
-            if (strstr(line, "disabled")) continue;
-            if (sscanf(line, " * %u MHz", &f) == 1) {
+            uint32_t f;
+            if (parse_iw_frequency(line, &f)) {
                 int dup = 0;
                 for (int i = 0; i < pb->nfreq; i++)
                     if (pb->freq[i] == f) dup = 1;
@@ -511,4 +512,3 @@ static int find_el(const uint8_t *b, size_t n, uint16_t id,
     }
     return 0;
 }
-
