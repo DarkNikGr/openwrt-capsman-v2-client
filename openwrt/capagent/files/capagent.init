@@ -1,0 +1,109 @@
+#!/bin/sh /etc/rc.common
+# Native MikroTik CAPsMAN v2 CAP agent for OpenWrt
+#
+# START=95 is intentionally after netifd (S20) and wpad/hostapd (S19): the
+# agent cannot join before the WAN has a lease and cannot create a BSS before
+# hostapd's control socket exists.  Discovery/session setup is repeated on
+# every retry inside the agent, so an early boot failure is not permanent.
+USE_PROCD=1
+START=95
+STOP=10
+
+PROG=/usr/sbin/capagent
+PREFLIGHT=/usr/sbin/capagent-preflight
+CONF=/etc/cap/capagent.conf
+
+start_service() {
+	[ -x "$PROG" ] || { logger -t capagent "binary $PROG missing"; return 1; }
+	[ -f "$CONF" ] && . "$CONF"
+
+	# Optional recovery address; use "replace" so repeated starts are
+	# idempotent.
+	[ -n "${CAP_ADDR:-}" ] && \
+		ip addr replace "${CAP_ADDR}" dev "${CAP_DEV:-br-lan}" 2>/dev/null
+
+	# Build the command line from the optional /interface wifi cap settings.
+	set -- "$PROG" \
+		--manager "${MANAGER:-auto}" \
+		--discovery-interfaces "${DISCOVERY_INTERFACES:-br-lan}" \
+		--port "${PORT:-5246}" \
+		--cert "${CERT:-/etc/cap/client.pem}" \
+		--key "${KEY:-/etc/cap/client.key}" \
+		--macs "${MACS:-auto}"
+	[ -f "${CA_CERT:-/etc/cap/ca.pem}" ] && set -- "$@" --ca-cert "${CA_CERT:-/etc/cap/ca.pem}"
+	[ "${NO_ENROLL:-no}" = yes ] && set -- "$@" --no-enroll
+	[ -n "${CERT_CN:-}" ] && set -- "$@" --cert-cn "${CERT_CN}"
+	[ "${DONT_VERIFY_CERTIFICATE:-no}" = yes ] && set -- "$@" --dont-verify-certificate
+	[ -n "${CAPS_MAN_CERT_CN:-}" ] && set -- "$@" --caps-man-certificate-common-names "${CAPS_MAN_CERT_CN}"
+	[ "${LOCK_TO_CAPS_MAN:-no}" = yes ] && set -- "$@" --lock-to-caps-man
+	[ -n "${SLAVES_DATAPATH:-}" ] && set -- "$@" --slaves-datapath "${SLAVES_DATAPATH}"
+	[ "${SLAVES_STATIC:-no}" = yes ] && set -- "$@" --slaves-static
+	[ "${APPLY:-no}" = yes ] && set -- "$@" --apply
+	[ "${DATACHAN:-no}" = yes ] && set -- "$@" --datachan
+	[ -n "${IDENTITY:-}" ] && set -- "$@" --identity "${IDENTITY}"
+	[ -n "${SERIAL:-}" ] && set -- "$@" --serial "${SERIAL}"
+	[ -n "${A1:-}" ] && set -- "$@" --a1 "${A1}"
+	[ -n "${E70:-}" ] && set -- "$@" --e70 "${E70}"
+	[ -n "${EAPOL_LEG:-}" ] && set -- "$@" --eapol-leg "${EAPOL_LEG}"
+
+	# Split-MAC / hostapd external-RSN (W8) and Auth/Assoc relay (W6).
+	[ "${MGMT_RELAY:-no}" = yes ] && set -- "$@" --mgmt-relay
+	[ -n "${MGMT_SOURCE:-}" ] && set -- "$@" --mgmt-source "${MGMT_SOURCE}"
+	[ -n "${EXT_AUTH_DIR:-}" ] && set -- "$@" --ext-auth-dir "${EXT_AUTH_DIR}"
+	[ -n "${EXT_CTRL_DIR:-}" ] && set -- "$@" --ext-ctrl-dir "${EXT_CTRL_DIR}"
+	[ -n "${STATE_FILE:-}" ] && set -- "$@" --state-file "${STATE_FILE}"
+	[ -n "${FOURWAY_TIMEOUT:-}" ] && set -- "$@" --fourway-timeout "${FOURWAY_TIMEOUT}"
+	[ -n "${M1_RETRY:-}" ] && set -- "$@" --m1-retry "${M1_RETRY}"
+	# Ownership policy (W33 API + W34 ubus model).  WIRELESS_OWNER=auto is
+	# production: ubus decides per netdev and the manager VAP yields to
+	# netifd's names.  WIRELESS_CONFIG is for offline diagnostics.
+	[ -n "${WIRELESS_CONFIG:-}" ] && set -- "$@" --wireless-config "${WIRELESS_CONFIG}"
+	[ -n "${WIRELESS_OWNER:-}" ] && set -- "$@" --wireless-owner "${WIRELESS_OWNER}"
+	[ -n "${VAP_STATE:-}" ] && set -- "$@" --vap-state "${VAP_STATE}"
+	[ "${VAP_TEARDOWN:-yes}" = no ] && set -- "$@" --no-vap-teardown
+	[ "${DATAPATH_BRIDGE:-no}" = yes ] && set -- "$@" --datapath-bridge
+	[ -n "${BCAST:-}" ] && set -- "$@" --bcast "${BCAST}"
+	[ -n "${VAP_MTU:-}" ] && set -- "$@" --vap-mtu "${VAP_MTU}"
+	# CAPsMAN v2 does not deliver a regulatory country; hostapd needs one
+	# for 5 GHz AP channels (especially in a zero-local-config boot).
+	[ -n "${COUNTRY:-}" ] && set -- "$@" --country "${COUNTRY}"
+	# W36: in-CAP MLME (no hostapd) for one manager-provisioned VAP.
+	[ "${MLME:-no}" = yes ] && set -- "$@" --mlme
+	[ -n "${MLME_PORT:-}" ] && set -- "$@" --mlme-port "${MLME_PORT}"
+
+	procd_open_instance
+	# The preflight is a thin wait-and-exec wrapper.  It stays in the
+	# foreground, so procd still supervises the real capagent PID.
+	if [ -x "$PREFLIGHT" ]; then
+		procd_set_param command "$PREFLIGHT" "$@"
+	else
+		procd_set_param command "$@"
+	fi
+	# Infinite respawn: 3600/5 with retry=0 means "no crash-loop limit".
+	procd_set_param respawn 3600 5 0
+	procd_set_param term_timeout 10
+	procd_set_param stdout 1
+	procd_set_param stderr 1
+	procd_close_instance
+}
+
+service_triggers() {
+	procd_add_reload_trigger "network"
+
+	# Wake the agent as soon as the interface that carries the manager comes
+	# up (or changes address), instead of waiting for the next retry.
+	local iface
+	iface="$(sed -n 's/^WAIT_IF=//p' "$CONF" 2>/dev/null | head -n1)"
+	[ -n "$iface" ] || \
+		iface="$(sed -n 's/^DISCOVERY_INTERFACES=//p' "$CONF" 2>/dev/null | head -n1 | awk '{print $1}')"
+	[ -n "$iface" ] || iface=wan
+	procd_add_reload_interface_trigger "$iface"
+}
+
+reload_service() {
+	# A reload means "drop the session and re-discover".  There is no SIGHUP
+	# handler yet, so do a clean stop/start: run_once() rebuilds all state
+	# from scratch anyway.
+	stop
+	start
+}

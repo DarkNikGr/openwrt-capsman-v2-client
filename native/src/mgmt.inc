@@ -1290,6 +1290,19 @@ static void handle_2019(mbedtls_ssl_context *ssl, int port,
         r = ext_auth_mgmt_tx(c, ifindex, fr, fl);
     else
         r = (nl_cmd_open() == 0) ? nl_mgmt_tx(ifindex, freq, fr, fl) : -1;
+    /* hostapd's MGMT_TX control command answers -EINVAL for frames it will not
+     * relay (a deauth for a station it already dropped) and the direct netlink
+     * path can refuse a channel mismatch.  Try the other transport before
+     * giving up so the manager's deauth is not lost. */
+    if (r && !mlme_owned) {
+        int r2 = ext_tx ? ((nl_cmd_open() == 0) ? nl_mgmt_tx(ifindex, freq, fr, fl)
+                                              : -1)
+                        : ext_auth_mgmt_tx(c, ifindex, fr, fl);
+        printf("0x2019 %s: %s failed (%d), other transport ret=%d (%s)\n",
+               st == 12 ? "deauth" : "frame", ext_tx ? "hostapd" : "netlink",
+               r, r2, r2 ? strerror(-r2) : "ok");
+        if (r2 == 0) r = 0;
+    }
     printf("0x2019 %s -> %02x:%02x:%02x:%02x:%02x:%02x port=0x%04x "
            "ifindex=%d freq=%u len=%u ret=%d (%s)\n",
            st == 11 ? "auth-resp" : (st == 12 ? "deauth" :
@@ -1302,14 +1315,18 @@ static void handle_2019(mbedtls_ssl_context *ssl, int port,
         if (g_extmux) {
             struct extmux_vap *v = extmux_vap_by_port(g_extmux, xp);
             extmux_forget(g_extmux, xp, sta, 0);
-            if (r && v) {
+            if (v) {
                 char cmd[96], reply[64];
                 snprintf(cmd, sizeof(cmd),
                          "DEAUTHENTICATE %02x:%02x:%02x:%02x:%02x:%02x 15\n",
                          sta[0], sta[1], sta[2], sta[3], sta[4], sta[5]);
-                if (cap_hostapd_ctrl(c, v->ifname, cmd, reply,
-                                     sizeof(reply)) == 0)
-                    printf("0x2019 deauth: hostapd fallback -> %s\n", reply);
+                int cr = cap_hostapd_ctrl(c, v->ifname, cmd, reply,
+                                          sizeof(reply));
+                printf("0x2019 deauth: hostapd fallback %s ret=%d reply=%s\n",
+                       v->ifname, cr,
+                       cr == 0 ? reply : (cr < 0 ? strerror(-cr) : "?"));
+            } else {
+                printf("0x2019 deauth: no extmux VAP for port 0x%04x\n", xp);
             }
         }
     }
