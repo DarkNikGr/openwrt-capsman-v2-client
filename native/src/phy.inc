@@ -43,22 +43,7 @@ static int vap_proc_has_conf(pid_t pid, const char *conf)
     return 0;
 }
 
-/* A zombie still answers kill(pid, 0), so a dead hostapd would look alive and
- * the reconcile would never restart it.  Read the state from /proc. */
-static int pid_is_zombie(pid_t pid)
-{
-    char p[64], buf[256];
-    snprintf(p, sizeof(p), "/proc/%ld/stat", (long)pid);
-    int fd = open(p, O_RDONLY);
-    if (fd < 0) return 0;
-    ssize_t n = read(fd, buf, sizeof(buf) - 1);
-    close(fd);
-    if (n <= 0) return 0;
-    buf[n] = 0;
-    char *rp = strrchr(buf, ')');
-    if (!rp || rp[1] != ' ') return 0;
-    return rp[2] == 'Z';
-}
+/* pid_is_zombie() lives in ownership.inc (shared with own_pid_alive). */
 
 static pid_t vap_phy_pid(int phy)
 {
@@ -88,6 +73,7 @@ static pid_t vap_phy_pid(int phy)
         char *end = NULL;
         long c = strtol(de->d_name, &end, 10);
         if (!end || *end || c <= 0) continue;
+        if (pid_is_zombie((pid_t)c)) continue;
         if (vap_proc_has_conf((pid_t)c, conf)) { found = (pid_t)c; break; }
     }
     closedir(d);
@@ -135,12 +121,13 @@ static void vap_phy_stop(int phy)
          * and until it is reaped its cfg80211 mgmt subscription can still be
          * alive, which makes the next nl80211_mgmt_subscribe_ap() fail and the
          * whole radio abort with "Could not configure driver mode". */
-        for (int i = 0; i < 20; i++) {
+        for (int i = 0; i < 20 && pid > 0; i++) {
             int st = 0;
             pid_t w = waitpid((pid_t)pid, &st, WNOHANG);
             if (w == (pid_t)pid || w < 0) break;
             usleep(50000);
         }
+        own_reap_children();
     }
 }
 
@@ -231,13 +218,108 @@ static void vap_phy_bss(FILE *f, const char *kw, const struct own_entry *e,
     fprintf(f, "ignore_broadcast_ssid=0\nap_isolate=0\n");
 }
 
-/* A journal row is only written into the phy config when its netdev exists
- * right now: hostapd must never create an interface itself (that hits the
- * phy vif limit and fails with -23/ENFILE). */
-static int vap_phy_row_ready(const struct own_entry *e, int phy)
+/* A row belongs in this phy's hostapd config when the manager has sent a
+ * start body for it.  Existence of the netdev is NOT required: the master is
+ * created by capagent and every secondary is handed to hostapd, which creates
+ * it (the OpenWrt single-hostapd-per-radio model). */
+static int vap_phy_row_cfg(const struct own_entry *e, int phy)
 {
     return e->used && e->active && e->start_len && e->ifname[0] &&
-           (e->port >> 8) == phy && if_nametoindex(e->ifname) > 0;
+           (e->port >> 8) == phy;
+}
+
+static int vap_dbg_phy(void)
+{
+    return getenv("CAPAGENT_DBG_PHY") || getenv("CAPAGENT_DBG_OWN");
+}
+
+static int vap_phy_keep_name(const char *name, int phy)
+{
+    for (int i = 0; i < OWN_MAX; i++) {
+        struct own_entry *e = &g_own[i];
+        if (!e->used || !e->ifname[0] || (e->port >> 8) != phy)
+            continue;
+        if (!strcmp(e->ifname, name))
+            return 1;
+    }
+    return 0;
+}
+
+/* Is this ifname one of ours for this phy?  Only names capagent hands out
+ * (phyN-apM / capN-M) are considered, so a netifd/foreign netdev is safe. */
+static int vap_phy_name_of(const char *name, int phy)
+{
+    int p = -1, w = 0;
+    char tail;
+    if (sscanf(name, "phy%d-ap%d%c", &p, &w, &tail) == 2 && p == phy)
+        return 1;
+    if (sscanf(name, "cap%d-%d%c", &p, &w, &tail) == 2 && p == phy)
+        return 1;
+    return 0;
+}
+
+/* F45: delete this phy's netdevs that are not part of the config being
+ * written.  They are leftovers from an older manager slot (the manager
+ * renumbers its interfaces on a CAP reconnect) or from a handover that never
+ * completed; keeping them burns a vif slot and starves hostapd's
+ * NEW_INTERFACE with -23/ENFILE.  Runs only after vap_phy_stop(), so no live
+ * hostapd owns them.  netifd names are never touched. */
+static void vap_phy_drop_leftovers(int phy)
+{
+    char dirp[96], names[32][OWN_NAME_MAX];
+    int n = 0;
+    snprintf(dirp, sizeof(dirp), "/sys/class/ieee80211/phy%d/device/net",
+             real_phy(phy));
+    DIR *d = opendir(dirp);
+    if (!d) return;
+    struct dirent *de;
+    while ((de = readdir(d)) && n < 32) {
+        if (de->d_name[0] == '.') continue;
+        if (!vap_phy_name_of(de->d_name, phy)) continue;
+        if (vap_phy_keep_name(de->d_name, phy)) continue;
+        if (strlen(de->d_name) >= OWN_NAME_MAX) continue;
+        memcpy(names[n], de->d_name, strlen(de->d_name) + 1);
+        n++;
+    }
+    closedir(d);
+    for (int i = 0; i < n; i++) {
+        int idx;
+        if (own_nd_has(names[i], NULL, 0)) continue;
+        idx = if_nametoindex(names[i]);
+        if (idx <= 0) continue;
+        printf("vap: phy%d: dropping leftover %s ifindex=%d\n", phy,
+               names[i], idx);
+        fflush(stdout);
+        vap_netdev_del(idx);
+    }
+    for (int k = 0; k < 40 && n; k++) {
+        int left = 0;
+        for (int i = 0; i < n; i++)
+            if (if_nametoindex(names[i]) > 0) { left = 1; break; }
+        if (!left) break;
+        usleep(25000);
+    }
+}
+
+/* Row-by-row view of what vap_phy_apply() sees.  F45: rows with a start body
+ * in the journal were silently left out of the config; this prints the exact
+ * field that excluded them. */
+static void vap_phy_dump_rows(int phy, int n, int master)
+{
+    printf("dbg-phy: phy%d apply rows=%d master=%d live=%d\n", phy, n, master,
+           (int)vap_phy_pid(phy));
+    for (int i = 0; i < OWN_MAX; i++) {
+        struct own_entry *e = &g_own[i];
+        if (!e->used || (e->port >> 8) != phy) continue;
+        printf("dbg-phy:   [%d] port=0x%04x if=%s used=%d active=%d "
+               "start=%u owner=%s handed=%d app_len=%u app_hash=%08x "
+               "pid=%d ifindex=%d(idx=%d)\n", i, e->port,
+               e->ifname[0] ? e->ifname : "-", e->used, e->active,
+               e->start_len, own_owner_name(e->owner), e->handed_over,
+               e->applied_len, e->applied_hash, e->pid, e->ifindex,
+               e->ifname[0] ? read_sysfs_int(e->ifname, "ifindex") : 0);
+    }
+    fflush(stdout);
 }
 
 /* (Re)start the single hostapd for this phy with every journaled VAP. */
@@ -245,6 +327,10 @@ static int vap_phy_apply(int phy, const struct cfg *c)
 {
     if (phy < 0 || phy >= MAX_RADIOS) return -1;
     if (wl_legacy()) return -1;
+
+    /* F45: clear hostapd children killed earlier so a zombie never looks
+     * alive to pid_is_zombie()/own_pid_alive() or counts in pidof. */
+    own_reap_children();
 
     /* Rows with a start body.  The master (lowest vapid) is the netdev hostapd
      * attaches to with `interface=`; it must exist.  Every other BSS is handed
@@ -255,12 +341,14 @@ static int vap_phy_apply(int phy, const struct cfg *c)
     int n = 0, master = -1;
     for (int i = 0; i < OWN_MAX; i++) {
         struct own_entry *e = &g_own[i];
-        if (!e->used || !e->active || !e->start_len || !e->ifname[0] ||
-            (e->port >> 8) != phy)
-            continue;
+        if (!vap_phy_row_cfg(e, phy)) continue;
         n++;
         if (master < 0 || (e->port & 0xff) < (g_own[master].port & 0xff))
             master = i;
+    }
+    if (vap_dbg_phy()) {
+        printf("dbg-phy: phy%d apply entered n=%d master=%d\n", phy, n, master);
+        vap_phy_dump_rows(phy, n, master);
     }
     if (!n || master < 0) return -1;
 
@@ -274,16 +362,21 @@ static int vap_phy_apply(int phy, const struct cfg *c)
             int same = 1;
             for (int i = 0; i < OWN_MAX; i++) {
                 struct own_entry *e = &g_own[i];
-                if (!e->used || !e->active || !e->start_len ||
-                    (e->port >> 8) != phy)
-                    continue;
+                if (!vap_phy_row_cfg(e, phy)) continue;
                 if (e->applied_len != e->start_len ||
                     e->applied_hash != own_body_hash(e->start, e->start_len)) {
+                    if (vap_dbg_phy())
+                        printf("dbg-phy: phy%d row %s not in live config "
+                               "(app_len=%u start=%u), rebuild\n", phy,
+                               e->ifname, e->applied_len, e->start_len);
                     same = 0;
                     break;
                 }
             }
             if (same) {
+                if (vap_dbg_phy())
+                    printf("dbg-phy: phy%d already carries every row, keep "
+                           "pid=%d\n", phy, (int)live);
                 for (int i = 0; i < OWN_MAX; i++) {
                     struct own_entry *e = &g_own[i];
                     if (!e->used || (e->port >> 8) != phy) continue;
@@ -315,15 +408,25 @@ static int vap_phy_apply(int phy, const struct cfg *c)
         if (real != last_count[phy]) {
             last_count[phy] = real;
             last_at[phy] = own_now_ms();
+            if (vap_dbg_phy())
+                printf("dbg-phy: phy%d netdev count %d changed, wait\n",
+                       phy, real);
             return -1;
         }
-        if (own_now_ms() - last_at[phy] < 2500) return -1;
+        if (own_now_ms() - last_at[phy] < 2500) {
+            if (vap_dbg_phy())
+                printf("dbg-phy: phy%d netdev count stable %d for %ums, "
+                       "wait\n", phy, real,
+                       (unsigned)(own_now_ms() - last_at[phy]));
+            return -1;
+        }
     }
 
     char conf[128], pidf[128], logf[128];
     vap_phy_paths(phy, conf, sizeof(conf), pidf, sizeof(pidf),
                   logf, sizeof(logf));
     vap_phy_stop(phy);
+    vap_phy_drop_leftovers(phy);
 
     /* The master must exist; create it if the manager's 0x500b was lost. */
     struct own_entry *m = &g_own[master];
@@ -343,8 +446,7 @@ static int vap_phy_apply(int phy, const struct cfg *c)
     for (int i = 0; i < OWN_MAX; i++) {
         struct own_entry *e = &g_own[i];
         int idx;
-        if (i == master || !e->used || !e->active || !e->start_len ||
-            !e->ifname[0] || (e->port >> 8) != phy)
+        if (i == master || !vap_phy_row_cfg(e, phy))
             continue;
         e->handed_over = 1;
         idx = if_nametoindex(e->ifname);
@@ -376,12 +478,13 @@ static int vap_phy_apply(int phy, const struct cfg *c)
     int first = 1;
     for (int i = 0; i < OWN_MAX; i++) {
         struct own_entry *e = &g_own[i];
-        if (!e->used || !e->active || !e->start_len || !e->ifname[0] ||
-            (e->port >> 8) != phy)
-            continue;
+        if (!vap_phy_row_cfg(e, phy)) continue;
         char ctrl[128];
         snprintf(ctrl, sizeof(ctrl), "/var/run/hostapd/%s", e->ifname);
         unlink(ctrl);
+        if (vap_dbg_phy())
+            printf("dbg-phy: phy%d write %s=%s\n", phy,
+                   first ? "interface" : "bss", e->ifname);
         vap_phy_bss(f, first ? "interface" : "bss", e, c, first);
         first = 0;
     }
@@ -428,6 +531,13 @@ static int vap_phy_apply(int phy, const struct cfg *c)
         printf("vap: phy%d hostapd not ready (%d), see %s\n", phy, ready, logf);
         fflush(stdout);
         if (hp > 0) kill(hp, SIGKILL);
+        for (int i = 0; i < 40; i++) {
+            int wst = 0;
+            pid_t w = waitpid(hp > 0 ? hp : pid, &wst, WNOHANG);
+            if (w == (hp > 0 ? hp : pid) || w < 0) break;
+            usleep(25000);
+        }
+        own_reap_children();
         return -1;
     }
 
@@ -439,7 +549,7 @@ static int vap_phy_apply(int phy, const struct cfg *c)
         if (pf) { fprintf(pf, "%d\n", (int)hp); fclose(pf); }
         for (int i = 0; i < OWN_MAX; i++) {
             struct own_entry *e = &g_own[i];
-            if (!e->used || !e->active || (e->port >> 8) != phy) continue;
+            if (!vap_phy_row_cfg(e, phy)) continue;
             e->pid = (int)hp;
             e->fail_count = 0;
             e->retry_at = 0;

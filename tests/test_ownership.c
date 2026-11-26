@@ -140,13 +140,20 @@ static int vap_netdev_del(int ifindex)
 /* One hostapd per phy: the start returns the phy process, and every row of
  * that phy resolves to it.  The tests drive liveness through g_pid_alive. */
 static pid_t g_test_phy_pid;
+static void test_mark_applied(int phy);
 
 static int vap_phy_apply(int phy, const struct cfg *c)
 {
-    (void)phy; (void)c;
+    (void)c;
     int pid = 3000 + ++g_starts;
+    /* The real apply stops the previous instance first. */
+    if (g_test_phy_pid > 0 && g_test_phy_pid < 4096)
+        g_pid_alive[g_test_phy_pid] = 0;
     g_test_phy_pid = pid;
     g_pid_alive[pid] = 1;
+    /* Model the real post-AP-ENABLED bookkeeping: every row of the phy is
+     * now in the live config, so own_reconcile() must not rebuild it. */
+    test_mark_applied(phy);
     return pid;
 }
 
@@ -197,6 +204,19 @@ static pid_t vap_find_hostapd(const char *ifname)
 }
 
 #include "ownership.inc"
+
+/* Mirrors the bookkeeping at the end of the real vap_phy_apply(). */
+static void test_mark_applied(int phy)
+{
+    for (int i = 0; i < OWN_MAX; i++) {
+        struct own_entry *e = &g_own[i];
+        if (e->used && (e->port >> 8) == phy && e->start_len) {
+            e->applied_len = e->start_len;
+            e->pid = (int)g_test_phy_pid;
+            e->handed_over = 1;
+        }
+    }
+}
 
 /* ---- test harness ----------------------------------------------------- */
 

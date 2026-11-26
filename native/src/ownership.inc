@@ -42,6 +42,8 @@
  */
 
 #include "netifd_status.inc"
+#include <fcntl.h>
+#include <sys/wait.h>
 
 #ifndef OWN_RUN_DIR
 #define OWN_RUN_DIR        "/var/run"
@@ -359,9 +361,38 @@ static int own_probe(int force)
 
 /* ---- hostapd process identity ---------------------------------------- */
 
+/* A zombie still answers kill(pid, 0), so a dead hostapd would look alive and
+ * the reconcile would never restart it.  Read the state from /proc. */
+static int pid_is_zombie(pid_t pid)
+{
+    char p[64], buf[256];
+    snprintf(p, sizeof(p), "/proc/%ld/stat", (long)pid);
+    int fd = open(p, O_RDONLY);
+    if (fd < 0) return 0;
+    ssize_t n = read(fd, buf, sizeof(buf) - 1);
+    close(fd);
+    if (n <= 0) return 0;
+    buf[n] = 0;
+    char *rp = strrchr(buf, ')');
+    if (!rp || rp[1] != ' ') return 0;
+    return rp[2] == 'Z';
+}
+
+/* F45: hostapd is capagent's direct child.  A child killed by own_stop_pid()
+ * or by the "not ready" path used to stay a zombie forever: kill(pid, 0)
+ * keeps succeeding, pidof keeps counting it, and the next start saw a dead
+ * daemon as alive.  Reap every exited child; there is no other child type. */
+static void own_reap_children(void)
+{
+    int st;
+    while (waitpid(-1, &st, WNOHANG) > 0)
+        ;
+}
+
 static int own_pid_alive(int pid)
 {
     if (pid <= 0) return 0;
+    if (pid_is_zombie((pid_t)pid)) return 0;
     if (kill((pid_t)pid, 0) == 0) return 1;
     return errno == EPERM;
 }
@@ -462,6 +493,15 @@ static void own_stop_pid(int pid)
         usleep(50000);
     }
     kill((pid_t)pid, SIGKILL);
+    /* hostapd is our child: reap it, otherwise it stays a zombie that
+     * kill(pid, 0) reports as alive on the very next check. */
+    for (int i = 0; i < 40; i++) {
+        int st = 0;
+        pid_t w = waitpid((pid_t)pid, &st, WNOHANG);
+        if (w == (pid_t)pid || w < 0) break;
+        usleep(25000);
+    }
+    own_reap_children();
 }
 
 static void own_files_remove(const char *ifname)
@@ -619,6 +659,12 @@ static void own_load(void)
         if (!e->pid)
             e->pid = own_hostapd_pid(e->ifname);
         g_own_dirty = 1;
+        if (getenv("CAPAGENT_DBG_PHY") || getenv("CAPAGENT_DBG_OWN"))
+            printf("dbg-own: load port=0x%04x if=%s active=%d start=%u "
+                   "handed=%d app_len=%u owner=%s pid=%d ifindex=%d\n",
+                   e->port, e->ifname, e->active, e->start_len,
+                   e->handed_over, e->applied_len, own_owner_name(e->owner),
+                   e->pid, e->ifindex);
     }
     fclose(f);
     printf("own: journal %s loaded\n", g_own_path);
@@ -999,6 +1045,17 @@ static uint32_t own_body_hash(const uint8_t *b, uint16_t n)
     return h ? h : 1u;
 }
 
+/* F45: has this row's start body ever reached a live phy hostapd config?
+ * applied_len stays 0 for a row that no successful vap_phy_apply() covered
+ * (typically a 0x6016 that arrived after the phy had already been rebuilt).
+ * A non-zero applied_len with a different hash means the manager repeated the
+ * start with new non-configuration bytes: that must NOT trigger a rebuild
+ * (the old restart loop). */
+static int own_row_missing(const struct own_entry *e)
+{
+    return e->start_len > 0 && e->applied_len == 0;
+}
+
 static void own_reconcile(const struct cfg *c)
 {
     own_sync_netifd();
@@ -1063,6 +1120,21 @@ static void own_reconcile(const struct cfg *c)
             if (!e->pid)
                 e->pid = own_hostapd_pid(e->ifname);
             own_mirror(e);
+            /* F45: the phy-wide hostapd is alive but this row is not in its
+             * config (applied_len == 0 after a manager destroy/create burst).
+             * own_hostapd_pid() returns the phy pid for every ifname, so
+             * "pid != 0" used to mean "this BSS is configured" and the row
+             * was never rebuilt.  Rebuild the phy; the idempotency check in
+             * vap_phy_apply() keeps this from churning once it is applied. */
+            if (e->pid && own_row_missing(e)) {
+                printf("own: %s: live hostapd pid=%d does not carry this "
+                       "start (app_len=%u start=%u), rebuilding phy%d\n",
+                       e->ifname, e->pid, e->applied_len, e->start_len,
+                       e->port >> 8);
+                fflush(stdout);
+                vap_phy_apply(e->port >> 8, c);
+                continue;
+            }
             if (!e->pid)
                 own_try_start(c, e);
             continue;
@@ -1412,6 +1484,69 @@ static int own_claim(const struct cfg *c, int phy, int vapid,
     return hard_err && state == OWN_PROBE_OK ? -1 : 0;
 }
 
+/* Local 0x03 (SSID) reader: ownership.inc is also compiled standalone by the
+ * W34 unit test, which does not pull in util.inc's find_el(). */
+static int own_ssid_of(const uint8_t *b, uint16_t n, const uint8_t **s,
+                       uint16_t *l)
+{
+    uint16_t p = 0;
+    if (!b) return 0;
+    while (p + 4 <= n) {
+        uint16_t id = (uint16_t)((b[p] << 8) | b[p + 1]);
+        uint16_t len = (uint16_t)((b[p + 2] << 8) | b[p + 3]);
+        if (p + 4 + len > n) break;
+        if (id == 0x03) {
+            *s = b + p + 4;
+            *l = len;
+            return len > 0;
+        }
+        p = (uint16_t)(p + 4 + len);
+    }
+    return 0;
+}
+
+/* F45: a manager reconnect can renumber its interfaces.  The same SSID then
+ * arrives on a new port (phy1-ap4..6) while the journal still carries the
+ * previous generation (phy1-ap1..3).  Both would be written into the phy
+ * config: duplicate SSIDs and every extra netdev burns a vif slot.  The SSID
+ * identifies a VAP within one radio, so release the older twin.  The W34
+ * unit test drives several VAPs from one synthetic body, so it is exempt. */
+#ifndef OWN_TEST_PID_OK
+static void own_drop_ssid_twins(const struct own_entry *keep, uint16_t port,
+                                const uint8_t *body, uint16_t len)
+{
+    const uint8_t *ns = NULL;
+    uint16_t nl = 0;
+
+    if (!own_ssid_of(body, len, &ns, &nl))
+        return;
+    for (int i = 0; i < OWN_MAX; i++) {
+        struct own_entry *o = &g_own[i];
+        const uint8_t *os = NULL;
+        uint16_t ol = 0;
+
+        if (o == keep || !o->used || !o->ifname[0])
+            continue;
+        if (o->owner != OWN_CAPAGENT || o->port == 0xffff)
+            continue;
+        if ((o->port >> 8) != (port >> 8) || (o->port & 0xff) == (port & 0xff))
+            continue;
+        if (keep && !strcmp(o->ifname, keep->ifname))
+            continue;
+        if (!own_ssid_of(o->start, o->start_len, &os, &ol))
+            continue;
+        if (ol != nl || memcmp(os, ns, nl))
+            continue;
+        printf("own: %s (port=0x%04x): superseded by the same SSID on "
+               "port=0x%04x, releasing\n", o->ifname, o->port, port);
+        fflush(stdout);
+        own_release(o, "superseded by the current manager slot");
+    }
+}
+#else
+#define own_drop_ssid_twins(keep, port, body, len) ((void)0)
+#endif
+
 static void own_note_start(const struct cfg *c, int port, const uint8_t *body,
                            uint16_t len, const struct vap *vp, int ifindex,
                            int managed)
@@ -1449,6 +1584,21 @@ static void own_note_start(const struct cfg *c, int port, const uint8_t *body,
     if (own_nd_has(e->ifname, NULL, 0)) {
         printf("own: %s appeared in netifd status, not starting\n", e->ifname);
         e->pid = 0;
+        own_save();
+        return;
+    }
+    /* A renumbered manager slot: retire the previous generation of the same
+     * SSID before deciding whether the phy hostapd is up to date. */
+    own_drop_ssid_twins(e, (uint16_t)port, body, len);
+    if (e->pid && own_pid_alive(e->pid) && own_row_missing(e)) {
+        /* The phy-wide daemon is alive but this row is not in its config
+         * (the common F45 case: the manager's destroy/create burst rebuilt
+         * the phy before this row's 0x6016 arrived).  Adopting the live pid
+         * and "ignoring the repeat" dropped the BSS for good. */
+        printf("vap: %s: live pid=%d does not carry this start, rebuilding "
+               "phy%d\n", e->ifname, e->pid, (port >> 8) & 0xff);
+        fflush(stdout);
+        vap_phy_apply(e->port >> 8, c);
         own_save();
         return;
     }
