@@ -1,4 +1,4 @@
-# v0.5.3 — WPA2-EAP is in the shipped image
+# v0.5.3 / v0.5.4 — WPA2-EAP in the shipped image
 
 Patch release on v0.5.2. The only functional change is the one that made
 wpa2-eap possible; until now it existed only as a hand-installed `wpad`.
@@ -52,3 +52,22 @@ bridges without manual steps, `MGMT_SOURCE=off`, patched `wpad`
   option 138.
 * ACL/multi-passphrase, 802.11k/v/r, tx-power/beacon tuning, local-forwarding,
   6 GHz/MLO — see `docs/CAPSMAN-COVERAGE.md`.
+
+
+## v0.5.4 — packaging fix
+
+The v0.5.3 image was built **without rebuilding the capagent ipk**, so it shipped
+the previous binary: the generated BSS had `wpa=0` (no RSN IE in the beacon) and
+a station ignored the SSID even though `external_rsn_ie` was present. Rebuilding
+`package/capagent` from the current `native/capagent-mipsel` before the image
+fixes it:
+
+```
+config: wpa=2 · wpa_key_mgmt=WPA-EAP
+station: CTRL-EVENT-CONNECTED → authorized: yes → ping 3/3, 0% packet loss
+CAP:     NEW_KEY PAIRWISE ret=0 · SET_STATION MFP ret=0 · EXTMUX: authorized
+```
+
+Image sha256 `0a6dcafbe62a0eb3ed2038a5c3921bae73cf9ac815da2035fc4a4a7d65e6d434`.
+Release the image whenever `native/` changes: the ipk embeds a prebuilt binary,
+so it is easy to ship a stale one.
