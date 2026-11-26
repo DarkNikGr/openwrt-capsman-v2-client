@@ -45,6 +45,8 @@ static int g_next_ifindex = 10;
 static int g_created, g_deleted, g_starts, g_stops, g_ready;
 static int g_create_fail;
 static int g_pid_alive[4096];
+static char g_pid_ifname[4096][32];   /* BSS each fake hostapd serves */
+static int g_fake_wl_legacy;          /* netifd owns the BSSes (policy) */
 
 static int fake_kill(pid_t pid, int sig)
 {
@@ -148,6 +150,7 @@ static int vap_hostapd_start(int port, const char *ifname, int phy, int vapid,
     FILE *f;
 
     g_pid_alive[pid] = 1;
+    snprintf(g_pid_ifname[pid], sizeof(g_pid_ifname[pid]), "%s", ifname);
     snprintf(p, sizeof(p), OWN_RUN_DIR "/vap-%s.pid", ifname);
     f = fopen(p, "w");
     if (f) { fprintf(f, "%d\n", pid); fclose(f); }
@@ -167,6 +170,23 @@ static void extmux_del_vap(void *m, uint16_t port)
 }
 static void pmap_del(int port) { (void)port; }
 static void dp_del_ifindex(int ifindex) { (void)ifindex; }
+/* policy.inc seam: whether netifd (legacy UCI) owns the BSSes. */
+static int wl_legacy(void) { return g_fake_wl_legacy; }
+
+/* vap.inc seam: the process-table lookup.  This double states the contract
+ * ownership.inc relies on (a live hostapd started for exactly this ifname,
+ * never a dead pid or another BSS's daemon); it does not test vap.inc's own
+ * implementation of that lookup.  Calls are counted so a case can assert that
+ * the pid file alone was enough. */
+static int g_find_calls;
+static pid_t vap_find_hostapd(const char *ifname)
+{
+    g_find_calls++;
+    for (int p = 1; p < 4096; p++)
+        if (g_pid_alive[p] && !strcmp(g_pid_ifname[p], ifname))
+            return (pid_t)p;
+    return 0;
+}
 static size_t parse_hex(const char *s, uint8_t *out, size_t max)
 {
     size_t n = 0;
@@ -198,6 +218,9 @@ static void reset_all(void)
     memset(g_vap, 0, sizeof(g_vap));
     memset(g_net, 0, sizeof(g_net));
     memset(g_pid_alive, 0, sizeof(g_pid_alive));
+    memset(g_pid_ifname, 0, sizeof(g_pid_ifname));
+    g_fake_wl_legacy = 0;
+    g_find_calls = 0;
     memset(&g_own_nd, 0, sizeof(g_own_nd));
     g_extmux = NULL;
     g_next_ifindex = 10;
@@ -364,8 +387,12 @@ static void test_agent_restart(void)
     check(before == 1, "one hostapd before restart");
     /* Simulate process restart: memory is lost, journal and netdev remain. */
     memset(g_own, 0, sizeof(g_own));
+    g_find_calls = 0;
     own_init(&T);
     own_restore_vaps(&T);
+    /* The pid file must be enough here: a truncated OWN_RUN_DIR path (see
+     * docs/BUILD.md, CI) would otherwise hide behind the /proc fallback. */
+    check(g_find_calls == 0, "restart re-adopted hostapd from the pid file");
     check(entry_owner(0) == OWN_CAPAGENT, "journal restored the owner");
     check(g_starts == before, "no second hostapd on the same BSS");
     check(g_created == 1, "no duplicate netdev");
@@ -486,6 +513,103 @@ static void test_reload_recreate(void)
     check(g_starts == before_s + 1, "hostapd restarted on crash");
 }
 
+static void unlink_pidfile(const char *ifname, int leave_empty)
+{
+    char p[128];
+    snprintf(p, sizeof(p), OWN_RUN_DIR "/vap-%s.pid", ifname);
+    unlink(p);
+    if (leave_empty) {
+        FILE *f = fopen(p, "w");
+        if (f) fclose(f);
+    }
+}
+
+static void simulate_agent_restart(void)
+{
+    memset(g_own, 0, sizeof(g_own));
+    own_init(&T);
+    own_restore_vaps(&T);
+}
+
+static void test_pidfile_fallback(void)
+{
+    int before;
+    printf("-- hostapd alive without a usable pid file --\n");
+    set_nd("{}");
+    reset_all();
+    claim_start(&T, 0, 0, "phy0-ap0");
+    before = g_starts;
+    unlink_pidfile("phy0-ap0", 0);
+    simulate_agent_restart();
+    own_service(&T);
+    check(g_starts == before, "missing pid file: live hostapd adopted, "
+                              "no second daemon");
+    check(entry_owner(0) == OWN_CAPAGENT, "missing pid file: still ours");
+
+    unlink_pidfile("phy0-ap0", 1);
+    simulate_agent_restart();
+    own_service(&T);
+    check(g_starts == before, "empty pid file: no second daemon");
+
+    /* The adopted daemon really dies: the fallback must not keep it alive. */
+    for (int p = 0; p < 4096; p++)
+        g_pid_alive[p] = 0;
+    unlink_pidfile("phy0-ap0", 0);
+    before = g_starts;
+    own_service(&T);
+    check(g_starts == before + 1, "dead hostapd without pid file restarted");
+}
+
+static void test_sibling_bss_identity(void)
+{
+    int pid1 = 0, pid10 = 0, before;
+    printf("-- phy0-ap1 vs phy0-ap10 identity --\n");
+    set_nd("{}");
+    reset_all();
+    claim_start(&T, 0, 1, "phy0-ap1");
+    claim_start(&T, 0, 10, "phy0-ap10");
+    for (int p = 1; p < 4096; p++) {
+        if (!g_pid_alive[p]) continue;
+        if (!strcmp(g_pid_ifname[p], "phy0-ap1")) pid1 = p;
+        if (!strcmp(g_pid_ifname[p], "phy0-ap10")) pid10 = p;
+    }
+    check(pid1 > 0 && pid10 > 0 && pid1 != pid10, "two BSSes, two daemons");
+    /* phy0-ap1's daemon dies and its pid file is gone; phy0-ap10 lives. */
+    g_pid_alive[pid1] = 0;
+    unlink_pidfile("phy0-ap1", 0);
+    before = g_starts;
+    simulate_agent_restart();
+    own_service(&T);
+    check(g_starts == before + 1, "phy0-ap1 restarted, not adopted from "
+                                  "phy0-ap10");
+    check(g_pid_alive[pid10], "phy0-ap10's hostapd untouched");
+    check(own_hostapd_pid("phy0-ap10") == pid10, "phy0-ap10 keeps its pid");
+}
+
+static void test_netifd_policy_gate(void)
+{
+    int before_s, before_c;
+    printf("-- netifd owns the BSSes: service is read-only --\n");
+    set_nd("{}");
+    reset_all();
+    claim_start(&T, 0, 0, "phy0-ap0");
+    for (int p = 0; p < 4096; p++)
+        g_pid_alive[p] = 0;
+    for (int i = 0; i < FAKE_MAX; i++)
+        if (g_net[i].used) memset(&g_net[i], 0, sizeof(g_net[i]));
+    before_s = g_starts;
+    before_c = g_created;
+    g_fake_wl_legacy = 1;
+    own_service(&T);
+    check(g_starts == before_s && g_created == before_c && g_deleted == 0,
+          "legacy policy: no restart, create or delete");
+    check(entry_owner(0) == OWN_CAPAGENT, "legacy policy: journal row kept");
+    g_fake_wl_legacy = 0;
+    own_service(&T);
+    check(g_created == before_c + 1 && g_starts == before_s + 1,
+          "agent policy again: rebuilt from the journal");
+}
+
 int main(void)
 {
     char dir[256];
@@ -511,6 +635,9 @@ int main(void)
     test_busy_and_stale();
     test_netifd_readonly_and_forced();
     test_reload_recreate();
+    test_pidfile_fallback();
+    test_sibling_bss_identity();
+    test_netifd_policy_gate();
 
     if (failures) {
         printf("%d FAILURE(S)\n", failures);
