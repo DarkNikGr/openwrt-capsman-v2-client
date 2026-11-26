@@ -38,6 +38,8 @@ per radio with `bss=` sections** with no PSK. What is still missing is a stable
 | F19 | The 2.4 GHz MT7603E brings up **2 BSSes** reliably (`phy0-ap0` + `phy0-ap1` with SSIDs) and fails from 3 BSSes with `Failed to create interface phy0-ap2: -23`. Real phy0 vif usage at that moment was 2/4, so it is not a simple vif-count limit. | live A/B: 2 BSS ok, 3 and 4 BSS fail |
 | F20 | `mon_create(phy0)` refuses on purpose ("4-interface radio; not taking a VAP slot"), so the 2.4 GHz radio has **no** `cm0` and `0x2018` is not relayed from it. The no-monitor path is the `9999a` raw AUTH/ASSOCREQ relay. | live log, `src/mgmt.inc` |
 | F22 | **`-23` is not a driver or vif limit.** hostapd's `nl80211_create_iface()` reads `-ENFILE` from `NL80211_CMD_NEW_INTERFACE` as "this name already exists". With `use_existing=0` it then prints `Failed to create interface phy0-apN: -23`, **deletes the netdev the CAP created** and makes its own, owned by its own netlink socket. The ifindex moves under capagent, which removes the row as an orphan and the BSS churns. Patch `9999c` passes `use_existing=1` for AP BSSes: live `Try to remove and re-create` 3+ -> **0**, both radios `hostapd up with 4 BSS(es)`. A 5th AP vif can be created by hand (`iw phy phy0 interface add probeap99 type __ap`) on the same radio, so the platform allows more than four. | `patches/9999c-…`, live A/B |
+| F24 | **`hostapd -B` was the restart loop.** The daemon exits about a second after `AP-ENABLED`, before it writes the `-P` pid file, so the pid was never resolvable and the reconcile restarted the phy forever (35 starts/min, 0-4 SSIDs). Running hostapd in the foreground as the `fork()`ed child fixed it: the pid is the one `fork` returned, nothing reparents it, and a dead instance is a zombie that `pid_is_zombie()` reaps instead of looking alive to `kill(pid,0)`. | live: `ssids=8`, `hostapd up with 4 BSS(es)` twice, two hostapd processes |
+| F25 | BSS ownership: the master (lowest vapid) netdev stays ours (`interface=`), every secondary is handed over — deleted, then hostapd creates it. Rows remember `handed_over` + `applied_len/hash`, so the reconcile refreshes the ifindex after `AP-ENABLED` instead of recreating what it just gave away. | `afcafa0`, live 8/8 SSIDs stable |
 | F23 | With `9999c` hostapd **attaches** to our secondaries (good), but then only the master reaches `AP-ENABLED` and the secondaries stay `type AP` with no SSID: hostapd's static `bss=` path expects to own those netdevs. The OpenWrt model (delete the secondaries, let hostapd create them) does bring all four SSIDs up (W61 measured 28 s stable, zero `-23`), but the journal then loops: a handover row has `ifindex=0`, so the reconcile recreates the netdev it just gave away. Next step is to refresh each row's ifindex **after** `AP-ENABLED` and never treat `ifindex=0` on a handed-over row as "needs a netdev". | live runs `final4`/`final6` |
 | F21 | The inline station harness used `iw phy phy0 set netns`, but the test host's station wiphy is **phy1** (`wlp39s0`), so `wpa_supplicant` never started and every earlier "station not connected / no 0x2018" result was a harness artefact. | `scripts/station-test.sh` (verified: phy1 moved, scan listed SSIDs, host restored) |
 
@@ -46,12 +48,16 @@ per radio with `bss=` sections** with no PSK. What is still missing is a stable
 1. **Hardware proof** — the zero-touch image is built and content-verified but
    was never flashed; boot, factory reset, rejoin and 8/8 re-provision are
    unproven. This is the last acceptance gate, not a code change.
-2. **BSS ownership between capagent and hostapd** — the `-23` mechanism is
-   solved (F22) but the two writers disagree about who owns a secondary netdev:
-   attaching leaves it unconfigured (F23), handing it over makes the reconcile
-   recreate it. Fix the journal state machine, not the driver: a handed-over
-   row must be refreshed from `if_nametoindex()` after `AP-ENABLED` and must
-   not be recreated while its BSS is in the live config.
+2. ~~**BSS ownership between capagent and hostapd**~~ — solved: `-23` is the
+   name-exists convention (F22), attach leaves secondaries unconfigured (F23),
+   and the handover + `handed_over`/`applied_*` state machine (F25) plus a
+   foreground hostapd (F24) give **8/8 SSIDs** with one start per radio.
+   Remaining: the manager does not answer the relayed `0x2018` — Auth+AssocReq
+   are sent in the right order (`auth-synth` then `ext`), no `0x2019` deauth
+   comes back, but `0x201c` (M1) never arrives and the manager registration
+   table stays empty, so the station never gets a 4-way. Next: compare the
+   0x2018 body live-vs-lab (the lab Peer was created), starting with the 2.4
+   GHz `freq` we report (2412, while the manager configures 2437).
 3. **`0x2018` on a radio without a monitor VIF** — `mon_create(phy0)` refuses
    by design, so the 2.4 GHz radio depends on the `9999a` raw
    AUTH/ASSOCREQ relay. W62 is proving that path with the installed `wpad`.
