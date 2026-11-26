@@ -131,6 +131,16 @@ static void vap_phy_stop(int phy)
             usleep(100000);
         }
         if (pid > 0) kill(pid, SIGKILL);
+        /* Reap it before starting the next instance: hostapd is our child now,
+         * and until it is reaped its cfg80211 mgmt subscription can still be
+         * alive, which makes the next nl80211_mgmt_subscribe_ap() fail and the
+         * whole radio abort with "Could not configure driver mode". */
+        for (int i = 0; i < 20; i++) {
+            int st = 0;
+            pid_t w = waitpid((pid_t)pid, &st, WNOHANG);
+            if (w == (pid_t)pid || w < 0) break;
+            usleep(50000);
+        }
     }
 }
 
