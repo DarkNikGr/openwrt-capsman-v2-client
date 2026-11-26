@@ -107,9 +107,6 @@ $SUDO ip netns exec "$NETNS" iw dev "$IFNAME" link 2>&1 | head -6 || true
 $SUDO ip netns exec "$NETNS" iw dev "$IFNAME" station dump 2>/dev/null |
 	grep -E "authorized|authenticated|signal" | head -4 || true
 
-kill "$WPID" 2>/dev/null
-sleep 1
-
 if [ -n "$ADDR" ]; then
 	$SUDO ip netns exec "$NETNS" ip addr add "$ADDR" dev "$IFNAME" 2>/dev/null || true
 	$SUDO ip netns exec "$NETNS" ip link set "$IFNAME" up
@@ -118,5 +115,6 @@ if [ -n "$ADDR" ]; then
 	$SUDO ip netns exec "$NETNS" ping -c 3 -W 2 "$GW" 2>&1 | tail -3 || true
 fi
 
+kill "$WPID" 2>/dev/null
 [ "$CONNECTED" -eq 1 ] || { say "NOT CONNECTED (log: $LOG)"; exit 1; }
 say "CONNECTED (log: $LOG)"

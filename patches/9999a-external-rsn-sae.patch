@@ -386,7 +386,7 @@ index c6d6c65..d959e3c 100644
 +			if (hapd->conf->ieee80211w !=
 +			    NO_MGMT_FRAME_PROTECTION)
 +				sta->flags |= WLAN_STA_MFP;
-+			goto skip_sae_owe;
++			return WLAN_STATUS_SUCCESS;
 +		}
 +#endif /* CONFIG_EXTERNAL_RSN_AUTH */
  #ifdef CONFIG_IEEE80211BE
