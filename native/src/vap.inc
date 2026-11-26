@@ -712,36 +712,49 @@ static pid_t vap_read_pidfile(const char *ifname)
     return (got == 1 && pid > 0) ? (pid_t)pid : 0;
 }
 
-/* Find a hostapd whose argv carries our exact per-VAP config path.  This
-   covers a missing/stale pid file (hostapd -B detaches before it is
-   visible) and a pid whose number was recycled. */
+/* Is this pid a hostapd process?  hostapd rewrites its own argv
+   (os_set_process_title -> "hostapd: <ifname>"), which destroys the config
+   path in /proc/<pid>/cmdline, so the argv never stays reliable. */
+static int vap_pid_is_hostapd(pid_t pid)
+{
+    char p[64], buf[64];
+    snprintf(p, sizeof(p), "/proc/%ld/comm", (long)pid);
+    int fd = open(p, O_RDONLY);
+    if (fd < 0) return 0;
+    ssize_t n = read(fd, buf, sizeof(buf) - 1);
+    close(fd);
+    if (n <= 0) return 0;
+    buf[n] = 0;
+    return !strncmp(buf, "hostapd", 7);
+}
+
+/* Find our hostapd for one BSS.  Tries the pid file first, then a /proc
+   scan that accepts both the config path and the rewritten process title
+   ("hostapd: <ifname>").  Returns 0 when there is no live instance. */
 static pid_t vap_find_hostapd(const char *ifname)
 {
-    char want[128];
-    snprintf(want, sizeof(want), VAP_CONF_DIR "/vap-%s.conf", ifname);
+    pid_t pid = vap_read_pidfile(ifname);
+    if (pid > 0 && vap_pid_alive(pid) && vap_pid_is_hostapd(pid))
+        return pid;
+
     DIR *d = opendir("/proc");
     if (!d) return 0;
     struct dirent *de;
     pid_t found = 0;
     while ((de = readdir(d)) != NULL) {
         char *end = NULL;
-        long pid = strtol(de->d_name, &end, 10);
-        if (!end || *end || pid <= 0) continue;
+        long cand = strtol(de->d_name, &end, 10);
+        if (!end || *end || cand <= 0) continue;
+        if (!vap_pid_is_hostapd((pid_t)cand)) continue;
         char p[64], buf[4096];
-        snprintf(p, sizeof(p), "/proc/%ld/cmdline", pid);
+        snprintf(p, sizeof(p), "/proc/%ld/cmdline", cand);
         int fd = open(p, O_RDONLY);
         if (fd < 0) continue;
         ssize_t n = read(fd, buf, sizeof(buf) - 1);
         close(fd);
         if (n <= 0) continue;
         buf[n] = 0;
-        for (ssize_t i = 0; i < n; ) {
-            const char *arg = buf + i;
-            size_t al = strlen(arg);
-            if (al && !strcmp(arg, want)) { found = (pid_t)pid; break; }
-            i += (ssize_t)al + 1;
-        }
-        if (found) break;
+        if (strstr(buf, ifname)) { found = (pid_t)cand; break; }
     }
     closedir(d);
     return found;
