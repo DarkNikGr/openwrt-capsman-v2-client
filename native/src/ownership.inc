@@ -395,6 +395,20 @@ static int own_pid_is_hostapd(int pid)
 /* A pid file is ours only when it names the per-ifname path we pass to
  * hostapd -P and the process really is a hostapd.  This is a secondary
  * signal for journal loss, never the primary ownership rule. */
+static pid_t own_hostapd_fallback(const char *ifname)
+{
+    pid_t found = vap_find_hostapd(ifname);
+    return found > 0 ? found : 0;
+}
+
+/* A pid file is ours only when it names the per-ifname path we pass to
+ * hostapd -P and the process really is a hostapd.  This is a secondary
+ * signal for journal loss, never the primary ownership rule.
+ *
+ * hostapd -B creates the file before it daemonizes, so it can be present but
+ * empty for a moment (and stays empty on some builds).  Every failure path
+ * therefore falls back to the process table: treating a live instance as dead
+ * restarted all VAPs on every 1 s reconcile tick. */
 static int own_hostapd_pid(const char *ifname)
 {
     char pidf[96];
@@ -405,25 +419,19 @@ static int own_hostapd_pid(const char *ifname)
         return 0;
     snprintf(pidf, sizeof(pidf), OWN_RUN_DIR "/vap-%s.pid", ifname);
     f = fopen(pidf, "r");
-    if (!f) {
-        /* hostapd -B detaches before the pid file is visible, and some builds
-         * never leave one behind.  Fall back to the process table so a live
-         * instance is never mistaken for a dead one (that caused a restart
-         * loop every reconcile tick). */
-        pid_t found = vap_find_hostapd(ifname);
-        return found > 0 ? (int)found : 0;
-    }
+    if (!f)
+        return (int)own_hostapd_fallback(ifname);
     if (fscanf(f, "%ld", &pid) != 1)
         pid = 0;
     fclose(f);
     if (pid <= 0)
-        return 0;
+        return (int)own_hostapd_fallback(ifname);
     if (!own_pid_alive((int)pid)) {
         unlink(pidf);
-        return 0;
+        return (int)own_hostapd_fallback(ifname);
     }
     if (!own_pid_ok((int)pid))
-        return 0;
+        return (int)own_hostapd_fallback(ifname);
     return (int)pid;
 }
 
@@ -974,6 +982,11 @@ static void own_reconcile(const struct cfg *c)
         }
 
         ifindex = read_sysfs_int(e->ifname, "ifindex");
+        if (getenv("CAPAGENT_DBG_OWN") && ifindex > 0)
+            printf("dbg: %s port=0x%04x pid=%d alive=%d idx=%d active=%d "
+                   "start_len=%u owner=%d\n", e->ifname, e->port, e->pid,
+                   e->pid ? own_pid_alive(e->pid) : -1, ifindex, e->active,
+                   e->start_len, e->owner);
         if (ifindex > 0) {
             if (e->owner == OWN_PENDING) {
                 int pid = own_hostapd_pid(e->ifname);
