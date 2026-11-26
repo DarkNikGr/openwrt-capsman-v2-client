@@ -1502,7 +1502,15 @@ static void own_policy_refresh(void)
 
 static void own_service(const struct cfg *c)
 {
-    int state = own_probe(0);
+    int state;
+
+    /* Read-only contract: when netifd (or any other owner) owns the BSSes we
+     * must not reconcile, restart or create anything, even for journal rows
+     * left behind by an earlier manager-only session. */
+    if (wl_legacy())
+        return;
+
+    state = own_probe(0);
 
     if (state == OWN_PROBE_OK)
         own_reconcile(c);
