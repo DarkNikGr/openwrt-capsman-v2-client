@@ -38,6 +38,8 @@ per radio with `bss=` sections** with no PSK. What is still missing is a stable
 | F19 | The 2.4 GHz MT7603E brings up **2 BSSes** reliably (`phy0-ap0` + `phy0-ap1` with SSIDs) and fails from 3 BSSes with `Failed to create interface phy0-ap2: -23`. Real phy0 vif usage at that moment was 2/4, so it is not a simple vif-count limit. | live A/B: 2 BSS ok, 3 and 4 BSS fail |
 | F20 | `mon_create(phy0)` refuses on purpose ("4-interface radio; not taking a VAP slot"), so the 2.4 GHz radio has **no** `cm0` and `0x2018` is not relayed from it. The no-monitor path is the `9999a` raw AUTH/ASSOCREQ relay. | live log, `src/mgmt.inc` |
 | F22 | **`-23` is not a driver or vif limit.** hostapd's `nl80211_create_iface()` reads `-ENFILE` from `NL80211_CMD_NEW_INTERFACE` as "this name already exists". With `use_existing=0` it then prints `Failed to create interface phy0-apN: -23`, **deletes the netdev the CAP created** and makes its own, owned by its own netlink socket. The ifindex moves under capagent, which removes the row as an orphan and the BSS churns. Patch `9999c` passes `use_existing=1` for AP BSSes: live `Try to remove and re-create` 3+ -> **0**, both radios `hostapd up with 4 BSS(es)`. A 5th AP vif can be created by hand (`iw phy phy0 interface add probeap99 type __ap`) on the same radio, so the platform allows more than four. | `patches/9999c-…`, live A/B |
+| F30 | `handle_assoc()` **is** entered: the relay proves it. For one station attempt capagent sent `0x2018 auth-synth` **and** `0x2018 ext … len=156 / len=148` (the AssocReq sizes) for ports `0x0101` and `0x0001`, and the relay hook lives inside `handle_assoc`. So the frame reaches hostapd; what never happens is an **AssocResp reaching the station** — wpa_supplicant reports `Association request send successfully` then `MLME event 38; timeout`, never `Association response`. The manager's `0x2019` deauth TX fails with `-22` in the same window, so the AP-side mgmt TX path is the suspect, not the relay. | live `d7.log` + `/tmp/capsta-wpa.log` |
+| F31 | Per-STA hostapd messages (`mgmt::auth`, `IEEE 802.11: associated`) are `MSG_MSGDUMP`/DEBUG and only appear at `logger_stdout_level=1` **and** the per-STA logger; absence of those lines is not evidence of failure, the `EXT-AUTH:` relay is. | live comparison |
 | F28 | hostapd logger options are **global**: appended after the last `bss=` section they are parsed as per-BSS keys and ignored, so `-dd` stays at INFO and every failure is invisible. Written before the first `interface=` the log is complete (128 lines instead of 4 for a radio). | `CAPAGENT_HOSTAPD_DEBUG=1`, live |
 | F29 | With `cap-test` as the radio master the full flow runs: Auth OK → `0x2018` → manager `0x201c` M1 (`len=121`) relayed with `ret=0` on both ports, then the manager sends `0x2019` deauth because no M2 ever comes back. hostapd never logs an association and never relays `ASSOCREQ` for the station, so its `handle_assoc()` is not entered at all — the `external_rsn` hook relays the AssocReq only once that code path runs. | live `d5.log` + `/tmp/vap-phy0.log` |
 | F26 | `NL80211_CMD_SET_INTERFACE` returning `-EALREADY` ("Match already configured") made hostapd abort with `Could not configure driver mode`, so a radio whose BSS the CAP had already brought up as AP never initialised (phy1 failed 5/5 with `status=1`). Patch `9999d` treats `-EALREADY` as success. | live: 4+4 run `ssids=8`, `hostapd up with 4 BSS(es)` on both radios |
@@ -56,13 +58,13 @@ per radio with `bss=` sections** with no PSK. What is still missing is a stable
    name-exists convention (F22), attach leaves secondaries unconfigured (F23),
    and the handover + `handed_over`/`applied_*` state machine (F25) plus a
    foreground hostapd (F24) give **8/8 SSIDs** with one start per radio.
-   Remaining: M1 now arrives, but only when the PSK SSID is the radio
-   **master** (F27). The 4-way still stops because hostapd never enters
-   `handle_assoc()` for the station (F29): it logs the open-system auth, then
-   `MLME-DELETEKEYS`, and the AssocReq is never seen, so no AssocResp and no
-   `ASSOCREQ` relay. The next fix is in the `999`/`9999a` external-RSN patch:
-   keep the STA alive after `handle_auth` so the following AssocReq is
-   processed (and relayed) instead of being dropped with the STA.
+   Remaining: the relay chain is complete (Auth + AssocReq → `0x2018`), and
+   with the SSID as the radio **master** the manager answers M1 (F27/F30).
+   What is missing is the **AssocResp reaching the station**: wpa_supplicant
+   times out (`MLME event 38`), and the manager's `0x2019` deauth fails with
+   `-22` in the same window. Next: instrument `send_assoc_resp()`'s return and
+   the mgmt TX wrapper (`nl_mgmt_tx` / `EXT_AUTH_MGMT_TX`) — one EINVAL path
+   would explain both symptoms.
 3. **`0x2018` on a radio without a monitor VIF** — `mon_create(phy0)` refuses
    by design, so the 2.4 GHz radio depends on the `9999a` raw
    AUTH/ASSOCREQ relay. W62 is proving that path with the installed `wpad`.
