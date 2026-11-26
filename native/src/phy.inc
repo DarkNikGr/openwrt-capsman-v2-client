@@ -206,6 +206,10 @@ static int vap_phy_apply(int phy, const struct cfg *c)
         n++;
     }
     if (!n) return -1;
+    /* Debounce: wait until the manager stops sending start bodies for this
+       radio, otherwise the config is rebuilt (and hostapd restarted) once per
+       VAP and the last BSS/monitor slot is lost. */
+    if (own_now_ms() - g_phy_start_ms[phy] < OWN_PHY_DEBOUNCE_MS) return -1;
 
     char conf[128], pidf[128], logf[128];
     vap_phy_paths(phy, conf, sizeof(conf), pidf, sizeof(pidf),

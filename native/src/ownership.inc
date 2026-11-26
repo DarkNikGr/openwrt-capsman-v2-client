@@ -94,6 +94,13 @@ struct own_entry {
 };
 
 #define OWN_ORPHAN_GRACE_MS 10000u
+#define OWN_PHY_DEBOUNCE_MS 2000u
+
+/* Last time a 0x6016 arrived for each phy: the phy-wide hostapd is only
+ * (re)built once the manager has finished sending that radio's start bodies,
+ * so the config is written once with every BSS and the monitor VIF can still
+ * find a free vif slot. */
+static uint64_t g_phy_start_ms[MAX_RADIOS];
 
 static struct own_entry g_own[OWN_MAX];
 static const char *g_own_path;
@@ -1338,6 +1345,8 @@ static void own_note_start(const struct cfg *c, int port, const uint8_t *body,
 {
     struct own_entry *e = own_by_port((uint16_t)port);
 
+    if ((port >> 8) >= 0 && (port >> 8) < MAX_RADIOS)
+        g_phy_start_ms[port >> 8] = own_now_ms();
     if (!e)
         e = own_alloc((uint16_t)port, NULL);
     if (!e)
