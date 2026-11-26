@@ -1597,6 +1597,26 @@ static void cap_vap_ready(int phy, int vapid, int ifindex, const char *ifname,
     }
 }
 
+/* Keep the relay pointing at the netdev that exists now.  hostapd recreates a
+ * secondary BSS after a phy restart, so the registered ifindex goes stale; a
+ * stale entry sends 0x201c/0x2019 to a dead interface (that is the -22) and
+ * the BSS stops relaying.  Re-register when it changed. */
+static void cap_vap_refresh(int phy, int vapid, int ifindex, const char *ifname,
+                            const uint8_t mac[6], const struct cfg *c)
+{
+    uint16_t port = (uint16_t)((phy << 8) | (vapid & 0xff));
+    struct extmux_vap *v = g_extmux ? extmux_vap_by_port(g_extmux, port) : NULL;
+    if (ifindex <= 0 || !ifname || !*ifname) return;
+    if (v && v->used && (v->ifindex != ifindex ||
+                         strcmp(v->ifname, ifname) != 0)) {
+        printf("EXTMUX: %s ifindex %d -> %d, re-registering\n",
+               ifname, v->ifindex, ifindex);
+        fflush(stdout);
+        extmux_del_vap(g_extmux, port);
+    }
+    cap_vap_ready(phy, vapid, ifindex, ifname, mac, c);
+}
+
 /* Re-adoption is ownership-driven now (W34): the journal says which names
  * are ours and own_restore_vaps() registers exactly those with extmux. */
 static void cap_extmux_restore(const struct cfg *c)

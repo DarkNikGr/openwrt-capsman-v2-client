@@ -433,6 +433,11 @@ static int vap_phy_apply(int phy, const struct cfg *c)
             e->applied_len = e->start_len;
             e->applied_hash = own_body_hash(e->start, e->start_len);
             if (e->ifindex > 0) own_mirror(e);
+            /* The relay must follow the netdev hostapd created: a stale
+             * ifindex makes 0x201c/0x2019 TX fail with -EINVAL and the BSS
+             * silently stops relaying. */
+            cap_vap_refresh(phy, e->port & 0xff, e->ifindex, e->ifname,
+                            e->bssid, c);
         }
         g_own_dirty = 1;
         own_save();
