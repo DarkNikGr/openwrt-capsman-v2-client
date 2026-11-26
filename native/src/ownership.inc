@@ -402,7 +402,14 @@ static int own_hostapd_pid(const char *ifname)
         return 0;
     snprintf(pidf, sizeof(pidf), OWN_RUN_DIR "/vap-%s.pid", ifname);
     f = fopen(pidf, "r");
-    if (!f) return 0;
+    if (!f) {
+        /* hostapd -B detaches before the pid file is visible, and some builds
+         * never leave one behind.  Fall back to the process table so a live
+         * instance is never mistaken for a dead one (that caused a restart
+         * loop every reconcile tick). */
+        pid_t found = vap_find_hostapd(ifname);
+        return found > 0 ? (int)found : 0;
+    }
     if (fscanf(f, "%ld", &pid) != 1)
         pid = 0;
     fclose(f);
