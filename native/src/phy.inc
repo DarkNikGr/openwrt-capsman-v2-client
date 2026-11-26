@@ -236,6 +236,22 @@ static int vap_phy_apply(int phy, const struct cfg *c)
                   logf, sizeof(logf));
     vap_phy_stop(phy);
 
+    /* Reserve the management monitor on this phy *before* hostapd starts:
+       whoever asks the driver first gets the last vif slot, and hostapd taking
+       it makes the monitor impossible (-23 for our BSSes). */
+    if (c->mgmt_source == 2 || c->mgmt_source == 0) {
+        int mi = mon_create(phy);
+        if (mi > 0) {
+            char nm[IF_NAMESIZE];
+            if (if_indextoname((unsigned)mi, nm))
+                printf("vap: phy%d monitor %s ifindex=%d reserved\n",
+                       phy, nm, mi);
+        } else {
+            printf("vap: phy%d no free slot for a monitor VIF\n", phy);
+        }
+        fflush(stdout);
+    }
+
     FILE *f = fopen(conf, "w");
     if (!f) return -1;
     int first = 1, written = 0;
