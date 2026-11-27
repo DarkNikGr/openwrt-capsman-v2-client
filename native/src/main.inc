@@ -558,6 +558,19 @@ static int run_once(struct cfg *c)
             printf("disconnected\n");
             fflush(stdout);
             break;
+        } else if (type == 0x6017) {
+            /* The manager has changed a live BSS configuration (e.g. the
+             * security profile) and marks the VAP INACTIVE until the CAP
+             * re-provisions.  It does not resend 0x6016 on the existing
+             * session; re-join so it pushes 0x500b/0x6016 again. */
+            static time_t last_cfg;
+            printf("RX 0x6017 configuration changed (len=%u) -> re-joining "
+                   "the manager\n", len);
+            fflush(stdout);
+            if (time(NULL) - last_cfg >= 5) {
+                last_cfg = time(NULL);
+                break;
+            }
         } else if (type != TYPE_ECHO_RESP && type != TYPE_JOIN_RESP) {
             dump_raw("other", type, port, body, len);
             printf("RX type=0x%04x len=%d\n", type, len);

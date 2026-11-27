@@ -94,9 +94,12 @@ struct own_entry {
     uint16_t start_len;         /* last 0x6016 body, for auto-heal */
     int handed_over;            /* hostapd owns this BSS netdev */
     uint32_t applied_hash;      /* body hash in the live phy config */
+    uint32_t applied_cfg_hash;  /* hash of the configuration-relevant TLVs */
     uint16_t applied_len;       /* 0 = not in the live config */
     uint8_t start[OWN_START_MAX];
 };
+
+static uint32_t own_cfg_hash(const uint8_t *b, uint16_t n);
 
 #define OWN_ORPHAN_GRACE_MS 10000u
 #define OWN_PHY_DEBOUNCE_MS 2000u
@@ -660,6 +663,8 @@ static void own_load(void)
             e->start_len = keep_len;
             memcpy(e->start, keep, keep_len);
         }
+        if (e->applied_len && e->start_len)
+            e->applied_cfg_hash = own_cfg_hash(e->start, e->start_len);
         if (!e->pid)
             e->pid = own_hostapd_pid(e->ifname);
         g_own_dirty = 1;
@@ -1046,6 +1051,30 @@ static uint32_t own_body_hash(const uint8_t *b, uint16_t n)
     for (uint16_t i = 0; i < n; i++) {
         h ^= b[i];
         h *= 16777619u;
+    }
+    return h ? h : 1u;
+}
+
+/* FNV-1a over only the configuration-bearing TLVs of a 0x6016 body.  The
+ * manager repeats start bodies whose non-configuration bytes differ; those
+ * must not restart hostapd, while a security/SSID/channel/VLAN change must. */
+static uint32_t own_cfg_hash(const uint8_t *b, uint16_t n)
+{
+    uint32_t h = 2166136261u;
+    uint16_t i = 0;
+    while (i + 4 <= n) {
+        uint16_t t = (uint16_t)((b[i] << 8) | b[i + 1]);
+        uint16_t l = (uint16_t)((b[i + 2] << 8) | b[i + 3]);
+        if (i + 4 + l > n) break;
+        if (t == 0x03 || t == 0x04 || t == 0x0a || t == 0x7d || t == 0x24) {
+            h ^= t; h *= 16777619u;
+            h ^= l; h *= 16777619u;
+            for (uint16_t k = 0; k < l; k++) {
+                h ^= b[i + 4 + k];
+                h *= 16777619u;
+            }
+        }
+        i = (uint16_t)(i + 4 + l);
     }
     return h ? h : 1u;
 }
@@ -1610,10 +1639,19 @@ static void own_note_start(const struct cfg *c, int port, const uint8_t *body,
     if (e->pid && own_pid_alive(e->pid)) {
         /* The official manager re-sends 0x6016 with a body that differs in
          * non-configuration bytes; restarting on every repeat killed the
-         * daemon in a tight loop and left the BSS unusable.  A live daemon
-         * wins: journal the newest body for a future cold start, but do not
-         * touch the running process.  A real profile change arrives as
-         * 0x600c + 0x500b + 0x6016. */
+         * daemon in a tight loop and left the BSS unusable.  Only a change in
+         * the configuration-bearing TLVs (SSID/RSN/channel/VLAN/DTIM) is a
+         * real profile update and must be applied: the manager marks the VAP
+         * INACTIVE until the CAP does. */
+        uint32_t cfg = own_cfg_hash(e->start, e->start_len);
+        if (!same_body && cfg != e->applied_cfg_hash) {
+            printf("vap: %s: 0x6016 changed the configuration, rebuilding "
+                   "phy%d\n", e->ifname, (port >> 8) & 0xff);
+            fflush(stdout);
+            vap_phy_apply(e->port >> 8, c);
+            own_save();
+            return;
+        }
         printf("vap: %s already running pid=%d, repeated 0x6016 ignored "
                "(body %s)\n", e->ifname, e->pid,
                same_body ? "identical" : "updated");

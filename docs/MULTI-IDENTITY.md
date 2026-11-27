@@ -97,14 +97,13 @@ script delays identity *n* by `n × CAPAGENT_STAGGER` (default 15 s, set
 `CAPAGENT_STAGGER=20` in `capagent.conf` to match the manual launcher); the
 manual launcher uses `DELAY=20`.
 
-Changing a security profile on the manager does **not** live-update a running
-identity: capagent (re)builds a BSS when the manager creates it, so after
-editing `configuration.security` restart the service (or just that identity)
-or the manager will show the VAP `INACTIVE` while the CAP keeps the old RSN
-config. A brand-new RouterOS security object also needs its passphrase at
-creation (`must specify passphrase for PSK` otherwise). Provisioned from
-creation it is fine: a fresh identity with `wpa3-psk` came up ACTIVE and a SAE
-station completed with `auth-type=wpa3-psk mfp=yes` and ping 0% (F76).
+Changing a security profile on the manager is picked up live: the manager
+sends `0x6017`, capagent re-joins and the manager re-pushes `0x500b`/`0x6016`;
+a changed SSID/RSN/channel/VLAN in a repeated `0x6016` also rebuilds the phy
+hostapd (`own_cfg_hash`). Verified with a passphrase change: the VAP returned
+to ACTIVE and a station with the new passphrase pinged 0%, without restarting
+the identity (F76). A brand-new RouterOS security object still needs its
+passphrase at creation (`must specify passphrase for PSK` otherwise).
 
 A phy carries **four AP vifs**, so a fifth identity cannot be added while the
 other four run (`ip link set … up` → `Resource busy`); to test a new identity,

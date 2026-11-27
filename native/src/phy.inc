@@ -641,6 +641,7 @@ static int vap_phy_apply(int phy, const struct cfg *c)
             e->ifindex = if_nametoindex(e->ifname);
             e->applied_len = e->start_len;
             e->applied_hash = own_body_hash(e->start, e->start_len);
+            e->applied_cfg_hash = own_cfg_hash(e->start, e->start_len);
             if (e->ifindex > 0) own_mirror(e);
             /* The relay must follow the netdev hostapd created: a stale
              * ifindex makes 0x201c/0x2019 TX fail with -EINVAL and the BSS
