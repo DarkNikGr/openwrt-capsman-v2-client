@@ -47,7 +47,7 @@ static void vap_note_rsn(struct vap *vp, const uint8_t *ie, size_t il)
     if (!vp) return;
     rsn_parse(ie, il, &ri);
     if (!ri.valid) return;
-    vp->mfp = ri.mfpc || ri.mfpr;
+    vp->mfp = getenv("CAPAGENT_NO_MFP") ? 0 : (ri.mfpc || ri.mfpr);
     vp->external_auth = ri.akm_sae || ri.akm_owe;
 }
 

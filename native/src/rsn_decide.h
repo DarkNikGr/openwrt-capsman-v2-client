@@ -162,7 +162,10 @@ static void rsn_policy_from_ie(const struct rsn_info *ri, int sae_override,
                              "FT-PSK");
     }
 
-    p->ieee80211w = ri->mfpr ? 2 : (ri->mfpc ? 1 : 0);
+    /* CAPAGENT_NO_MFP: lab hook for 802.11k tests where the station sends
+     * its beacon report as an unprotected robust action frame. */
+    p->ieee80211w = getenv("CAPAGENT_NO_MFP") ? 0 :
+                    (ri->mfpr ? 2 : (ri->mfpc ? 1 : 0));
     p->group_mgmt_cmac = have_sae && ri->mfpc;
     p->sae_pwe = (have_sae && ri->akm_sae) ? 2 : 0;
 }

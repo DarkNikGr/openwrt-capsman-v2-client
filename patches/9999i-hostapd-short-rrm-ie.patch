@@ -1,0 +1,71 @@
+hostapd: keep the station's RM capabilities in split-MAC mode
+
+wpa_supplicant may send a short RM IE while hostapd keeps a 5-octet
+capability field, and the external-RSN early return in
+__check_assoc_ies() skipped the copy entirely (every CAP VAP has
+external_rsn_sae=1).  Both association paths now copy the available
+octets and zero the rest, so req_beacon can see the beacon-report bits.
+
+--- a/src/ap/ieee802_11.c
++++ b/src/ap/ieee802_11.c
+@@ -3973,6 +3973,17 @@
+ }
+ 
+ 
++static void copy_sta_rrm_caps(struct sta_info *sta,
++			     const struct ieee802_11_elems *elems)
++{
++	if (!elems->rrm_enabled)
++		return;
++	os_memset(sta->rrm_enabled_capa, 0, sizeof(sta->rrm_enabled_capa));
++	os_memcpy(sta->rrm_enabled_capa, elems->rrm_enabled,
++		  elems->rrm_enabled_len < sizeof(sta->rrm_enabled_capa) ?
++		  elems->rrm_enabled_len : sizeof(sta->rrm_enabled_capa));
++}
++
+ static int __check_assoc_ies(struct hostapd_data *hapd, struct sta_info *sta,
+ 			     const u8 *ies, size_t ies_len,
+ 			     struct ieee802_11_elems *elems, int reassoc,
+@@ -4168,6 +4179,8 @@
+ 			if (hapd->conf->ieee80211w !=
+ 			    NO_MGMT_FRAME_PROTECTION)
+ 				sta->flags |= WLAN_STA_MFP;
++			/* The 802.11k caps are still needed by req_beacon. */
++			copy_sta_rrm_caps(sta, elems);
+ 			return WLAN_STATUS_SUCCESS;
+ 		}
+ #endif /* CONFIG_EXTERNAL_RSN_AUTH */
+@@ -4468,10 +4481,7 @@
+ 	ap_copy_sta_supp_op_classes(sta, elems->supp_op_classes,
+ 				    elems->supp_op_classes_len);
+ 
+-	if (elems->rrm_enabled &&
+-	    elems->rrm_enabled_len >= sizeof(sta->rrm_enabled_capa))
+-		os_memcpy(sta->rrm_enabled_capa, elems->rrm_enabled,
+-			  sizeof(sta->rrm_enabled_capa));
++	copy_sta_rrm_caps(sta, elems);
+ 
+ 	if (elems->power_capab) {
+ 		sta->min_tx_power = elems->power_capab[0];
+--- a/src/ap/drv_callbacks.c
++++ b/src/ap/drv_callbacks.c
+@@ -893,10 +893,15 @@
+ 	pfs_fail:
+ #endif /* CONFIG_DPP2 */
+ 
+-	if (elems.rrm_enabled &&
+-	    elems.rrm_enabled_len >= sizeof(sta->rrm_enabled_capa))
+-	    os_memcpy(sta->rrm_enabled_capa, elems.rrm_enabled,
+-		      sizeof(sta->rrm_enabled_capa));
++	if (elems.rrm_enabled) {
++		size_t rrm_len = elems.rrm_enabled_len;
++
++		os_memset(sta->rrm_enabled_capa, 0,
++			  sizeof(sta->rrm_enabled_capa));
++		if (rrm_len > sizeof(sta->rrm_enabled_capa))
++			rrm_len = sizeof(sta->rrm_enabled_capa);
++		os_memcpy(sta->rrm_enabled_capa, elems.rrm_enabled, rrm_len);
++	}
+ 
+ #if defined(CONFIG_IEEE80211R_AP) || defined(CONFIG_FILS) || defined(CONFIG_OWE)
+ 	hostapd_sta_assoc(hapd, addr, reassoc, status, buf, p - buf);
