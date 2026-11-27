@@ -185,12 +185,30 @@ static int vap_ht40_sign5(uint32_t freq)
 static void vap_write_channel(FILE *f, uint32_t freq, int wcode)
 {
     /* 6 GHz: HE-only, and hostapd needs op_class 131 so it selects the
-     * 6 GHz mode instead of 2.4/5 GHz (the channel numbers overlap). */
+     * 6 GHz mode instead of 2.4/5 GHz (the channel numbers overlap).
+     * Wider channels need he_oper_chwidth and the centre channel index. */
     if (freq >= 5925) {
         int chan = (int)((freq - 5950) / 5);
+        int width, opclass, chw;
+        uint32_t center;
         if (chan < 1 || chan > 233) chan = 1;
-        fprintf(f, "hw_mode=a\nchannel=%d\nop_class=131\n", chan);
+        switch (wcode) {
+        case 2:  width = 40; break;
+        case 3:  width = 80; break;
+        case 4:  width = 160; break;
+        default: width = 20; break;
+        }
+        opclass = width == 160 ? 134 : width == 80 ? 133 :
+                  width == 40 ? 132 : 131;
+        chw = width == 160 ? 3 : width == 80 ? 2 : width == 40 ? 1 : 0;
+        center = width == 160 ? c160_6g(freq) : width == 80 ? c80_6g(freq) :
+                 width == 40 ? c40_6g(freq) : freq;
+        fprintf(f, "hw_mode=a\nchannel=%d\nop_class=%d\n", chan, opclass);
         fprintf(f, "ieee80211ax=1\nhe_6ghz_reg_pwr_type=0\n");
+        if (width > 20)
+            fprintf(f, "he_oper_chwidth=%d\n"
+                       "he_oper_centr_freq_seg0_idx=%d\n",
+                    chw, (int)((center - 5950) / 5));
         return;
     }
     if (!vap_is_5g(freq)) {

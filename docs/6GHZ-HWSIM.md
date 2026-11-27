@@ -146,11 +146,17 @@ EXT-AUTH: station 02:00:00:00:01:00 authorized by external authenticator
   both return **3/3, 0% loss**, `iw link` shows `freq: 5955.0`, signal
   -27 dBm. This was reproduced after a fresh hwsim reload with the queue fix
   built into hostapd.
+* **80 MHz:** the 0xD00B reply now advertises the 6 GHz 20/40/80/160 MHz
+  descriptors (`BODY_MAX` raised to 16 KiB) and `vap_write_channel` writes
+  `op_class` 131/132/133/134 plus `he_oper_chwidth`/`he_oper_centr_freq_seg0_idx`.
+  With `channel.width=20/40/80mhz` the manager selects 5955 MHz and hostapd
+  runs `channel 1, width: 80 MHz, center1: 5985 MHz`; the SAE station
+  associates at 80 MHz and pings **3/3, 0%**.
 
 ## What is still open
 
-* Wider 6 GHz channels (40/80/160 MHz) need the HE centre-index fields in
-  `vap_write_channel`; only 20 MHz is generated today.
+* 160 MHz is advertised in the reply but not exercised; 320 MHz needs a wider
+  descriptor and is not generated.
 * MLO / EHT multi-link is not implemented (the beacon-protection bit makes the
   manager accept the 6 GHz radio, but no MLD is established).
 * Real 6 GHz hardware, AFC and regulatory power modes cannot be proven with

@@ -56,12 +56,37 @@ static uint32_t c40_for(uint32_t f)
     return (((ch - 36) % 8) < 4) ? f + 10 : f - 10;
 }
 
+/* 6 GHz blocks: 20 MHz channels are numbered 1,5,9,... (5 MHz steps in the
+ * channel number per 20 MHz).  A 40/80/160 MHz block starts at 1, 1, 1 and
+ * the centre channel is start+2/+6/+14. */
+static uint32_t c40_6g(uint32_t f)
+{
+    int ch = (int)((f - 5950) / 5);
+    int start = ((ch - 1) / 8) * 8 + 1;
+    return 5950 + (uint32_t)(start + 2) * 5;
+}
+
+static uint32_t c80_6g(uint32_t f)
+{
+    int ch = (int)((f - 5950) / 5);
+    int start = ((ch - 1) / 16) * 16 + 1;
+    return 5950 + (uint32_t)(start + 6) * 5;
+}
+
+static uint32_t c160_6g(uint32_t f)
+{
+    int ch = (int)((f - 5950) / 5);
+    int start = ((ch - 1) / 32) * 32 + 1;
+    return 5950 + (uint32_t)(start + 14) * 5;
+}
+
 static size_t add_channel_tlvs(uint8_t *b, size_t n, int phy)
 {
     struct phy_bands pb;
     read_phy_bands(phy, &pb);
     for (int i = 0; i < pb.nfreq; i++) {
         uint32_t f = pb.freq[i];
+        if (n + 4 * 48 > BODY_MAX) break;
         if (f < 3000) {                                   /* 2.4 GHz */
             n = add_chan_desc(b, n, f, 1, 0x81, f);       /* g  20 */
             n = add_chan_desc(b, n, f, 1, 0x82, f);       /* n  20 */
@@ -78,7 +103,12 @@ static size_t add_channel_tlvs(uint8_t *b, size_t n, int phy)
             if (ccfi80(f) != f)                           /* ac 80 */
                 n = add_chan_desc(b, n, f, 3, 0x03, ccfi80(f));
         } else {                                          /* 6 GHz */
+            /* The reply is bounded by BODY_MAX; stop before overflowing it. */
+            if (n + 4 * 48 > BODY_MAX) break;
             n = add_chan_desc(b, n, f, 1, 0x06, f);
+            n = add_chan_desc(b, n, f, 2, 0x06, c40_6g(f));
+            n = add_chan_desc(b, n, f, 3, 0x06, c80_6g(f));
+            n = add_chan_desc(b, n, f, 4, 0x06, c160_6g(f));
         }
     }
     return n;
