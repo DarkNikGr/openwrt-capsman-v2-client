@@ -66,7 +66,8 @@ done
 for f in 999-external-rsn-auth 9997-external-rsn-ie 9998-external-rsn-eapol-rx \
          9999-external-rsn-no-psk 9999a-external-rsn-sae \
          9999b-external-rsn-tx-retval 9999c-hostapd-use-existing-bss 9999d-hostapd-set-mode-ealready \
-         9999e-external-rsn-null-wpa-sm; do
+         9999e-external-rsn-null-wpa-sm 9999f-external-rsn-action \
+         9999g-hostapd-rrm-ie-without-capab; do
 	cp "$REPO/patches/$f.patch" \
 	   "$SDK/package/network/services/hostapd/patches/$f.patch"
 done

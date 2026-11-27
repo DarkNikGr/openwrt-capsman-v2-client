@@ -68,7 +68,8 @@ fi
 rm -rf "$SDK/package/capagent"
 cp -a "$REPO/openwrt/capagent" "$SDK/package/capagent"
 ( cd "$SDK" && make package/capagent/compile \
-	CAPAGENT_BIN="$CAPAGENT_BIN" PKG_VERSION="$(cat "$REPO/VERSION")" ) >&2
+	CAPAGENT_BIN="$CAPAGENT_BIN" PKG_VERSION="$(cat "$REPO/VERSION")" \
+	MULTI_CAP="$REPO/scripts/multi-cap.sh" ) >&2
 
 # 4. ImageBuilder.
 if [ ! -f "$IB/Makefile" ]; then

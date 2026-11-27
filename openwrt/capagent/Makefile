@@ -19,6 +19,10 @@ PKG_RELEASE:=1
 PKG_MAINTAINER:=DarkNik <darknik@users.noreply.github.com>
 PKG_LICENSE:=GPL-2.0
 
+# Optional manual launcher for the multi-identity topology.  In this repo it
+# lives in scripts/; an OpenWrt feed checkout can override it.
+MULTI_CAP?=$(CURDIR)/../../scripts/multi-cap.sh
+
 include $(INCLUDE_DIR)/package.mk
 
 define Package/capagent
@@ -50,6 +54,13 @@ define Package/capagent/install
 	$(INSTALL_BIN) ./files/capagent.init $(1)/etc/init.d/capagent
 	$(INSTALL_DIR) $(1)/etc/cap
 	$(INSTALL_CONF) ./files/capagent.conf $(1)/etc/cap/capagent.conf
+	# Multi-identity: opt-in launcher and the example identity map.  The init
+	# script uses /etc/cap/identities.conf automatically when it exists.
+	$(INSTALL_DIR) $(1)/usr/sbin
+	if [ -f "$(MULTI_CAP)" ]; then \
+		$(INSTALL_BIN) "$(MULTI_CAP)" $(1)/usr/sbin/multi-cap.sh; \
+	fi
+	$(INSTALL_CONF) ./files/identities.conf.example $(1)/etc/cap/identities.conf.example
 	# first-boot zone for the on-cap VLAN bridges (br-vlan*), and the DHCP
 	# option 138 request that makes MANAGER=auto work on a clean image
 	$(INSTALL_DIR) $(1)/etc/uci-defaults

@@ -66,7 +66,7 @@ RouterOS 7.25.1 with a real station; "lab" = CHR 7.25.1 + mac80211-hwsim.
 | `tx-power` (configuration) | 🟡 applied, driver pins it | the manager sends it in `0x500b` TLV `0x61` (`0x500b: phy0 tx-power=17 dBm`); the agent fixes the radio power through `NL80211_CMD_SET_WIPHY` (`ret=0`). The reference mt76 driver keeps reporting 20 dBm for every value (`iw dev … set txpower fixed 1200` behaves identically), so the setting is a no-op on this hardware but the path is implemented and verified |
 | `dtim-period` (configuration) | ✅ live | `0x6016` TLV `0x24` (u32) is written as `dtim_period=` in that BSS only (`dtim_period=4` for the master, 1 for the others); hostapd starts with 8/8 SSIDs |
 | multi-passphrase / PPSK | ❌ not available | RouterOS 7.25.1 exposes only a `multi-passphrase-group` boolean (no passphrase-group object, `/interface wifi security multi-passphrase` does not exist), so there is nothing to provision. Even with it, the manager is the RSN authenticator, so per-station passphrases are inherently manager-side and need no CAP change |
-| `traffic-processing=on-cap` | ✅ **live, ping 0% loss** (master BSS, or a per-SSID CAP identity — F63) | the supported mode: the manager is the authenticator, the CAP forwards. The agent creates `br-vlan<N>` on demand; the image ships the `br-vlan*` zone. A station on a **slave** VAP does not reach the 4-way on this manager yet (F58–F60) |
+| `traffic-processing=on-cap` | ✅ **live, ping 0% loss** (master BSS, or a per-SSID CAP identity — F63/F74) | the supported mode: the manager is the authenticator, the CAP forwards. The agent creates `br-vlan<N>` on demand; the image ships the `br-vlan*` zone. A station on a **slave** VAP does not reach the 4-way on this manager (F58–F60); with multi-identity every SSID is a master (8/8 authenticated) |
 | `vlan-id` | ✅ live | per-VAP `bridge=` to `br-vlan<N>` |
 | `traffic-processing=on-capsman` (`a2=1`) | 🟡 lab | plaintext datachan framing works; no live traffic test |
 | `traffic-processing=on-capsman-secure` (`a2=2`) | ✅ **live** | the manager sends the datachan create (`a2=2`, 32-byte key, cookie); the CAP installs it, listens on UDP 5248 and a station on that VAP gets `authorized: yes` + ping 0% with the traffic carried as encrypted datachan frames (F72) |
@@ -79,9 +79,9 @@ RouterOS 7.25.1 with a real station; "lab" = CHR 7.25.1 + mac80211-hwsim.
 
 | Setting | Status | Evidence / why |
 |---|---|---|
-| `action=create-dynamic-enabled` | ✅ live | 8 VAPs from two rules |
-| `master-configuration` + `slave-configurations` | ✅ live | 1 master + 3 virtuals per radio |
-| `radio-mac` | ✅ live | matched against NEWPHY |
+| `action=create-dynamic-enabled` | ✅ live | 8 VAPs from two rules, or 8 masters from eight fake-radio rules (multi-identity) |
+| `master-configuration` + `slave-configurations` | ✅ live | 1 master + 3 virtuals per radio; virtuals broadcast but do not authenticate (F58–F60). Multi-identity: 8 masters, all authenticate |
+| `radio-mac` | ✅ live | matched against NEWPHY; on 5 GHz each fake radio must use a distinct first byte (F74) |
 | `require-peer-certificate=no` | ✅ live | zero-touch enrolment (`0x76` → `0x77`/`0x78`) |
 | `enabled=yes`, `generated-ca-certificate` | ✅ live | the CAP pins the CA when `--ca-cert` is present |
 | Manager discovery via DHCP option 138 | ❌ not consumed | OpenWrt's `udhcpc` does not export it; the address is baked |

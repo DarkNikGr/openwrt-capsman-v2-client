@@ -18,6 +18,10 @@ manager                              host
 │ rule radio=…A1 master=…  │◀──TLS──▶│ capagent tag=b  (OpenWrt-CAPB)│ phy0
 │ rule radio=…A2 master=…  │◀──TLS──▶│ capagent tag=c  (OpenWrt-CAPC)│ phy0
 │ rule radio=…A3 master=…  │◀──TLS──▶│ capagent tag=d  (OpenWrt-CAPD)│ phy0
+│ rule radio=…90 master=…  │◀──TLS──▶│ capagent tag=e  (OpenWrt-CAPE)│ phy1
+│ rule radio=…90 master=…  │◀──TLS──▶│ capagent tag=f  (OpenWrt-CAPF)│ phy1
+│ rule radio=…90 master=…  │◀──TLS──▶│ capagent tag=g  (OpenWrt-CAPG)│ phy1
+│ rule radio=…90 master=…  │◀──TLS──▶│ capagent tag=h  (OpenWrt-CAPH)│ phy1
 └──────────────────────────┘         └───────────────────────────────┘
 ```
 
@@ -33,6 +37,7 @@ One provisioning rule per identity, no slaves:
 
 ```
 /interface wifi provisioning
+# 2.4 GHz identities (all have their own fake radio)
 add radio-mac=02:D1:27:1B:2D:A0 action=create-dynamic-enabled \
     master-configuration=cfg slave-configurations=""
 add radio-mac=02:D1:27:1B:2D:A1 action=create-dynamic-enabled \
@@ -40,51 +45,91 @@ add radio-mac=02:D1:27:1B:2D:A1 action=create-dynamic-enabled \
 add radio-mac=02:D1:27:1B:2D:A2 action=create-dynamic-enabled \
     master-configuration=cfg-iot slave-configurations=""
 add radio-mac=02:D1:27:1B:2D:A3 action=create-dynamic-enabled \
-    master-configuration=cfg-hidden slave-configurations=""
+    master-configuration=cfg-hidden-sec slave-configurations=""
+# 5 GHz identities (fake radios; the first byte must be unique per phy)
+add radio-mac=2A:D1:27:1B:2D:90 action=create-dynamic-enabled \
+    master-configuration=cfg5 slave-configurations=""
+add radio-mac=2E:D1:27:1B:2D:90 action=create-dynamic-enabled \
+    master-configuration=cfg5-guest slave-configurations=""
+add radio-mac=22:D1:27:1B:2D:90 action=create-dynamic-enabled \
+    master-configuration=cfg5-iot slave-configurations=""
+add radio-mac=26:D1:27:1B:2D:90 action=create-dynamic-enabled \
+    master-configuration=cfg5-hidden-sec slave-configurations=""
 ```
 
-The radio MACs are arbitrary: they only have to be unique and match the rule.
-The CAP's instance advertises them via NEWPHY.
+The radio MACs are arbitrary: they only have to be unique, match the rule and
+follow the per-phy first-byte rule below. The CAP's instances advertise them
+via NEWPHY (one identity per radio).
 
 ## Host configuration
 
-`/etc/cap/identities.conf` — **one radio per instance**, five instances for the
-maximum working topology (four 2.4 GHz SSIDs + one 5 GHz master):
+`/etc/cap/identities.conf` — **eight instances**, four per phy (a shipped
+example is `/etc/cap/identities.conf.example`):
 
 ```
 # tag identity      radio-mac[,radio-mac...]
-a     OpenWrt-CAPA  02:D1:27:1B:2D:A0          # 2.4  cap-test
-b     OpenWrt-CAPB  02:D1:27:1B:2D:A1          # 2.4  cap-guest
-c     OpenWrt-CAPC  02:D1:27:1B:2D:A2          # 2.4  cap-iot
-d     OpenWrt-CAPD  02:D1:27:1B:2D:A3          # 2.4  cap-hidden
-e     OpenWrt-CAPE  02:D1:27:1B:2D:B0,02:D1:27:1B:2D:A4   # 5 GHz cap-test
+a     OpenWrt-CAPA  02:D1:27:1B:2D:A0                       # 2.4  cap-test
+b     OpenWrt-CAPB  02:D1:27:1B:2D:A1                       # 2.4  cap-guest
+c     OpenWrt-CAPC  02:D1:27:1B:2D:A2                       # 2.4  cap-iot
+d     OpenWrt-CAPD  02:D1:27:1B:2D:A3                       # 2.4  cap-hidden
+e     OpenWrt-CAPE  02:D1:27:1B:2D:B0,2A:D1:27:1B:2D:90      # 5 GHz cap-test
+f     OpenWrt-CAPF  02:D1:27:1B:2D:B1,2E:D1:27:1B:2D:90      # 5 GHz cap-guest
+g     OpenWrt-CAPG  02:D1:27:1B:2D:B2,22:D1:27:1B:2D:90      # 5 GHz cap-iot
+h     OpenWrt-CAPH  02:D1:27:1B:2D:B3,26:D1:27:1B:2D:90      # 5 GHz cap-hidden
 ```
 
-Instance `e` advertises two radios so that the *second* (5 GHz) wiphy is used:
-radio 0 (`B0`) has no provisioning rule and stays idle, radio 1 (`A4`) is the
-5 GHz master. Do **not** give one instance two radios that both need
-provisioning when several instances share the manager: the manager provisioned
-only one of the two (the other stayed disabled) in testing.
+Instances `e`–`h` advertise two radios so that the *second* (5 GHz) wiphy is
+used: radio 0 (`B0`…`B3`) has no provisioning rule and stays idle, radio 1
+(`2A`/`2E`/`22`/`26`) is the 5 GHz master. Do **not** give one instance two
+radios that both need provisioning when several instances share the manager:
+the manager provisioned only one of the two (the other stayed disabled) in
+testing.
 
-then `scripts/multi-cap.sh start` (and `stop` / `status`). Each identity
-enrols its certificate on first start.
+The init script uses this file automatically (one procd instance per line).
+`scripts/multi-cap.sh start` / `stop` / `status` is the manual launcher for
+debugging; it uses the same file. Each identity enrols its certificate on
+first start.
+
+### First-byte rule on 5 GHz (F74)
+
+The mt76x2 driver derives the **BSS index from the first byte** of the
+interface address. Two AP vifs whose first byte is equal collide: the second
+`ip link set … up` fails with `EBUSY` (or the BSS never starts). Every 5 GHz
+identity therefore needs a **different, locally-administered unicast** first
+byte: `02 06 0A 0E 12 16 1A 1E 22 26 2A 2E 32 36 3A 3E`.
+
+* `2A/2E/22/26` → all four 5 GHz BSSes come up (driver-level test and live).
+* `02` for all four → only the first comes up; the rest fail `EBUSY`.
+* The 2.4 GHz phy (mt7603e) does not have this constraint; `02:…:A0..A3`
+  coexist fine.
 
 ## What was proven live
 
 Xiaomi Mi Router 4A Gigabit (ramfs/mt7621), RB1100AHx4 / RouterOS 7.25.1,
-four identities on the **2.4 GHz** phy, all at 2437 MHz, one SSID each:
+**eight identities, four per phy**, all SSIDs from the manager, one SSID each.
+Station tests used `scripts/station-test.sh` with explicit `BSSID=` pinning.
 
-| SSID | identity | netdev | station |
-|---|---|---|---|
-| cap-test | A | `phy0-aap0` | `authorized: yes`, ping 3/3, 0% |
-| cap-guest | B | `phy0-bap0` | `authorized: yes`, ping 3/3, 0% |
-| cap-iot | C | `phy0-cap0` | `authorized: yes`, ping 3/3, 0% |
-| cap-hidden | D (hidden) | `phy0-dap0` | `authorized: yes`, ping 3/3, 0% |
-| cap-test (5 GHz) | E | `phy1-eap0` | `authorized: yes`, ping 3/3, 0% |
+2.4 GHz (phy0, 2437 MHz, mt7603e):
 
-The five-instance run was executed with explicit BSSID pinning
-(`scripts/station-test.sh` `BSSID=`): `02:d1:27:1b:2d:a0` (2.4 cap-test),
-`a1`, `a2`, `a3` (hidden) and `a4` (5 GHz cap-test).
+| SSID | identity | netdev | BSSID | VLAN | station |
+|---|---|---|---|---|---|
+| cap-test | A | `phy0-aap0` | `02:…:a0` | 30 | `authorized: yes`, ping 3/3, 0% |
+| cap-guest | B | `phy0-bap0` | `02:…:a1` | 10 | `authorized: yes`, ping 3/3, 0% |
+| cap-iot | C | `phy0-cap0` | `02:…:a2` | 20 | `authorized: yes`, ping 3/3, 0% |
+| cap-hidden | D (hidden) | `phy0-dap0` | `02:…:a3` | 20 | `authorized: yes`, ping 3/3, 0% |
+
+5 GHz (phy1, 5180 MHz, mt76x2e):
+
+| SSID | identity | netdev | BSSID | VLAN | station |
+|---|---|---|---|---|---|
+| cap-test | E | `phy1-eap0` | `2a:…:90` | 30 | `authorized: yes`, ping 3/3, 0% |
+| cap-guest | F | `phy1-fap0` | `2e:…:90` | 10 | `authorized: yes`, ping 3/3, 0% |
+| cap-iot | G | `phy1-gap0` | `22:…:90` | 20 | `authorized: yes`, ping 3/3, 0% |
+| cap-hidden | H (hidden) | `phy1-hap0` | `26:…:90` | 20 | `authorized: yes`, ping 3/3, 0% |
+
+The manager's registration table showed the same four 2.4 GHz stations with
+`band=2ghz-g vlan-id=30/10/20/20`. The station profile used one 5 GHz station
+(Intel 3168), so the 5 GHz runs were sequential.
 
 Each BSS is bridged to its VLAN bridge after hostapd brings it up, because a
 bridged AP interface cannot be opened while another AP is running on the same
@@ -92,14 +137,12 @@ phy (`bridge=` is skipped for tagged instances).
 
 ## Limits
 
-* **5 GHz: one hostapd set, and its secondaries must use driver MACs.**
-  A merged config with four `bss=` sections and the working single-instance
-  globals brings up four BSSes when the secondaries keep the driver's derived
-  addresses; with the manager's BSSIDs the second secondary fails at bring-up
-  (`Resource busy`), and a second hostapd process on the same phy always fails.
-  Because the manager checks the BSSID and the PTK is derived over it, a
-  secondary cannot authenticate with the manager's VAP BSSID. **Maximum
-  working set: four 2.4 GHz identities + one 5 GHz master** (F66).
-* The 2.4 GHz phy carries four AP vifs (the mt76 limit).
-* Do not run the regular single-identity capagent on the same phy: the vif
-  budget is shared.
+* **The single-identity topology still broadcasts 8 SSIDs (4+4) but only the
+  masters authenticate** on this manager (virtual VAPs never get the 4-way,
+  F58–F60). Use multi-identity when every SSID must authenticate.
+* Multi-identity needs one provisioning rule per fake radio; on a manager
+  without those rules the identities get no configuration. A fresh
+  zero-touch CAP should therefore keep the single-identity default (no
+  `/etc/cap/identities.conf`).
+* Four AP vifs per phy is the mt76 limit; do not run the regular
+  single-identity capagent at the same time (the vif budget is shared).

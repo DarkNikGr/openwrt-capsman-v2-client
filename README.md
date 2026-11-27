@@ -1,6 +1,6 @@
 # MikroTik CAPsMAN v2 client for OpenWrt
 
-**v0.5.9** — see [`docs/RELEASE-0.5.9.md`](docs/RELEASE-0.5.9.md).
+**v0.6.0** — see [`docs/RELEASE-0.6.0.md`](docs/RELEASE-0.6.0.md).
 
 Turn a non-MikroTik OpenWrt AP into a **CAP of the official RouterOS
 CAPsMAN v2 manager**. The CAP side is native C: no extra service on the
@@ -24,6 +24,7 @@ OpenWrt 24.10, MediaTek MT7603E + MT7612E), managed by an
 > |---|---|
 > | Manager provisions every VAP | `0x500b` + `0x6016` for 8 VAPs, `0xd00b` accepted |
 > | **8/8 SSIDs** | `ssids=8`, 2 × `AP-ENABLED` radios with 4 `bss=` each |
+> | **All 8 SSIDs authenticate** | multi-identity: 4 identities per phy, each SSID a master (F74), `authorized: yes`, ping 0% on all eight |
 > | **No PSK on the CAP** | `external_rsn_auth=1`, no `wpa_passphrase`/`wpa_psk_file` |
 > | **Manager is the authenticator** | EAPOL `0x201c` (M1) → `0x201b` (M2) → `0x201f` PTK |
 > | **Station authorized** | `authorized: yes`, `authenticated: yes`, -38 dBm |
@@ -35,24 +36,25 @@ OpenWrt 24.10, MediaTek MT7603E + MT7612E), managed by an
 > secondaries are handed to hostapd; hostapd relays the raw Auth/AssocReq and
 > the EAPOL exchange, and never holds a key.
 >
-> The patched `wpad` (patches `999`/`9997`/`9998`/`9999`/`9999a`–`9999e`) is
+> The patched `wpad` (patches `999`/`9997`/`9998`/`9999`/`9999a`–`9999g`) is
 > built by [`scripts/build-wpad-9999a.sh`](scripts/build-wpad-9999a.sh); the
 > zero-touch image by [`scripts/build-image.sh`](scripts/build-image.sh).
 >
 > ### What is still open (not blocking the above)
 >
-> * **`/etc/init.d/capagent restart` can come back with 6/8 SSIDs.** procd's
->   stop path also takes the hostapd children down, which deletes the
->   hostapd-owned secondary netdevs; a reboot or a factory reset always
->   restores 8/8. Tracked as F45 in
->   [`docs/OPEN-PROBLEMS.md`](docs/OPEN-PROBLEMS.md).
+> * **A station on a virtual (slave) VAP never reaches the 4-way** on this
+>   manager (F58–F60); only a master BSS authenticates. Multi-identity (one
+>   CAP identity per SSID, `/etc/cap/identities.conf`) makes every SSID a
+>   master and is proven 8/8 — see
+>   [`docs/MULTI-IDENTITY.md`](docs/MULTI-IDENTITY.md). The single-identity
+>   default still broadcasts all 8 SSIDs but only the masters authenticate.
 > * **`MANAGER=auto` does not discover this manager.** OpenWrt's `udhcpc` does
 >   not export RouterOS DHCP option 138 to the agent, so the manager address is
 >   baked into `/etc/cap/capagent.conf` at image build time
 >   (`scripts/build-image.sh MANAGER=10.0.0.1`).
-> * **The secure c2 datachan (`a2=2`)** is implemented and KAT-tested but has
->   never run live: the manager-side key gate on a radio-less controller is
->   still unexplained. The TLS EAPOL leg used on the RB1100 does not need it.
+> * **802.11k/v steering** is implemented on the CAP side; the bench station
+>   firmware drops the RM IE and the manager sends no RRM request, so the live
+>   proof is blocked by the station (F71/F67).
 > * There is **no configuration tree** in CAPsMAN v2: the manager keeps the
 >   passphrase and is the authenticator, so it never sends the PSK to the CAP.
 >

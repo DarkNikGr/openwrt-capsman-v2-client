@@ -1,0 +1,45 @@
+# /etc/cap/identities.conf — one CAP identity per SSID ("multi-identity").
+#
+# Copy this file to /etc/cap/identities.conf and restart capagent
+# (`/etc/init.d/capagent restart`).  Without this file capagent runs the
+# normal single-identity topology and takes every BSS the manager provisions.
+#
+# Format, one identity per line (blank lines and # comments are ignored):
+#
+#   tag   identity        radio-mac[,radio-mac...]
+#
+# Every identity gets its own certificate (/etc/cap/id-<tag>.pem and .key,
+# enrolled on first start), ext-auth directory (/var/run/hostapd<tag>), VAP
+# journal (/var/run/caps<tag>.state) and hostapd file suffix
+# (CAPAGENT_RUN_TAG=<tag>).
+#
+# The manager needs one provisioning rule per radio MAC, each with
+# action=create-dynamic-enabled, master-configuration=<that SSID> and no
+# slave-configurations; see docs/MULTI-IDENTITY.md.
+#
+# MAC rules
+# ---------
+# * 2.4 GHz (mt7603e): any unique locally-administered unicast MAC works;
+#   sharing the first byte is fine.
+# * 5 GHz (mt76x2e): the driver derives the BSS index from the first byte of
+#   the address.  Every identity that shares the phy MUST use a different
+#   first byte, locally administered and unicast: 02, 06, 0A, 0E, 12, 16,
+#   1A, 1E, 22, 26, 2A, 2E, ..., 3A, 3E.  Two identities with the same first
+#   byte (02 in an early build) leave the second BSS in EBUSY.
+# * An identity that drives the second phy advertises two radios: an unused
+#   placeholder (radio 0, no provisioning rule) and the 5 GHz MAC (radio 1).
+#   Do not use a MAC that another rule claims as a placeholder.
+#
+# Proven layout: four 2.4 GHz identities on phy0 and four 5 GHz identities on
+# phy1, all as masters of their own fake radio.  Change the SSIDs/security on
+# the manager; the tags and MACs here only have to match the rules.
+
+# tag  identity       radio-mac(s)
+a      OpenWrt-CAPA   02:D1:27:1B:2D:A0                    # 2.4 GHz
+b      OpenWrt-CAPB   02:D1:27:1B:2D:A1                    # 2.4 GHz
+c      OpenWrt-CAPC   02:D1:27:1B:2D:A2                    # 2.4 GHz
+d      OpenWrt-CAPD   02:D1:27:1B:2D:A3                    # 2.4 GHz
+e      OpenWrt-CAPE   02:D1:27:1B:2D:B0,2A:D1:27:1B:2D:90   # 5 GHz
+f      OpenWrt-CAPF   02:D1:27:1B:2D:B1,2E:D1:27:1B:2D:90   # 5 GHz
+g      OpenWrt-CAPG   02:D1:27:1B:2D:B2,22:D1:27:1B:2D:90   # 5 GHz
+h      OpenWrt-CAPH   02:D1:27:1B:2D:B3,26:D1:27:1B:2D:90   # 5 GHz

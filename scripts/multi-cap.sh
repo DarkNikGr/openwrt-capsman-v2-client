@@ -1,7 +1,7 @@
 #!/bin/sh
 # Start one capagent per SSID ("multi-identity" CAP), so that every SSID is the
 # master of its own CAP identity and the manager's virtual-VAP routing is not
-# needed (see docs/OPEN-PROBLEMS.md F63/F64).
+# needed (see docs/OPEN-PROBLEMS.md F58-F66, docs/MULTI-IDENTITY.md).
 #
 # Usage:
 #   multi-cap.sh start   # launch every identity in /etc/cap/identities.conf
@@ -10,15 +10,23 @@
 #
 # /etc/cap/identities.conf, one identity per line:
 #   tag identity radio-mac[,radio-mac...]
-# Maximum working topology (proven): one radio per instance, four 2.4 GHz
-# identities plus one 5 GHz master:
-#   a OpenWrt-CAPA 02:D1:27:1B:2D:A0
-#   b OpenWrt-CAPB 02:D1:27:1B:2D:A1
-#   c OpenWrt-CAPC 02:D1:27:1B:2D:A2
-#   d OpenWrt-CAPD 02:D1:27:1B:2D:A3
-#   e OpenWrt-CAPE 02:D1:27:1B:2D:B0,02:D1:27:1B:2D:A4   # 5 GHz (radio 1)
-# A second radio in an instance is only used if its MAC has a provisioning
-# rule; leave an unused MAC (like B0) in radio 0 to reach the 5 GHz wiphy.
+# Maximum working topology (proven live): eight identities, four on each phy:
+#   a OpenWrt-CAPA 02:D1:27:1B:2D:A0                      # 2.4 GHz
+#   b OpenWrt-CAPB 02:D1:27:1B:2D:A1                      # 2.4 GHz
+#   c OpenWrt-CAPC 02:D1:27:1B:2D:A2                      # 2.4 GHz
+#   d OpenWrt-CAPD 02:D1:27:1B:2D:A3                      # 2.4 GHz
+#   e OpenWrt-CAPE 02:D1:27:1B:2D:B0,2A:D1:27:1B:2D:90     # 5 GHz (radio 1)
+#   f OpenWrt-CAPF 02:D1:27:1B:2D:B1,2E:D1:27:1B:2D:90     # 5 GHz (radio 1)
+#   g OpenWrt-CAPG 02:D1:27:1B:2D:B2,22:D1:27:1B:2D:90     # 5 GHz (radio 1)
+#   h OpenWrt-CAPH 02:D1:27:1B:2D:B3,26:D1:27:1B:2D:90     # 5 GHz (radio 1)
+#
+# MAC rules (F74): on the 5 GHz phy (mt76x2) the driver derives the BSS index
+# from the first byte, so every identity's 5 GHz MAC must have a DIFFERENT
+# first byte (02/06/0A/.../2A/2E/.../3A/3E, locally administered, unicast).
+# Same first byte -> the second BSS fails with EBUSY.  The 2.4 GHz phy
+# (mt7603) does not care.  A second radio in an instance is only used if its
+# MAC has a provisioning rule; leave an unused MAC (like B0) in radio 0 to
+# reach the 5 GHz wiphy.
 #
 # Each identity gets its own certificate (/etc/cap/id-<tag>.pem), journal
 # (/var/run/caps<tag>.state), ext-auth directory (/var/run/hostapd<tag>) and
@@ -26,9 +34,10 @@
 #
 # The manager needs one provisioning rule per radio MAC, each with
 # action=create-dynamic-enabled, master-configuration=<that SSID> and no
-# slaves.  A single radio cannot carry several independent hostapd instances on
-# 5 GHz (the mt76x2 driver refuses a second AP vif), so a 5 GHz identity can
-# only be added when its phy is free (F64).
+# slaves.
+#
+# The init script does the same thing under procd (one instance per identity)
+# when /etc/cap/identities.conf exists; this script is the manual launcher.
 set -u
 
 CONF=${CONF:-/etc/cap/identities.conf}
@@ -78,8 +87,9 @@ esac
 [ -f "$CONF" ] || { say "no $CONF"; exit 1; }
 [ -x "$BIN" ] || { say "no $BIN"; exit 1; }
 
-# serialise starts: several hostapd processes on one phy must not race
-DELAY=${DELAY:-15}
+# serialise starts: several hostapd processes on one phy must not race and
+# the first start enrols a certificate (which takes a few seconds)
+DELAY=${DELAY:-20}
 n=0
 while read -r tag identity macs rest; do
 	case "$tag" in ''|\#*) continue ;; esac

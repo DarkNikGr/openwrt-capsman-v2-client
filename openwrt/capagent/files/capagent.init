@@ -5,6 +5,17 @@
 # agent cannot join before the WAN has a lease and cannot create a BSS before
 # hostapd's control socket exists.  Discovery/session setup is repeated on
 # every retry inside the agent, so an early boot failure is not permanent.
+#
+# Two topologies are supported:
+#
+#   single identity (default)  one capagent advertises every radio; the
+#                              manager's master + slave (virtual VAP) layout
+#                              is used.  This is what a fresh manager needs.
+#   multi identity             /etc/cap/identities.conf exists: one capagent
+#                              per SSID ("multi-identity", the way every SSID
+#                              becomes a master and authenticates on this
+#                              manager).  Each identity is its own procd
+#                              instance with its own tag/certificate/state.
 USE_PROCD=1
 START=95
 STOP=10
@@ -12,66 +23,65 @@ STOP=10
 PROG=/usr/sbin/capagent
 PREFLIGHT=/usr/sbin/capagent-preflight
 CONF=/etc/cap/capagent.conf
+MULTI_CONF=/etc/cap/identities.conf
 
-start_service() {
-	[ -x "$PROG" ] || { logger -t capagent "binary $PROG missing"; return 1; }
-	[ -f "$CONF" ] && . "$CONF"
-
-	# Optional recovery address; use "replace" so repeated starts are
-	# idempotent.
-	[ -n "${CAP_ADDR:-}" ] && \
-		ip addr replace "${CAP_ADDR}" dev "${CAP_DEV:-br-lan}" 2>/dev/null
-
-	# Build the command line from the optional /interface wifi cap settings.
-	set -- "$PROG" \
+# Options shared by every instance.  Values from capagent.conf are plain
+# tokens (no spaces); installed paths never contain spaces.
+common_args() {
+	printf '%s\n' \
 		--manager "${MANAGER:-auto}" \
 		--discovery-interfaces "${DISCOVERY_INTERFACES:-br-lan}" \
-		--port "${PORT:-5246}" \
-		--cert "${CERT:-/etc/cap/client.pem}" \
-		--key "${KEY:-/etc/cap/client.key}" \
-		--macs "${MACS:-auto}"
-	[ -f "${CA_CERT:-/etc/cap/ca.pem}" ] && set -- "$@" --ca-cert "${CA_CERT:-/etc/cap/ca.pem}"
-	[ "${NO_ENROLL:-no}" = yes ] && set -- "$@" --no-enroll
-	[ -n "${CERT_CN:-}" ] && set -- "$@" --cert-cn "${CERT_CN}"
-	[ "${DONT_VERIFY_CERTIFICATE:-no}" = yes ] && set -- "$@" --dont-verify-certificate
-	[ -n "${CAPS_MAN_CERT_CN:-}" ] && set -- "$@" --caps-man-certificate-common-names "${CAPS_MAN_CERT_CN}"
-	[ "${LOCK_TO_CAPS_MAN:-no}" = yes ] && set -- "$@" --lock-to-caps-man
-	[ -n "${SLAVES_DATAPATH:-}" ] && set -- "$@" --slaves-datapath "${SLAVES_DATAPATH}"
-	[ "${SLAVES_STATIC:-no}" = yes ] && set -- "$@" --slaves-static
-	[ "${APPLY:-no}" = yes ] && set -- "$@" --apply
-	[ "${DATACHAN:-no}" = yes ] && set -- "$@" --datachan
-	[ -n "${IDENTITY:-}" ] && set -- "$@" --identity "${IDENTITY}"
-	[ -n "${SERIAL:-}" ] && set -- "$@" --serial "${SERIAL}"
-	[ -n "${A1:-}" ] && set -- "$@" --a1 "${A1}"
-	[ -n "${E70:-}" ] && set -- "$@" --e70 "${E70}"
-	[ -n "${EAPOL_LEG:-}" ] && set -- "$@" --eapol-leg "${EAPOL_LEG}"
+		--port "${PORT:-5246}"
+	[ -f "${CA_CERT:-/etc/cap/ca.pem}" ] &&
+		printf '%s\n' --ca-cert "${CA_CERT:-/etc/cap/ca.pem}"
+	[ -n "${CERT_CN:-}" ] && printf '%s\n' --cert-cn "${CERT_CN}"
+	[ "${DONT_VERIFY_CERTIFICATE:-no}" = yes ] &&
+		printf '%s\n' --dont-verify-certificate
+	[ -n "${CAPS_MAN_CERT_CN:-}" ] &&
+		printf '%s\n' --caps-man-certificate-common-names "${CAPS_MAN_CERT_CN}"
+	[ "${LOCK_TO_CAPS_MAN:-no}" = yes ] && printf '%s\n' --lock-to-caps-man
+	[ -n "${SLAVES_DATAPATH:-}" ] &&
+		printf '%s\n' --slaves-datapath "${SLAVES_DATAPATH}"
+	[ "${SLAVES_STATIC:-no}" = yes ] && printf '%s\n' --slaves-static
+	[ "${APPLY:-no}" = yes ] && printf '%s\n' --apply
+	[ "${DATACHAN:-no}" = yes ] && printf '%s\n' --datachan
+	[ -n "${SERIAL:-}" ] && printf '%s\n' --serial "${SERIAL}"
+	[ -n "${A1:-}" ] && printf '%s\n' --a1 "${A1}"
+	[ -n "${E70:-}" ] && printf '%s\n' --e70 "${E70}"
+	[ -n "${EAPOL_LEG:-}" ] && printf '%s\n' --eapol-leg "${EAPOL_LEG}"
 
 	# Split-MAC / hostapd external-RSN (W8) and Auth/Assoc relay (W6).
-	[ "${MGMT_RELAY:-no}" = yes ] && set -- "$@" --mgmt-relay
-	[ -n "${MGMT_SOURCE:-}" ] && set -- "$@" --mgmt-source "${MGMT_SOURCE}"
-	[ -n "${EXT_AUTH_DIR:-}" ] && set -- "$@" --ext-auth-dir "${EXT_AUTH_DIR}"
-	[ -n "${EXT_CTRL_DIR:-}" ] && set -- "$@" --ext-ctrl-dir "${EXT_CTRL_DIR}"
-	[ -n "${STATE_FILE:-}" ] && set -- "$@" --state-file "${STATE_FILE}"
-	[ -n "${FOURWAY_TIMEOUT:-}" ] && set -- "$@" --fourway-timeout "${FOURWAY_TIMEOUT}"
-	[ -n "${M1_RETRY:-}" ] && set -- "$@" --m1-retry "${M1_RETRY}"
+	[ "${MGMT_RELAY:-no}" = yes ] && printf '%s\n' --mgmt-relay
+	[ -n "${MGMT_SOURCE:-}" ] && printf '%s\n' --mgmt-source "${MGMT_SOURCE}"
+	[ -n "${EXT_CTRL_DIR:-}" ] && printf '%s\n' --ext-ctrl-dir "${EXT_CTRL_DIR}"
+	[ -n "${FOURWAY_TIMEOUT:-}" ] && printf '%s\n' --fourway-timeout "${FOURWAY_TIMEOUT}"
+	[ -n "${M1_RETRY:-}" ] && printf '%s\n' --m1-retry "${M1_RETRY}"
 	# Ownership policy (W33 API + W34 ubus model).  WIRELESS_OWNER=auto is
 	# production: ubus decides per netdev and the manager VAP yields to
 	# netifd's names.  WIRELESS_CONFIG is for offline diagnostics.
-	[ -n "${WIRELESS_CONFIG:-}" ] && set -- "$@" --wireless-config "${WIRELESS_CONFIG}"
-	[ -n "${WIRELESS_OWNER:-}" ] && set -- "$@" --wireless-owner "${WIRELESS_OWNER}"
-	[ -n "${VAP_STATE:-}" ] && set -- "$@" --vap-state "${VAP_STATE}"
-	[ "${VAP_TEARDOWN:-yes}" = no ] && set -- "$@" --no-vap-teardown
-	[ "${DATAPATH_BRIDGE:-no}" = yes ] && set -- "$@" --datapath-bridge
-	[ -n "${BCAST:-}" ] && set -- "$@" --bcast "${BCAST}"
-	[ -n "${VAP_MTU:-}" ] && set -- "$@" --vap-mtu "${VAP_MTU}"
+	[ -n "${WIRELESS_CONFIG:-}" ] && printf '%s\n' --wireless-config "${WIRELESS_CONFIG}"
+	[ -n "${WIRELESS_OWNER:-}" ] && printf '%s\n' --wireless-owner "${WIRELESS_OWNER}"
+	[ "${VAP_TEARDOWN:-yes}" = no ] && printf '%s\n' --no-vap-teardown
+	[ "${DATAPATH_BRIDGE:-no}" = yes ] && printf '%s\n' --datapath-bridge
+	[ -n "${BCAST:-}" ] && printf '%s\n' --bcast "${BCAST}"
+	[ -n "${VAP_MTU:-}" ] && printf '%s\n' --vap-mtu "${VAP_MTU}"
 	# CAPsMAN v2 does not deliver a regulatory country; hostapd needs one
 	# for 5 GHz AP channels (especially in a zero-local-config boot).
-	[ -n "${COUNTRY:-}" ] && set -- "$@" --country "${COUNTRY}"
+	[ -n "${COUNTRY:-}" ] && printf '%s\n' --country "${COUNTRY}"
 	# W36: in-CAP MLME (no hostapd) for one manager-provisioned VAP.
-	[ "${MLME:-no}" = yes ] && set -- "$@" --mlme
-	[ -n "${MLME_PORT:-}" ] && set -- "$@" --mlme-port "${MLME_PORT}"
+	[ "${MLME:-no}" = yes ] && printf '%s\n' --mlme
+	[ -n "${MLME_PORT:-}" ] && printf '%s\n' --mlme-port "${MLME_PORT}"
+}
 
-	procd_open_instance
+# start_instance <procd-instance-name> <command...>
+start_instance() {
+	local instance=$1
+	shift
+	if [ -n "$instance" ]; then
+		procd_open_instance "$instance"
+	else
+		procd_open_instance
+	fi
 	# The preflight is a thin wait-and-exec wrapper.  It stays in the
 	# foreground, so procd still supervises the real capagent PID.
 	if [ -x "$PREFLIGHT" ]; then
@@ -85,6 +95,74 @@ start_service() {
 	procd_set_param stdout 1
 	procd_set_param stderr 1
 	procd_close_instance
+}
+
+# One capagent per line of /etc/cap/identities.conf:
+#
+#   tag identity radio-mac[,radio-mac...]
+#
+# Every identity gets its own certificate, ext-auth directory, hostapd
+# config/pid/log suffix (CAPAGENT_RUN_TAG) and VAP journal.  Starts are
+# staggered by procd ordering only in the sense that all instances are opened
+# at once; capagent retries discovery until the manager answers, so a
+# certificate enrolment in one identity does not block the others.
+start_multi() {
+	local tag identity macs rest dir
+	while read -r tag identity macs rest; do
+		case "$tag" in ''|\#*) continue ;; esac
+		[ -n "$identity" ] && [ -n "$macs" ] || continue
+		dir=/var/run/hostapd$tag
+		mkdir -p "$dir"
+		set -- "$PROG" $(common_args) \
+			--cert "/etc/cap/id-$tag.pem" \
+			--key "/etc/cap/id-$tag.key" \
+			--macs "$macs" \
+			--identity "$identity" \
+			--ext-auth-dir "$dir" \
+			--vap-state "/var/run/caps$tag.state"
+		procd_open_instance "cap-$tag"
+		if [ -x "$PREFLIGHT" ]; then
+			procd_set_param command "$PREFLIGHT" "$@"
+		else
+			procd_set_param command "$@"
+		fi
+		# CAPAGENT_RUN_TAG names the hostapd config/pid/log files and the
+		# netdevs; it must be inherited by the hostapd child.
+		procd_set_param env CAPAGENT_RUN_TAG="$tag"
+		procd_set_param respawn 3600 5 0
+		procd_set_param term_timeout 10
+		procd_set_param stdout 1
+		procd_set_param stderr 1
+		procd_close_instance
+	done <"$MULTI_CONF"
+}
+
+start_service() {
+	[ -x "$PROG" ] || { logger -t capagent "binary $PROG missing"; return 1; }
+	[ -f "$CONF" ] && . "$CONF"
+
+	# Optional recovery address; use "replace" so repeated starts are
+	# idempotent.
+	[ -n "${CAP_ADDR:-}" ] && \
+		ip addr replace "${CAP_ADDR}" dev "${CAP_DEV:-br-lan}" 2>/dev/null
+
+	if [ -s "$MULTI_CONF" ] &&
+		grep -qE '^[[:space:]]*[^#[:space:]]' "$MULTI_CONF"; then
+		start_multi
+		return
+	fi
+
+	set -- "$PROG" $(common_args) \
+		--cert "${CERT:-/etc/cap/client.pem}" \
+		--key "${KEY:-/etc/cap/client.key}" \
+		--macs "${MACS:-auto}"
+	[ "${NO_ENROLL:-no}" = yes ] && set -- "$@" --no-enroll
+	[ -n "${IDENTITY:-}" ] && set -- "$@" --identity "${IDENTITY}"
+	[ -n "${EXT_AUTH_DIR:-}" ] && set -- "$@" --ext-auth-dir "${EXT_AUTH_DIR}"
+	[ -n "${STATE_FILE:-}" ] && set -- "$@" --state-file "${STATE_FILE}"
+	[ -n "${VAP_STATE:-}" ] && set -- "$@" --vap-state "${VAP_STATE}"
+
+	start_instance "" "$@"
 }
 
 service_triggers() {
