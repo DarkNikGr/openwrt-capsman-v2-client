@@ -269,7 +269,26 @@ static void build_join(uint8_t *b, const struct cfg *c, size_t *out,
     n += put_el(b+n, 0x6f, identity, (uint16_t)strlen(identity));
     n += put_el(b+n, 0x46, c46, sizeof(c46));
     n += put_el(b+n, 0x70, c->e70, 4);
-    n += put_el(b+n, 0xa7, "\x01\x00\x07", 3);
+    /* 0xa7 = the CAP's protocol/capability vector we advertise at join.  The
+     * default is what a genuine CAP sends in our captures; CAPAGENT_A7 lets a
+     * test sweep the value without rebuilding (the secure-datachan probe). */
+    {
+        static uint8_t a7[8];
+        const char *e = getenv("CAPAGENT_A7");
+        size_t al = 3;
+        memcpy(a7, "\x01\x00\x07", 3);
+        if (e && *e) {
+            size_t k = 0;
+            while (e[0] && e[1] && k < sizeof(a7)) {
+                unsigned v;
+                if (sscanf(e, "%2x", &v) != 1) break;
+                a7[k++] = (uint8_t)v;
+                e += 2;
+            }
+            if (k) al = k;
+        }
+        n += put_el(b+n, 0xa7, a7, (uint16_t)al);
+    }
     n += put_el(b+n, 0x71, board, (uint16_t)strlen(board));
     n += put_el(b+n, 0x72, serial, (uint16_t)strlen(serial));
     n += put_el(b+n, 0x73, c73, sizeof(c73));
