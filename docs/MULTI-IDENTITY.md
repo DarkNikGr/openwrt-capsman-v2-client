@@ -48,15 +48,23 @@ The CAP's instance advertises them via NEWPHY.
 
 ## Host configuration
 
-`/etc/cap/identities.conf`:
+`/etc/cap/identities.conf` — **one radio per instance**, five instances for the
+maximum working topology (four 2.4 GHz SSIDs + one 5 GHz master):
 
 ```
 # tag identity      radio-mac[,radio-mac...]
-a     OpenWrt-CAPA  02:D1:27:1B:2D:A0,02:D1:27:1B:2D:A4
-b     OpenWrt-CAPB  02:D1:27:1B:2D:A1,02:D1:27:1B:2D:A5
-c     OpenWrt-CAPC  02:D1:27:1B:2D:A2,02:D1:27:1B:2D:A6
-d     OpenWrt-CAPD  02:D1:27:1B:2D:A3,02:D1:27:1B:2D:A7
+a     OpenWrt-CAPA  02:D1:27:1B:2D:A0          # 2.4  cap-test
+b     OpenWrt-CAPB  02:D1:27:1B:2D:A1          # 2.4  cap-guest
+c     OpenWrt-CAPC  02:D1:27:1B:2D:A2          # 2.4  cap-iot
+d     OpenWrt-CAPD  02:D1:27:1B:2D:A3          # 2.4  cap-hidden
+e     OpenWrt-CAPE  02:D1:27:1B:2D:B0,02:D1:27:1B:2D:A4   # 5 GHz cap-test
 ```
+
+Instance `e` advertises two radios so that the *second* (5 GHz) wiphy is used:
+radio 0 (`B0`) has no provisioning rule and stays idle, radio 1 (`A4`) is the
+5 GHz master. Do **not** give one instance two radios that both need
+provisioning when several instances share the manager: the manager provisioned
+only one of the two (the other stayed disabled) in testing.
 
 then `scripts/multi-cap.sh start` (and `stop` / `status`). Each identity
 enrols its certificate on first start.
@@ -72,6 +80,11 @@ four identities on the **2.4 GHz** phy, all at 2437 MHz, one SSID each:
 | cap-guest | B | `phy0-bap0` | `authorized: yes`, ping 3/3, 0% |
 | cap-iot | C | `phy0-cap0` | `authorized: yes`, ping 3/3, 0% |
 | cap-hidden | D (hidden) | `phy0-dap0` | `authorized: yes`, ping 3/3, 0% |
+| cap-test (5 GHz) | E | `phy1-eap0` | `authorized: yes`, ping 3/3, 0% |
+
+The five-instance run was executed with explicit BSSID pinning
+(`scripts/station-test.sh` `BSSID=`): `02:d1:27:1b:2d:a0` (2.4 cap-test),
+`a1`, `a2`, `a3` (hidden) and `a4` (5 GHz cap-test).
 
 Each BSS is bridged to its VLAN bridge after hostapd brings it up, because a
 bridged AP interface cannot be opened while another AP is running on the same
