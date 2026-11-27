@@ -79,15 +79,14 @@ phy (`bridge=` is skipped for tagged instances).
 
 ## Limits
 
-* **One AP interface per phy on 5 GHz in the independent-instance model.** The
-  mt76x2e driver refuses a second AP vif (`SIOCSIFFLAGS: Resource busy`) when
-  each identity runs its own hostapd. A shared hostapd was tried (one merged
-  config, one `bss=` section per identity): the primary starts if it is typed
-  `managed` (an `-EALREADY` bug in the `SET_INTERFACE` path was fixed), and
-  hostapd creates the secondaries, but a secondary carrying the manager's
-  fake-radio MAC is refused at bring-up; with driver-derived MACs the first
-  secondary starts and the next fails. Four BSSes on 5 GHz still need the
-  single-instance model. See OPEN-PROBLEMS F65.
+* **5 GHz: one hostapd set, and its secondaries must use driver MACs.**
+  A merged config with four `bss=` sections and the working single-instance
+  globals brings up four BSSes when the secondaries keep the driver's derived
+  addresses; with the manager's BSSIDs the second secondary fails at bring-up
+  (`Resource busy`), and a second hostapd process on the same phy always fails.
+  Because the manager checks the BSSID and the PTK is derived over it, a
+  secondary cannot authenticate with the manager's VAP BSSID. **Maximum
+  working set: four 2.4 GHz identities + one 5 GHz master** (F66).
 * The 2.4 GHz phy carries four AP vifs (the mt76 limit).
 * Do not run the regular single-identity capagent on the same phy: the vif
   budget is shared.
