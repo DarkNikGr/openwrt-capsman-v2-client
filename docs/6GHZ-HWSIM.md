@@ -96,7 +96,12 @@ Two manager details matter:
   An HE-only attempt (`CAPAGENT_NO_EHT=1` with the beacon bit, band ids
   0x04/0x06/0x07) also stayed at `no available channels`. With this virtual
   radio the manager only selects the `be` channel set (`6ghz-be`), even though
-  the station registration is reported as `band=6ghz-ax`.
+  the station registration is reported as `band=6ghz-ax`. A **no-EHT hwsim
+  build** (`has_eht=false`, `has_uhr=false`; `iw phy` shows HE-only iftypes,
+  no EHT/UHR) with the same `cfg6`/descriptors still reports
+  `5955/be` and `no available channels` for every band id. This isolates the
+  `6ghz-ax` limitation to RouterOS's CAP 6 GHz band mapping, not to the CAP's
+  advertised EHT capability.
 
 ## F78: the beacon-protection capability bit
 
