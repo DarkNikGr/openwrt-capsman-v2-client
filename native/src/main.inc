@@ -447,7 +447,7 @@ static int run_once(struct cfg *c)
             uint8_t m27[6] = {0}, b27[BODY_MAX], x27[4];
             size_t z27 = 0;
             if (!own_ifname_for_port(port, in27, sizeof(in27)))
-                snprintf(in27, sizeof(in27), "phy%d-ap%d", p27, v27);
+                ap_ifname(in27, sizeof(in27), p27, v27);
             read_sysfs_mac(in27, m27);
             int i27 = read_sysfs_int(in27, "ifindex");
             z27 += put_el(b27 + z27, 0x08, m27, 6);

@@ -396,7 +396,7 @@ static int vap_ifindex_hint(int port, const char *hint, uint8_t mac[6])
     if (hint && hint[0])
         snprintf(ifname, sizeof(ifname), "%s", hint);
     else
-        snprintf(ifname, sizeof(ifname), "phy%d-ap%d", port >> 8, port & 0xff);
+        ap_ifname(ifname, sizeof(ifname), port >> 8, port & 0xff);
     ifindex = read_sysfs_int(ifname, "ifindex");
     if (ifindex <= 0 && !hint) {
         /* Only a real AP netdev may stand in for the VAP. */

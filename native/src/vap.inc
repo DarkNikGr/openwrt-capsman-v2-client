@@ -748,7 +748,7 @@ static int vap_resolve(const struct cfg *c, int phy, int vapid,
     int ifindex = 0, managed = 0;
 
     if (created) *created = 0;
-    snprintf(pref, sizeof(pref), "phy%d-ap%d", phy, vapid);
+    ap_ifname(pref, sizeof(pref), phy, vapid);
     if (vapid == 0 && phy < MAX_RADIOS && c->ifnames[phy][0] &&
         strcmp(c->ifnames[phy], pref) != 0)
         preferred = c->ifnames[phy];
@@ -932,7 +932,7 @@ static void vap_destroy(int port, const struct cfg *c)
     if (vp->used && vp->ifname[0])
         snprintf(ifname, sizeof(ifname), "%s", vp->ifname);
     else
-        snprintf(ifname, sizeof(ifname), "phy%d-ap%d", phy, vapid);
+        ap_ifname(ifname, sizeof(ifname), phy, vapid);
     vap_paths(ifname, conf, sizeof(conf), pidf, sizeof(pidf));
     had_conf = access(conf, F_OK) == 0;
 

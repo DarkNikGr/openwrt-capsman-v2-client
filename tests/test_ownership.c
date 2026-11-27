@@ -203,6 +203,12 @@ static pid_t vap_find_hostapd(const char *ifname)
     return 0;
 }
 
+static const char *ap_tag(void) { return ""; }
+static void ap_ifname(char *out, size_t n, int phy, int vapid)
+{
+    snprintf(out, n, "phy%d-ap%d", phy, vapid);
+}
+
 #include "ownership.inc"
 
 /* Mirrors the bookkeeping at the end of the real vap_phy_apply(). */

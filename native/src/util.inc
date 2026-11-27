@@ -155,6 +155,47 @@ static int set_if_mac(const char *name, const uint8_t mac[6])
     return r;
 }
 
+/* Optional per-process tag (CAPAGENT_RUN_TAG).  A second capagent instance on
+ * the same wiphy (a distinct CAP identity, see F63) must not use the same
+ * netdev names as the first, or the two would adopt each other's interfaces
+ * and the phy-wide cleanup would delete them. */
+static const char *ap_tag(void)
+{
+    const char *t = getenv("CAPAGENT_RUN_TAG");
+    return (t && *t) ? t : "";
+}
+
+static void ap_ifname(char *out, size_t n, int phy, int vapid)
+{
+    const char *t = ap_tag();
+    if (*t)
+        snprintf(out, n, "phy%d-%sap%d", phy, t, vapid);
+    else
+        snprintf(out, n, "phy%d-ap%d", phy, vapid);
+}
+
+/* 1 when `name` is an AP interface name for this process (tag included),
+ * filling phy/vapid. */
+static int ap_parse_name(const char *name, int *phy, int *vapid)
+{
+    const char *t = ap_tag();
+    for (int p = 0; p < 16; p++) {
+        char pre[40];
+        int w = -1;
+        char tail = 0;
+        if (*t) snprintf(pre, sizeof(pre), "phy%d-%sap", p, t);
+        else    snprintf(pre, sizeof(pre), "phy%d-ap", p);
+        size_t l = strlen(pre);
+        if (strncmp(name, pre, l) == 0 &&
+            sscanf(name + l, "%d%c", &w, &tail) == 1 && w >= 0) {
+            if (phy) *phy = p;
+            if (vapid) *vapid = w;
+            return 1;
+        }
+    }
+    return 0;
+}
+
 static void read_trim(const char *path, char *out, size_t n)
 {
     out[0] = 0;

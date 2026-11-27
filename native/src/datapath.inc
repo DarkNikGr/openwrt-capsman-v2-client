@@ -20,8 +20,7 @@ struct vap {
     int used, rid, wid;
     uint16_t vlan;              /* 0x7d, 0 = untagged */
     uint8_t bssid[6];           /* 0x08 */
-    uint8_t mgr_bssid[6];       /* 0x08 as assigned by the manager (must be
-                                   the netdev address for its 0x2018 check) */
+    uint8_t mgr_bssid[6];       /* 0x08 as the manager assigned it */
     int ifindex;
     char ifname[32];
     int apvlan[8];

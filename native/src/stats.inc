@@ -170,7 +170,7 @@ static void send_station_stats(mbedtls_ssl_context *ssl, const struct cfg *c)
                 if (vap == 0 && phy < MAX_RADIOS && c->ifnames[phy][0])
                     snprintf(ifn, sizeof(ifn), "%s", c->ifnames[phy]);
                 else
-                    snprintf(ifn, sizeof(ifn), "phy%d-ap%d", phy, vap);
+                    ap_ifname(ifn, sizeof(ifn), phy, vap);
             }
             iface_chan(ifn, &freq, &width);
             snprintf(cmd, sizeof(cmd),

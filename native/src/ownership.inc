@@ -1277,7 +1277,7 @@ static int own_claim(const struct cfg *c, int phy, int vapid,
         }
     }
 
-    snprintf(conv, sizeof(conv), "phy%d-ap%d", phy, vapid);
+    ap_ifname(conv, sizeof(conv), phy, vapid);
     snprintf(alt, sizeof(alt), "cap%d-%d", phy, vapid);
 
     /* Own mode: a stale AP netdev with the conventional name but no hostapd
@@ -1700,7 +1700,7 @@ static void own_destroy(const struct cfg *c, int port)
 
     (void)c;
     if (!e) {
-        snprintf(conv, sizeof(conv), "phy%d-ap%d", port >> 8, port & 0xff);
+        ap_ifname(conv, sizeof(conv), port >> 8, port & 0xff);
         e = own_by_name(conv);
     }
     if (!e) {

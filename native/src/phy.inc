@@ -99,7 +99,7 @@ static pid_t vap_phy_pid_for_ifname(const char *ifname)
 {
     int phy = -1, w = -1;
     char tail;
-    if (sscanf(ifname, "phy%d-ap%d%c", &phy, &w, &tail) != 2 &&
+    if (!ap_parse_name(ifname, &phy, &w) &&
         sscanf(ifname, "cap%d-%d%c", &phy, &w, &tail) != 2)
         return 0;
     if (phy < 0 || phy >= MAX_RADIOS) return 0;
@@ -263,7 +263,7 @@ static int vap_phy_name_of(const char *name, int phy)
 {
     int p = -1, w = 0;
     char tail;
-    if (sscanf(name, "phy%d-ap%d%c", &p, &w, &tail) == 2 && p == phy)
+    if (ap_parse_name(name, &p, &w) && p == phy)
         return 1;
     if (sscanf(name, "cap%d-%d%c", &p, &w, &tail) == 2 && p == phy)
         return 1;
@@ -452,6 +452,28 @@ static int vap_phy_apply(int phy, const struct cfg *c)
         }
         m->ifindex = idx;
         g_own_dirty = 1;
+    }
+
+    /* The manager derives a primary BSS's address from the radio MAC it was
+     * given.  A virtual radio identity (F63) presents a MAC the driver does
+     * not expect, and the driver's derived address then differs from the
+     * manager's; the manager drops the station's frames in that case.  Set
+     * the master netdev to the manager's address before hostapd starts. */
+    {
+        struct vap *mvp = vap_get(phy, m->port & 0xff);
+        if (mvp && (mvp->mgr_bssid[0] | mvp->mgr_bssid[1] |
+                    mvp->mgr_bssid[2] | mvp->mgr_bssid[3] |
+                    mvp->mgr_bssid[4] | mvp->mgr_bssid[5]) &&
+            memcmp(mvp->mgr_bssid, m->bssid, 6) != 0 &&
+            set_if_mac(m->ifname, mvp->mgr_bssid) == 0) {
+            printf("vap: phy%d master %s BSSID -> manager's %02x:%02x:%02x:"
+                   "%02x:%02x:%02x\n", phy, m->ifname, mvp->mgr_bssid[0],
+                   mvp->mgr_bssid[1], mvp->mgr_bssid[2], mvp->mgr_bssid[3],
+                   mvp->mgr_bssid[4], mvp->mgr_bssid[5]);
+            fflush(stdout);
+            memcpy(m->bssid, mvp->mgr_bssid, 6);
+            g_own_dirty = 1;
+        }
     }
 
     /* Hand the secondary BSSes over to hostapd. */

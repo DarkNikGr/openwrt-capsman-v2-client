@@ -466,6 +466,7 @@ static void createvap_response(mbedtls_ssl_context *ssl, const uint8_t hdr[10],
     struct vap *vp = NULL;
     if (vapid >= 0) {
         vp = &g_vap[phy % MAX_RADIOS][vapid];
+        memcpy(vp->mgr_bssid, mac, 6);
         /* W54: vp->bssid is the address the netdev really carries and may
            differ from the manager's 0x08 MAC.  The g_vmap identities decide
            whether this is the same VAP; a repeated create is idempotent. */
@@ -528,7 +529,7 @@ static void createvap_response(mbedtls_ssl_context *ssl, const uint8_t hdr[10],
             vlan_wid_set(phy, rd16(vv), vapid);
     }
     char pref[32];
-    snprintf(pref, sizeof(pref), "phy%d-ap%d", phy, vapid);
+    ap_ifname(pref, sizeof(pref), phy, vapid);
     /* W34: one ownership decision for 0x500b and 0x6016.  netifd wins its
      * names; the manager VAP moves to cap<phy>-<vapid> instead. */
     /* The master VAP must take the manager's phyN-ap0 name; a configured
