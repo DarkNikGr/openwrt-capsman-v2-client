@@ -1,6 +1,6 @@
 # MikroTik CAPsMAN v2 client for OpenWrt
 
-**v0.6.1** — see [`docs/RELEASE-0.6.1.md`](docs/RELEASE-0.6.1.md).
+**v0.6.2** — see [`docs/RELEASE-0.6.2.md`](docs/RELEASE-0.6.2.md).
 
 Turn a non-MikroTik OpenWrt AP into a **CAP of the official RouterOS
 CAPsMAN v2 manager**. The CAP side is native C: no extra service on the
@@ -52,9 +52,12 @@ OpenWrt 24.10, MediaTek MT7603E + MT7612E), managed by an
 >   not export RouterOS DHCP option 138 to the agent, so the manager address is
 >   baked into `/etc/cap/capagent.conf` at image build time
 >   (`scripts/build-image.sh MANAGER=10.0.0.1`).
-> * **802.11k/v steering** is implemented on the CAP side; the bench station
->   firmware drops the RM IE and the manager sends no RRM request, so the live
->   proof is blocked by the station (F71/F67).
+> * **802.11k** is live on a virtual station (beacon report relayed as
+>   `0x2018`); the bench Intel 3168 still drops the RM IE. **802.11v/BTM** has
+>   no deterministic manager trigger (F71/F67).
+> * **6 GHz** was proven end to end on a virtual `mac80211_hwsim` radio
+>   (SAE, 20/80 MHz, 0% ping) — the reference Xiaomi has no 6 GHz hardware and
+>   the Deco BE65 stays read-only. See `docs/6GHZ-HWSIM.md`.
 > * There is **no configuration tree** in CAPsMAN v2: the manager keeps the
 >   passphrase and is the authenticator, so it never sends the PSK to the CAP.
 >
