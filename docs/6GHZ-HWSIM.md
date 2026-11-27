@@ -104,6 +104,25 @@ uint8_t caps84[8] = { 0x40, have6 ? 0x02 : 0x00, 0x00, 0x00 };
 With that bit the VAP is active (`MDB`) and hostapd starts on 5955 MHz.
 `CAPAGENT_NEWPHY_84=40020000` reproduces the same result manually.
 
+## F78b: M1 arrives before the station is associated
+
+The manager answers the (Re)Association Request with M1 immediately. On
+6 GHz the M1 regularly reached hostapd before its own association path had
+created the station entry, so `EXT_AUTH_TX` returned 0 but the driver dropped
+the frame (`Ignore TX status ... not currently associated`), the station never
+answered, and the manager deauthenticated it (`reason=6`). Patch
+[`9999h`](../patches/9999h-external-rsn-queue-early-eapol.patch) keeps the
+newest EAPOL frame per station in `ext_auth.c` and flushes it from
+`ext_auth_notify_assoc()` once the station is associated. Hostapd log:
+
+```
+EXT-AUTH: queued EAPOL for not-yet-associated station 02:00:00:00:01:00 len=121
+Add associated STA 02:00:00:00:01:00 ...
+EXT-AUTH: flushing queued EAPOL to 02:00:00:00:01:00 len=121
+EXT-AUTH: TX ... len=121 encrypt=0
+EXT-AUTH: station 02:00:00:00:01:00 authorized by external authenticator
+```
+
 ## What was proven
 
 * Manager builds the 6 GHz channel list from the CAP (`6g-channels=5955…6415`)
@@ -113,23 +132,29 @@ With that bit the VAP is active (`MDB`) and hostapd starts on 5955 MHz.
   20 MHz. (Before the `vap.inc` fix the same config was written as
   `hw_mode=g channel=6`, because every frequency >= 4900 was treated as 5 GHz.)
 * A second hwsim radio running wpa_supplicant (SAE, PMF) completes the SAE
-  exchange with the manager through the CAP
-  (`0x2018 auth len=128 freq=5955`, `0x2019 auth-resp`) and the manager's
-  registration table shows:
+  exchange with the manager through the CAP and the 4-way (SAE/AES-CMAC,
+  CCMP); the station is **`authorized: yes`** and the manager's registration
+  table shows:
 
   ```
   interface=cap-wifi22 ssid=cap-6g ... auth-type=wpa3-psk mfp=yes band=6ghz-ax vlan-id=20
   ```
 
+* **Datapath:** with the station in its own network namespace (so the AP's
+  `br-vlan20` and the station are not the same kernel IP stack),
+  `ping 192.168.20.1` from the station and `ping 192.168.20.50` from the AP
+  both return **3/3, 0% loss**, `iw link` shows `freq: 5955.0`, signal
+  -27 dBm. This was reproduced after a fresh hwsim reload with the queue fix
+  built into hostapd.
+
 ## What is still open
 
-The station is deauthenticated right after association
-(`reason=6`, hostapd `deauthenticated due to local deauth request`) and never
-receives an EAPOL-Key, while the manager retries M1 (`0x201c len=135`). This is
-the same assoc-before-auth / 4-way race seen on the bench, now on 6 GHz; the
-CAP/hostapd side still needs to hold the EAPOL until the station is
-authenticated, or to avoid the local deauth. The manager side and the 6 GHz
-radio provisioning path are proven; the full station data path is not.
+* Wider 6 GHz channels (40/80/160 MHz) need the HE centre-index fields in
+  `vap_write_channel`; only 20 MHz is generated today.
+* MLO / EHT multi-link is not implemented (the beacon-protection bit makes the
+  manager accept the 6 GHz radio, but no MLD is established).
+* Real 6 GHz hardware, AFC and regulatory power modes cannot be proven with
+  hwsim.
 
 ## Limits of the simulation
 

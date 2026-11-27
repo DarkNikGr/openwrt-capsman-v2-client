@@ -1,0 +1,201 @@
+hostapd: queue EAPOL that arrives before the station is associated
+
+The manager may answer the (Re)Association Request with M1 before hostapd
+has finished its own association path.  EXT_AUTH_TX then returns 0 but the
+frame is dropped by the driver ("not currently associated") and the
+station never answers M1; on 6 GHz this reliably kills the 4-way.  Keep
+the newest EAPOL per station and flush it from ext_auth_notify_assoc().
+
+--- a/src/ap/ext_auth.c
++++ b/src/ap/ext_auth.c
+@@ -90,10 +90,14 @@
+ 	return 0;
+ }
+ 
++static void ext_auth_pending_drop(struct hostapd_data *hapd);
++
+ void ext_auth_deinit(struct hostapd_data *hapd)
+ {
+ 	struct ext_auth_data *ctx = hapd->ext_auth;
+ 
++	ext_auth_pending_drop(hapd);
++
+ 	if (!ctx)
+ 		return;
+ 
+@@ -102,6 +106,123 @@
+ 	hapd->ext_auth = NULL;
+ }
+ 
++/*
++ * The manager may send M1 immediately after the (Re)Association Request it
++ * receives from the CAP, i.e. before hostapd has finished its own association
++ * path and created the station entry.  hostapd_wpa_auth_send_eapol() then
++ * returns 0 but the driver drops the frame ("not currently associated") and
++ * the station never answers; on 6 GHz this reliably kills the 4-way.  Keep
++ * the newest EAPOL frame per station and flush it from
++ * ext_auth_notify_assoc(), when the station is known to be associated.
++ */
++#define EXT_AUTH_PENDING_MAX 8
++
++struct ext_auth_pending {
++	struct ext_auth_pending *next;
++	struct hostapd_data *hapd;
++	u8 addr[ETH_ALEN];
++	u8 *data;
++	size_t len;
++	int encrypt;
++};
++
++static struct ext_auth_pending *ext_auth_pending_list;
++static int ext_auth_pending_count;
++
++static void ext_auth_pending_free(struct ext_auth_pending *p)
++{
++	os_free(p->data);
++	os_free(p);
++}
++
++static void ext_auth_pending_drop(struct hostapd_data *hapd)
++{
++	struct ext_auth_pending *p, **pp = &ext_auth_pending_list;
++
++	while ((p = *pp)) {
++		if (p->hapd == hapd) {
++			*pp = p->next;
++			ext_auth_pending_free(p);
++			ext_auth_pending_count--;
++			continue;
++		}
++		pp = &p->next;
++	}
++}
++
++int ext_auth_send_eapol_or_queue(struct hostapd_data *hapd, const u8 *dst,
++				 const u8 *data, size_t len, int encrypt)
++{
++	struct sta_info *sta = ap_get_sta(hapd, dst);
++	struct ext_auth_pending *p, **pp;
++
++	if (sta && (sta->flags & WLAN_STA_ASSOC))
++		return hostapd_wpa_auth_send_eapol(hapd, dst, data, len, encrypt);
++
++	/* A newer frame for the same station supersedes the queued one. */
++	for (pp = &ext_auth_pending_list; (p = *pp); pp = &p->next) {
++		if (p->hapd == hapd && os_memcmp(p->addr, dst, ETH_ALEN) == 0) {
++			*pp = p->next;
++			ext_auth_pending_free(p);
++			ext_auth_pending_count--;
++			break;
++		}
++	}
++	if (ext_auth_pending_count >= EXT_AUTH_PENDING_MAX) {
++		p = ext_auth_pending_list;
++		if (p) {
++			ext_auth_pending_list = p->next;
++			ext_auth_pending_free(p);
++			ext_auth_pending_count--;
++		}
++	}
++
++	p = os_zalloc(sizeof(*p));
++	if (!p)
++		return -1;
++	p->data = os_malloc(len);
++	if (!p->data) {
++		os_free(p);
++		return -1;
++	}
++	os_memcpy(p->data, data, len);
++	os_memcpy(p->addr, dst, ETH_ALEN);
++	p->len = len;
++	p->encrypt = encrypt;
++	p->hapd = hapd;
++	p->next = ext_auth_pending_list;
++	ext_auth_pending_list = p;
++	ext_auth_pending_count++;
++	wpa_printf(MSG_DEBUG,
++		   "EXT-AUTH: queued EAPOL for not-yet-associated station "
++		   MACSTR " len=%lu", MAC2STR(dst), (unsigned long) len);
++	return 0;
++}
++
++void ext_auth_flush_pending(struct hostapd_data *hapd, struct sta_info *sta)
++{
++	struct ext_auth_pending *p, **pp = &ext_auth_pending_list;
++
++	while ((p = *pp)) {
++		if (p->hapd == hapd &&
++		    os_memcmp(p->addr, sta->addr, ETH_ALEN) == 0) {
++			*pp = p->next;
++			wpa_printf(MSG_DEBUG,
++				   "EXT-AUTH: flushing queued EAPOL to " MACSTR
++				   " len=%lu", MAC2STR(sta->addr),
++				   (unsigned long) p->len);
++			if (sta->flags & WLAN_STA_ASSOC)
++				hostapd_wpa_auth_send_eapol(hapd, sta->addr,
++							    p->data, p->len,
++							    p->encrypt);
++			ext_auth_pending_free(p);
++			ext_auth_pending_count--;
++			continue;
++		}
++		pp = &p->next;
++	}
++}
++
+ void ext_auth_notify_assoc(struct hostapd_data *hapd, struct sta_info *sta)
+ {
+ 	char buf[1024];
+@@ -112,6 +233,9 @@
+ 	if (!hapd->ext_auth)
+ 		return;
+ 
++	/* The manager may have sent M1 before this assoc completed (F78). */
++	ext_auth_flush_pending(hapd, sta);
++
+ 	ie = wpa_auth_get_wpa_ie(hapd->wpa_auth, &ie_len);
+ 
+ 	len = os_snprintf(buf, sizeof(buf), "ASSOC " MACSTR " ",
+--- a/src/ap/ext_auth.h
++++ b/src/ap/ext_auth.h
+@@ -61,6 +61,9 @@
+ 			      const u8 *data, size_t len);
+ void ext_auth_notify_disconnect(struct hostapd_data *hapd, struct sta_info *sta);
+ int ext_auth_authorize(struct hostapd_data *hapd, const u8 *addr);
++int ext_auth_send_eapol_or_queue(struct hostapd_data *hapd, const u8 *dst,
++				 const u8 *data, size_t len, int encrypt);
++void ext_auth_flush_pending(struct hostapd_data *hapd, struct sta_info *sta);
+ 
+ #else /* CONFIG_EXTERNAL_RSN_AUTH */
+ 
+@@ -107,6 +110,18 @@
+ 	return -1;
+ }
+ 
++static inline int ext_auth_send_eapol_or_queue(struct hostapd_data *hapd,
++					       const u8 *dst, const u8 *data,
++					       size_t len, int encrypt)
++{
++	return -1;
++}
++
++static inline void ext_auth_flush_pending(struct hostapd_data *hapd,
++					  struct sta_info *sta)
++{
++}
++
+ #endif /* CONFIG_EXTERNAL_RSN_AUTH */
+ 
+ #endif /* EXT_AUTH_H */
+--- a/hostapd/ctrl_iface.c
++++ b/hostapd/ctrl_iface.c
+@@ -4089,7 +4089,7 @@
+ 
+ 	wpa_printf(MSG_DEBUG, "EXT-AUTH: TX " MACSTR " len=%lu encrypt=%d",
+ 		   MAC2STR(dst), (unsigned long) len, encrypt);
+-	ret = hostapd_wpa_auth_send_eapol(hapd, dst, buf, len, encrypt);
++	ret = ext_auth_send_eapol_or_queue(hapd, dst, buf, len, encrypt);
+ 	os_free(buf);
+ 
+ 	/*
