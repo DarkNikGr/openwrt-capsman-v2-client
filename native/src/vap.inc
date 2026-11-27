@@ -184,6 +184,15 @@ static int vap_ht40_sign5(uint32_t freq)
  * otherwise hostapd's DFS start-channel computation fails even on ch36. */
 static void vap_write_channel(FILE *f, uint32_t freq, int wcode)
 {
+    /* 6 GHz: HE-only, and hostapd needs op_class 131 so it selects the
+     * 6 GHz mode instead of 2.4/5 GHz (the channel numbers overlap). */
+    if (freq >= 5925) {
+        int chan = (int)((freq - 5950) / 5);
+        if (chan < 1 || chan > 233) chan = 1;
+        fprintf(f, "hw_mode=a\nchannel=%d\nop_class=131\n", chan);
+        fprintf(f, "ieee80211ax=1\nhe_6ghz_reg_pwr_type=0\n");
+        return;
+    }
     if (!vap_is_5g(freq)) {
         int chan = (int)((freq - 2407) / 5);
         if (chan < 1 || chan > 14) chan = 6;

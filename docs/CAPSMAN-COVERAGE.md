@@ -90,7 +90,7 @@ RouterOS 7.25.1 with a real station; "lab" = CHR 7.25.1 + mac80211-hwsim.
 | ACL / `access-list` | ✅ **live (manager-side)** | `access-list action=reject` (all) → station cannot associate (`NOT CONNECTED`); removing it → `authorized: yes`, ping 3/3 0%. The manager filters before the CAP, so no CAP change is needed |
 | `multi-passphrase` / PPSK / VLAN pooling | ❌ not available | RouterOS 7.25.1 exposes only a `multi-passphrase-group` boolean (no passphrase-group object); per-station keys are manager-side anyway |
 | 802.11k/v/r steering hints | 🟡 FT implemented, not exercisable | rsn_decide maps AKM 3/4 to `FT-EAP`/`FT-PSK` and adds `mobility_domain` from the MDE; RouterOS 7.25.1 sends neither (F61), so the BSS still comes up as plain PSK. 11k/11v (RRM/BSSTM) are not implemented |
-| 6 GHz / MLO (`ath12k`) | ❌ not implemented | the Deco BE65 is used read-only |
+| 6 GHz / MLO | 🟡 6 GHz provisioning proven on a virtual radio; MLO not implemented | `mac80211_hwsim` + native capagent: the manager provisions `6ghz-be`/5955, hostapd is `AP-ENABLED` (beacon-protection capability `0x84` bit 9), and a SAE station reaches the manager (`band=6ghz-ax`) but the 4-way races (F78, [`6GHZ-HWSIM.md`](6GHZ-HWSIM.md)). MLO not attempted; the Deco BE65 stays read-only |
 | Sniffer (`/tool sniffer` over CAPsMAN) | ❌ untested | not implemented |
 
 ## How to extend the matrix

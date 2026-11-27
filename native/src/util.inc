@@ -525,13 +525,21 @@ static void read_phy_bands(int phy, struct phy_bands *pb)
     }
     if (have2) { pb->band[pb->nband++] = 0x81; pb->band[pb->nband++] = 0x82; }
     if (have5) { pb->band[pb->nband++] = 0x01; pb->band[pb->nband++] = 0x03; }
-    if (have6) { pb->band[pb->nband++] = 0x06; }
+    if (have6) {
+        const char *e6 = getenv("CAPAGENT_BAND6");
+        pb->band[pb->nband++] = (e6 && *e6) ? (uint8_t)strtol(e6, NULL, 16)
+                                            : 0x06;
+    }
 }
 
 static uint8_t band_code_for_freq(uint32_t f)
 {
     if (f < 3000) return 0x81;      /* 2ghz-g */
     if (f < 5925) return 0x03;      /* 5ghz-ac */
+    /* 6 GHz band id: CAPAGENT_BAND6 lets a test sweep the manager's value
+       (the id was reverse-engineered for 2.4/5 GHz only). */
+    const char *e6 = getenv("CAPAGENT_BAND6");
+    if (e6 && *e6) return (uint8_t)strtol(e6, NULL, 16);
     return 0x06;                    /* 6ghz */
 }
 
@@ -612,6 +620,7 @@ static void build_newphy(uint8_t *b, const uint8_t mac[6], int phy, size_t *out)
     /* WiFi 6/7 band ids, only when the phy reports HE/EHT AP support. */
     {
         int have5 = 0, have6 = 0;
+        int no_eht = getenv("CAPAGENT_NO_EHT") != NULL;
         for (int i = 0; i < pb.nfreq; i++) {
             if (pb.freq[i] >= 4900 && pb.freq[i] < 5925) have5 = 1;
             if (pb.freq[i] >= 5925) have6 = 1;
@@ -620,11 +629,11 @@ static void build_newphy(uint8_t *b, const uint8_t mac[6], int phy, size_t *out)
             uint8_t bd[5] = { 0x04, 0, 0, 0, 0x07 };
             n += put_el(b+n, 0x4d, bd, 5);
         }
-        if (have5 && pc.has_eht) {
+        if (!no_eht && have5 && pc.has_eht) {
             uint8_t bd[5] = { 0x06, 0, 0, 0, 0x07 };
             n += put_el(b+n, 0x4d, bd, 5);
         }
-        if (have6 && pc.has_eht) {
+        if (!no_eht && have6 && pc.has_eht) {
             uint8_t bd[5] = { 0x06, 0, 0, 0, 0x07 };
             n += put_el(b+n, 0x4d, bd, 5);
         }
@@ -633,11 +642,17 @@ static void build_newphy(uint8_t *b, const uint8_t mac[6], int phy, size_t *out)
     /* 0x84 = little-endian capability bitset.  Bit 6 (0x40) tells the
        manager the CAP supports the data channel; without it a
        datapath.traffic-processing=on-capsman VAP is refused with
-       "data channel not supported".  Keep bit 7 (MLO) clear.
+       "data channel not supported".  Keep bit 7 (MLO) clear.  Bit 9
+       (caps84[1] 0x02) is beacon protection: a 6 GHz (WiFi 7 / 6ghz-be)
+       VAP is refused with "beacon protection must be enabled for wifi7
+       cap" without it (F78).
        CAPAGENT_NEWPHY_84 / CAPAGENT_NEWPHY_86 / CAPAGENT_JOIN_A8 let a test
        sweep the capability fields the manager reads at join. */
     {
-        uint8_t caps84[8] = { 0x40, 0x00, 0x00, 0x00 };
+        int have6 = 0;
+        for (int i = 0; i < pb.nfreq; i++)
+            if (pb.freq[i] >= 5925) have6 = 1;
+        uint8_t caps84[8] = { 0x40, have6 ? 0x02 : 0x00, 0x00, 0x00 };
         size_t cl = 4;
         const char *e = getenv("CAPAGENT_NEWPHY_84");
         if (e && *e) {
