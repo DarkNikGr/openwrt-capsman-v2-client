@@ -30,6 +30,8 @@ EAP_PHASE2=${EAP_PHASE2:-auth=MSCHAPV2}
 MDID=${MDID:-}
 # Restrict the scan to one frequency (e.g. 2412) to test one band only.
 SCAN_FREQ=${SCAN_FREQ:-}
+# HIDDEN=1 for a hidden SSID (adds scan_ssid=1)
+HIDDEN=${HIDDEN:-}
 
 # The wiphy number changes across driver reloads (phy1, phy6, ...): resolve it
 # from the station interface instead of assuming phy1.  Never delete the netns
@@ -114,6 +116,7 @@ else
 	cat >> "$CONF" <<EOF
 network={
 	ssid="$SSID"
+	${HIDDEN:+scan_ssid=1}
 	psk="$PSK"
 	key_mgmt=$KEY_MGMT
 	${SCAN_FREQ:+scan_freq=$SCAN_FREQ}

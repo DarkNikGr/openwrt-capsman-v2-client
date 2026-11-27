@@ -13,6 +13,8 @@
 /* A second capagent instance (a distinct CAP identity for the same wiphy, see
  * the multi-identity experiment) must not share the per-phy config/pid/log
  * paths with the first one.  CAPAGENT_RUN_TAG adds a suffix to them. */
+static int vap_netdev_setmaster(int ifindex, int master_ifindex);
+
 static const char *vap_run_tag(void)
 {
     const char *t = getenv("CAPAGENT_RUN_TAG");
@@ -23,8 +25,14 @@ static void vap_phy_paths(int phy, char *conf, size_t cl, char *pidf, size_t pl,
                           char *logf, size_t ll)
 {
     const char *t = vap_run_tag();
-    snprintf(conf, cl, VAP_CONF_DIR "/vap-phy%d%s%s.conf", phy,
-             *t ? "-" : "", t);
+    /* Tagged configs must NOT be named vap-*.conf: own_cleanup_stale()
+     * derives an ifname from every /tmp/vap-*.conf and would kill the
+     * hostapd of another instance as an "orphan" whose netdev does not
+     * exist. */
+    if (*t)
+        snprintf(conf, cl, VAP_CONF_DIR "/cap-phy%d-%s.conf", phy, t);
+    else
+        snprintf(conf, cl, VAP_CONF_DIR "/vap-phy%d.conf", phy);
     snprintf(pidf, pl, "/var/run/vap-phy%d%s%s.pid", phy, *t ? "-" : "", t);
     snprintf(logf, ll, "/tmp/vap-phy%d%s%s.log", phy, *t ? "-" : "", t);
 }
@@ -205,7 +213,12 @@ static void vap_phy_bss(FILE *f, const char *kw, const struct own_entry *e,
     fprintf(f, "bssid=%02x:%02x:%02x:%02x:%02x:%02x\n",
             e->bssid[0], e->bssid[1], e->bssid[2], e->bssid[3],
             e->bssid[4], e->bssid[5]);
-    if (bridge[0]) fprintf(f, "bridge=%s\n", bridge);
+    /* With one hostapd per phy the kernel can bridge the interface while
+     * hostapd brings it up.  When several capagent instances share the phy
+     * (multi-identity, CAPAGENT_RUN_TAG) opening a bridged AP vif on a phy
+     * that already has a running AP returns EBUSY on the 5 GHz driver, so
+     * those instances bridge it after hostapd is up. */
+    if (bridge[0] && !*ap_tag()) fprintf(f, "bridge=%s\n", bridge);
 
     char rsn[256];
     rsn_conf_write(rsn, sizeof(rsn), &rp);
@@ -616,6 +629,22 @@ static int vap_phy_apply(int phy, const struct cfg *c)
                            phy, dbm, tr);
                 break;
             }
+        }
+    }
+    /* Tagged (multi-identity) instances could not use hostapd's bridge= on
+     * 5 GHz; join each BSS to its VLAN bridge now that it is up. */
+    if (*ap_tag()) {
+        for (int i = 0; i < OWN_MAX; i++) {
+            struct own_entry *e = &g_own[i];
+            if (!vap_phy_row_cfg(e, phy) || !e->vlan) continue;
+            char br[32];
+            snprintf(br, sizeof(br), "br-vlan%u", e->vlan);
+            int bidx = if_nametoindex(br);
+            int idx = if_nametoindex(e->ifname);
+            if (bidx <= 0 || idx <= 0) continue;
+            int mr = vap_netdev_setmaster(idx, bidx);
+            printf("vap: phy%d %s -> %s (rc=%d)\n", phy, e->ifname, br, mr);
+            fflush(stdout);
         }
     }
     printf("vap: phy%d hostapd up with %d BSS(es) pid=%d\n", phy, n, (int)hp);

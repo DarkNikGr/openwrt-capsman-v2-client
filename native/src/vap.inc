@@ -343,6 +343,52 @@ static void rtnl_nest_end(struct nlmsghdr *n, struct rtattr *nest)
     nest->rta_len = (unsigned short)((char *)n + n->nlmsg_len - (char *)nest);
 }
 
+/* Add/remove a netdev to/from a bridge (RTM_SETLINK + IFLA_MASTER).  Used
+ * after hostapd has brought the BSS up, when the interface must not be a
+ * bridge port during bring-up (see vap_phy_bss). */
+static int vap_netdev_setmaster(int ifindex, int master_ifindex)
+{
+    int fd = socket(AF_NETLINK, SOCK_RAW | SOCK_CLOEXEC, NETLINK_ROUTE);
+    if (fd < 0) return -1;
+    struct {
+        struct nlmsghdr n;
+        struct ifinfomsg i;
+        char attrs[64];
+    } req;
+    memset(&req, 0, sizeof(req));
+    req.n.nlmsg_len = NLMSG_LENGTH(sizeof(struct ifinfomsg));
+    req.n.nlmsg_type = RTM_SETLINK;
+    req.n.nlmsg_flags = NLM_F_REQUEST | NLM_F_ACK;
+    req.n.nlmsg_seq = 3;
+    req.i.ifi_family = AF_UNSPEC;
+    req.i.ifi_index = ifindex;
+    struct rtattr *ma = (struct rtattr *)((char *)&req.n +
+                                          NLMSG_ALIGN(req.n.nlmsg_len));
+    ma->rta_type = IFLA_MASTER;
+    ma->rta_len = RTA_LENGTH(4);
+    uint32_t mv = (uint32_t)(master_ifindex > 0 ? master_ifindex : 0);
+    memcpy(RTA_DATA(ma), &mv, 4);
+    req.n.nlmsg_len = NLMSG_ALIGN(req.n.nlmsg_len) + RTA_ALIGN(ma->rta_len);
+    struct sockaddr_nl sa;
+    memset(&sa, 0, sizeof(sa));
+    sa.nl_family = AF_NETLINK;
+    if (sendto(fd, &req, req.n.nlmsg_len, 0, (struct sockaddr *)&sa,
+               sizeof(sa)) < 0) {
+        close(fd);
+        return -1;
+    }
+    char resp[256];
+    ssize_t rn = recv(fd, resp, sizeof(resp), 0);
+    close(fd);
+    if (rn < (ssize_t)sizeof(struct nlmsghdr)) return -1;
+    struct nlmsghdr *rnl = (struct nlmsghdr *)resp;
+    if (rnl->nlmsg_type == NLMSG_ERROR) {
+        struct nlmsgerr *err = (struct nlmsgerr *)NLMSG_DATA(rnl);
+        return err->error;
+    }
+    return 0;
+}
+
 static int vap_bridge_create(const char *name)
 {
     int fd = socket(AF_NETLINK, SOCK_RAW | SOCK_CLOEXEC, NETLINK_ROUTE);
