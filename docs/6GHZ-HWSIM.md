@@ -87,7 +87,10 @@ Two manager details matter:
 * **Band name.** The manager labels a 6 GHz-capable CAP's channels `be`
   (`cap print`/`radio print` show `5955/be`), and `6ghz-ax` gets
   `no available channels`; `6ghz-be` is the working configuration value even
-  though the station registration is later reported as `band=6ghz-ax`.
+  though the station registration is later reported as `band=6ghz-ax`. With
+  the 0x84/9 beacon bit and the full descriptor set the same `6ghz-be` profile
+  now works at 80 MHz; `6ghz-ax` was re-tested and still has no channels on
+  this manager.
 
 ## F78: the beacon-protection capability bit
 
