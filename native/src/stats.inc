@@ -81,6 +81,13 @@ static void emit_station(mbedtls_ssl_context *ssl, int phy, int vap,
     uint16_t port = (uint16_t)((phy << 8) | vap);
     time_t now = time(NULL);
 
+    /* CAPAGENT_FAKE_RSSI: lab hook to make the manager see a weak client
+     * (steering/11v tests) when the simulated radio always reports -27. */
+    {
+        const char *fr = getenv("CAPAGENT_FAKE_RSSI");
+        if (fr && *fr) sig = atoi(fr);
+    }
+
     if (!freq) freq = phy_freq_hint(phy);
     if (!freq) return;                  /* channel unknown: do not invent */
 

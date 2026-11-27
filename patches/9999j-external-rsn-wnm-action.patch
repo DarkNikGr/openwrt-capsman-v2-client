@@ -1,0 +1,19 @@
+hostapd: relay 802.11v WNM (BTM) action frames to the CAP
+
+A BSS Transition Management Response from a station is a WNM action
+frame (category 10).  The manager sends its BTM Request through the
+0x2019 action path; the station's response needs the same ext-auth
+relay as a Radio Measurement report so the manager sees the result.
+
+--- a/src/ap/ieee802_11.c
++++ b/src/ap/ieee802_11.c
+@@ -6474,7 +6474,8 @@
+ 		 * Auth/AssocReq so it can act on it.
+ 		 */
+ 		if (hapd->conf->external_rsn_auth && len > 25 &&
+-		    mgmt->u.action.category == WLAN_ACTION_RADIO_MEASUREMENT)
++		    (mgmt->u.action.category == WLAN_ACTION_RADIO_MEASUREMENT ||
++		     mgmt->u.action.category == WLAN_ACTION_WNM))
+ 			ext_auth_notify_assocreq(hapd, mgmt->sa,
+ 					 (const u8 *) mgmt, len);
+ #endif /* CONFIG_EXTERNAL_RSN_AUTH */

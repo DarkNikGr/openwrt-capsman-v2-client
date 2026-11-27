@@ -101,3 +101,42 @@ why the lab starts the CAP with `CAPAGENT_NO_MFP=1` (the manager's MFPC bit is
 ignored). A station/driver that protects robust management frames (or a VAP
 configured without PMF) needs no such hook. The relay itself is independent of
 MFP.
+
+
+## 802.11v BTM (v0.6.3)
+
+The manager's steering group alone does not trigger anything while the
+simulated station sits at -27 dBm. The agent has a lab hook that overrides the
+RSSI sent in the `0x200e` station update:
+
+```sh
+CAPAGENT_FAKE_RSSI=-80 CAPAGENT_RRM=1 ... capagent-host ...
+```
+
+Then create a steering group with a neighbour interface and wait:
+
+```sh
+/interface wifi steering add name=sg1 neighbor-group=cap-wifi22,cap-wifi2
+```
+
+The manager sends a BSS Transition Management Request to the station through
+the CAP:
+
+```
+capagent: 0x2019 action -> 9a:1d:15:49:02:59 ... len=49 ret=0
+station:  Received Action frame ... Category=10
+station:  WNM: BSS Transition Management Request: dialog_token=1 ...
+station:  WNM: Send BSS Transition Management Response ... status=1
+```
+
+Patch `9999j` (category 10) relays the response to the manager:
+
+```
+capagent: EXTMUX: 0x2018 action port=0x0000 len=29 freq=5955
+capagent: 0x2018 ext 9a:1d:15:49:02:59 -> manager (len=29)
+```
+
+The request had no candidate list because the group's neighbour was a
+different SSID (`cap-test`); the manager/CAP request and the station/CAP
+response paths are proven. A same-SSID second BSS would let the manager offer
+candidates and the station accept.
