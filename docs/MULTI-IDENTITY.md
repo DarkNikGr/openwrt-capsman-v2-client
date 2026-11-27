@@ -97,6 +97,13 @@ script delays identity *n* by `n × CAPAGENT_STAGGER` (default 15 s, set
 `CAPAGENT_STAGGER=20` in `capagent.conf` to match the manual launcher); the
 manual launcher uses `DELAY=20`.
 
+Changing a security profile on the manager does **not** live-update a running
+identity: capagent (re)builds a BSS when the manager creates it, so after
+editing `configuration.security` restart the service (or just that identity)
+or the manager will show the VAP `INACTIVE` while the CAP keeps the old RSN
+config. A brand-new RouterOS security object also needs its passphrase at
+creation (`must specify passphrase for PSK` otherwise). See F76.
+
 ### First-byte rule on 5 GHz (F74)
 
 The mt76x2 driver derives the **BSS index from the first byte** of the

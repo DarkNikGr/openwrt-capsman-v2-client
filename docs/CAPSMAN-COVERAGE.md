@@ -51,9 +51,10 @@ RouterOS 7.25.1 with a real station; "lab" = CHR 7.25.1 + mac80211-hwsim.
 | `authentication-types=wpa2-psk` | ✅ **live** | 4-way via the manager, `authorized: yes`, ping |
 | `passphrase` | ✅ by design | stays on the manager: the CAP never receives it and generates no PSK |
 | `management-protection=disabled` | ✅ live | the current profiles |
-| `management-protection=required` (PMF) | ✅ **live** | manager sets MFPR; the CAP writes `ieee80211w=2` and reproduces the RSN IE (`caps=0x02c0`); station with MFP=2 → `authorized: yes`, `SET_STATION MFP ret=0`, ping 3/3 0% loss |
+| `management-protection=required` (PMF) | ✅ **live** | manager sets MFPR; the CAP writes `ieee80211w=2` and reproduces the RSN IE (`caps=0x02c0`); station with MFP=2 → `authorized: yes`, `SET_STATION MFP ret=0`, ping 3/3 0% loss. Also verified in the multi-identity topology (2.4 identity, `ieee80211w=2`) |
+| `management-protection` change on a live VAP | ❌ needs an identity restart | the manager marks the dynamic VAP INACTIVE and capagent keeps the old hostapd config until the identity restarts; a new security object also needs its passphrase (F76) |
 | `group-key-update` | ⚠️ forced off | `wpa_group_rekey=0` on the CAP (the manager owns rekeying) |
-| `wpa3` / SAE (`authentication-types=wpa3-psk`) | ✅ **live** | generated `sae_pwe=2` + `group_mgmt_cipher=AES-128-CMAC`; `0x201c` len=209 → `0x201b` → `0x201f` PTK + `SET_STATION MFP`, station `authorized: yes` |
+| `wpa3` / SAE (`authentication-types=wpa3-psk`) | ✅ **live** (single-identity/real radio) · 🟡 multi-identity unproven | generated `sae_pwe=2` + `group_mgmt_cipher=AES-128-CMAC`; `0x201c` len=209 → `0x201b` → `0x201f` PTK + `SET_STATION MFP`, station `authorized: yes`. On a fake radio the manager keeps the VAP INACTIVE and does not answer the SAE commit (F76) |
 | `owe` | 🟡 lab 14/14 | not yet live |
 | `wpa2-eap` / 802.1X / RADIUS | ✅ **live** | `sec-eap` (wpa2-eap, peap, ccmp) + FreeRADIUS 3.2.8 on 10.0.0.3 (`captest`); the CAP writes `wpa_key_mgmt=WPA-EAP`, `ieee80211w=1`, `external_rsn_auth=1` (patch 9999a now allows AKM 1/5) and the station reaches `authorized: yes` with ping 3/3 0% loss. Earlier detail: the RSN policy now emits `wpa_key_mgmt=WPA-EAP` (+`WPA-EAP-SHA256`) and `external_rsn_auth=1`; a FreeRADIUS 3.2.8 server answers `eapol_test` (PEAP/MSCHAPv2, TTLS/PAP). Live the manager's RADIUS request is rejected with `invalid Message-Authenticator` (see F52), so the 4-way never starts |
 | `wpa-psk-sha256` | ❌ untested | AKM parsed, not exercised |
