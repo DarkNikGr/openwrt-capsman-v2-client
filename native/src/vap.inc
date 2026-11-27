@@ -834,6 +834,22 @@ static void vap_provision(int port, const uint8_t *body, uint16_t len,
 
     find_el(body, len, 0x04, &ie, &il);
 
+    /* The start body's channel (0x0a/0x0b) is this VAP's configured
+     * frequency; the manager checks a relayed 0x2018 against it.  The 0x500b
+     * channel is the radio's current one and may differ (e.g. 2412 after a
+     * chansel), so take the start value for both the VAP and the relay. */
+    const uint8_t *scv = NULL, *sfv = NULL;
+    uint16_t scl = 0, sfl = 0;
+    if (find_el(body, len, 0x0a, &scv, &scl) &&
+        find_el(scv, scl, 0x0b, &sfv, &sfl) && sfl == 4) {
+        uint32_t sf = rd32(sfv);
+        if (sf >= 2000 && sf <= 7125) {
+            struct vap *sv = &g_vap[phy % MAX_RADIOS][vapid];
+            sv->freq = sf;
+            vchan_set((uint16_t)port, sf, 1, band_code_for_freq(sf));
+        }
+    }
+
     char ifname[32];
     int created = 0;
     int ifindex = vap_resolve(c, phy, vapid, vp->bssid, ifname,

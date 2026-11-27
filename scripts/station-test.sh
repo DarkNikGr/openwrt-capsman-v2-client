@@ -28,6 +28,8 @@ PASSWORD=${PASSWORD:-}
 EAP_PHASE2=${EAP_PHASE2:-auth=MSCHAPV2}
 # 802.11r: MDID=hex (e.g. a1b2) with KEY_MGMT=FT-PSK|FT-EAP
 MDID=${MDID:-}
+# Restrict the scan to one frequency (e.g. 2412) to test one band only.
+SCAN_FREQ=${SCAN_FREQ:-}
 
 # The wiphy number changes across driver reloads (phy1, phy6, ...): resolve it
 # from the station interface instead of assuming phy1.  Never delete the netns
@@ -114,6 +116,7 @@ network={
 	ssid="$SSID"
 	psk="$PSK"
 	key_mgmt=$KEY_MGMT
+	${SCAN_FREQ:+scan_freq=$SCAN_FREQ}
 	${MDID:+mobility_domain=$MDID}
 	${MFP:+ieee80211w=$MFP}
 	pairwise=CCMP
