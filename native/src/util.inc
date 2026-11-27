@@ -292,6 +292,20 @@ static void build_join(uint8_t *b, const struct cfg *c, size_t *out,
     n += put_el(b+n, 0x71, board, (uint16_t)strlen(board));
     n += put_el(b+n, 0x72, serial, (uint16_t)strlen(serial));
     n += put_el(b+n, 0x73, c73, sizeof(c73));
+    {
+        const char *e8 = getenv("CAPAGENT_JOIN_A8");
+        if (e8 && *e8) {
+            uint8_t a8[64];
+            size_t k = 0;
+            while (e8[0] && e8[1] && k < sizeof(a8)) {
+                unsigned v;
+                if (sscanf(e8, "%2x", &v) != 1) break;
+                a8[k++] = (uint8_t)v;
+                e8 += 2;
+            }
+            if (k) n += put_el(b+n, 0xa8, a8, (uint16_t)k);
+        }
+    }
     n += put_el(b+n, 0x74, c74, sizeof(c74));
     n += put_el(b+n, 0x75, c->macs[0], 6);
     n += put_el(b+n, 0xa1, c->a1, 4);
@@ -601,10 +615,36 @@ static void build_newphy(uint8_t *b, const uint8_t mac[6], int phy, size_t *out)
     /* 0x84 = little-endian capability bitset.  Bit 6 (0x40) tells the
        manager the CAP supports the data channel; without it a
        datapath.traffic-processing=on-capsman VAP is refused with
-       "data channel not supported".  Keep bit 7 (MLO) clear. */
+       "data channel not supported".  Keep bit 7 (MLO) clear.
+       CAPAGENT_NEWPHY_84 / CAPAGENT_NEWPHY_86 / CAPAGENT_JOIN_A8 let a test
+       sweep the capability fields the manager reads at join. */
     {
-        uint8_t caps84[4] = { 0x40, 0x00, 0x00, 0x00 };
-        n += put_el(b+n, 0x84, caps84, sizeof(caps84));
+        uint8_t caps84[8] = { 0x40, 0x00, 0x00, 0x00 };
+        size_t cl = 4;
+        const char *e = getenv("CAPAGENT_NEWPHY_84");
+        if (e && *e) {
+            size_t k = 0;
+            while (e[0] && e[1] && k < sizeof(caps84)) {
+                unsigned v;
+                if (sscanf(e, "%2x", &v) != 1) break;
+                caps84[k++] = (uint8_t)v;
+                e += 2;
+            }
+            if (k) cl = k;
+        }
+        n += put_el(b+n, 0x84, caps84, (uint16_t)cl);
+        const char *e86 = getenv("CAPAGENT_NEWPHY_86");
+        if (e86 && *e86) {
+            uint8_t caps86[8];
+            size_t k = 0;
+            while (e86[0] && e86[1] && k < sizeof(caps86)) {
+                unsigned v;
+                if (sscanf(e86, "%2x", &v) != 1) break;
+                caps86[k++] = (uint8_t)v;
+                e86 += 2;
+            }
+            if (k) n += put_el(b+n, 0x86, caps86, (uint16_t)k);
+        }
     }
     *out = n;
 }

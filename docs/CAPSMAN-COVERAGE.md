@@ -69,7 +69,7 @@ RouterOS 7.25.1 with a real station; "lab" = CHR 7.25.1 + mac80211-hwsim.
 | `traffic-processing=on-cap` | ✅ **live, ping 0% loss** (master BSS, or a per-SSID CAP identity — F63) | the supported mode: the manager is the authenticator, the CAP forwards. The agent creates `br-vlan<N>` on demand; the image ships the `br-vlan*` zone. A station on a **slave** VAP does not reach the 4-way on this manager yet (F58–F60) |
 | `vlan-id` | ✅ live | per-VAP `bridge=` to `br-vlan<N>` |
 | `traffic-processing=on-capsman` (`a2=1`) | 🟡 lab | plaintext datachan framing works; no live traffic test |
-| `traffic-processing=on-capsman-secure` (`a2=2`) | ❌ never | the manager provisions the VAP but sends `a2=0` and no `0x402b`; our join advertises `a7=01 00 07` and the secure variant needs the right capability bits (see F55) |
+| `traffic-processing=on-capsman-secure` (`a2=2`) | ✅ **live** | the manager sends the datachan create (`a2=2`, 32-byte key, cookie); the CAP installs it, listens on UDP 5248 and a station on that VAP gets `authorized: yes` + ping 0% with the traffic carried as encrypted datachan frames (F72) |
 | `bridge`, `interface`, `interface-list` | ❌ untested | the CAP derives the bridge from `vlan-id` |
 | `local-forwarding` | ❌ untested | requires the PSK on the CAP, which CAPsMAN v2 never sends |
 | `client-to-client-forwarding` | ❌ untested | not implemented |
