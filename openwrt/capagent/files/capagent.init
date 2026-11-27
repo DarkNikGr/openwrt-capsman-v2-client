@@ -158,11 +158,12 @@ start_service() {
 		--macs "${MACS:-auto}"
 	[ "${NO_ENROLL:-no}" = yes ] && set -- "$@" --no-enroll
 	[ -n "${IDENTITY:-}" ] && set -- "$@" --identity "${IDENTITY}"
+	[ -n "${PHYS:-}" ] && set -- "$@" --phys "${PHYS}"
 	[ -n "${EXT_AUTH_DIR:-}" ] && set -- "$@" --ext-auth-dir "${EXT_AUTH_DIR}"
 	[ -n "${STATE_FILE:-}" ] && set -- "$@" --state-file "${STATE_FILE}"
 	[ -n "${VAP_STATE:-}" ] && set -- "$@" --vap-state "${VAP_STATE}"
 
-	start_instance "" "" 0 "$@"
+	start_instance "" "${RUN_TAG:-}" 0 "$@"
 }
 
 service_triggers() {

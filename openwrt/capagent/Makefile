@@ -54,6 +54,7 @@ define Package/capagent/install
 	$(INSTALL_BIN) ./files/capagent.init $(1)/etc/init.d/capagent
 	$(INSTALL_DIR) $(1)/etc/cap
 	$(INSTALL_CONF) ./files/capagent.conf $(1)/etc/cap/capagent.conf
+	$(INSTALL_CONF) ./files/capagent-solo.conf $(1)/etc/cap/capagent-solo.conf.example
 	# Multi-identity: opt-in launcher and the example identity map.  The init
 	# script uses /etc/cap/identities.conf automatically when it exists.
 	$(INSTALL_DIR) $(1)/usr/sbin

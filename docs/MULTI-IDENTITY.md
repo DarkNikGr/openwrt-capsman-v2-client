@@ -168,3 +168,26 @@ phy (`bridge=` is skipped for tagged instances).
   `/etc/cap/identities.conf`).
 * Four AP vifs per phy is the mt76 limit; do not run the regular
   single-identity capagent at the same time (the vif budget is shared).
+
+
+## One CAP in the manager (single identity, many fake radios)
+
+Multi-identity is one TLS session (one certificate/`CAP` entry) **per SSID**,
+so the manager's Remote CAP list shows one device per identity. If a single
+CAP entry with all eight radios is preferred, run **one** capagent that
+advertises all eight fake radios in one session:
+
+```
+MACS=02:D1:27:1B:2D:A0,02:D1:27:1B:2D:A1,02:D1:27:1B:2D:A2,02:D1:27:1B:2D:A3,2A:D1:27:1B:2D:90,2E:D1:27:1B:2D:90,22:D1:27:1B:2D:90,26:D1:27:1B:2D:90
+PHYS=0,0,0,0,1,1,1,1
+IDENTITY=OpenWrt-CAPSOLO
+RUN_TAG=solo
+```
+
+(see `/etc/cap/capagent-solo.conf.example`). The manager needs the same eight
+provisioning rules as multi-identity; each fake radio is provisioned as the
+master of its SSID, and capagent starts one hostapd per logical radio
+(`phy0-soloap0` … `phy7-soloap0`, four on each real phy). Verified on the
+Xiaomi: one `cap=OpenWrt-CAPSOLO` entry with eight radios, eight SSIDs up, all
+eight station tests 0%. The normal single-identity mode (`MACS=auto`) still
+needs no per-SSID rules but only the masters authenticate.
