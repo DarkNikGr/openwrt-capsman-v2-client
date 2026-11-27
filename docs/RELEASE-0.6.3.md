@@ -40,8 +40,9 @@ RouterOS/hwsim combination.
 
 Clean `sysupgrade -n` of the image below, then `identities.conf` + restart:
 8 identities/8 SSIDs. After a **cold reboot**: 8 SSIDs, 8 capagent,
-10 hostapd. All eight station tests `authorized: yes`, 3/3, 0% (2.4 GHz 2437,
-5 GHz 5180, hidden included).
+10 hostapd. All eight station tests `authorized: yes` and green (2.4 GHz 2437,
+5 GHz 5180, hidden included); the 2.4 GHz hidden run lost one of three packets
+once and was re-run at **3/3, 0%**.
 
 Image sha256 `ab32d3b659b15c9a5ebe5af0809b16a682bf3968a7d61c1886cbd2778541d14e`
 (7,472,226 B).
