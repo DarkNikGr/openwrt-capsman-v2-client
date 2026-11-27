@@ -102,7 +102,16 @@ identity: capagent (re)builds a BSS when the manager creates it, so after
 editing `configuration.security` restart the service (or just that identity)
 or the manager will show the VAP `INACTIVE` while the CAP keeps the old RSN
 config. A brand-new RouterOS security object also needs its passphrase at
-creation (`must specify passphrase for PSK` otherwise). See F76.
+creation (`must specify passphrase for PSK` otherwise). Provisioned from
+creation it is fine: a fresh identity with `wpa3-psk` came up ACTIVE and a SAE
+station completed with `auth-type=wpa3-psk mfp=yes` and ping 0% (F76).
+
+A phy carries **four AP vifs**, so a fifth identity cannot be added while the
+other four run (`ip link set … up` → `Resource busy`); to test a new identity,
+replace one line temporarily (the stagger restarts the service). When a tag is
+removed from the file its hostapd/vif can survive the restart and steal the
+free slot (F77): kill the hostapd named in `/tmp/cap-phyN-<tag>.conf`, delete
+the `phyN-<tag>apM` netdev and restart before adding a different identity.
 
 ### First-byte rule on 5 GHz (F74)
 
