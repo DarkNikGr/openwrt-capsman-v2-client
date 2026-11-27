@@ -356,8 +356,33 @@ static void vap_phy_dump_rows(int phy, int n, int master)
 /* (Re)start the single hostapd for this phy with every journaled VAP. */
 static int vap_phy_apply(int phy, const struct cfg *c)
 {
+    static uint64_t real_apply_ms[16];
+    int rp0;
+    uint64_t now0;
+
     if (phy < 0 || phy >= MAX_RADIOS) return -1;
     if (wl_legacy()) return -1;
+
+    /* Solo (one identity, several logical radios on one real phy) starts one
+     * hostapd per logical radio in a burst.  The driver/hostapd needs the
+     * previous AP to be stable before the next NEW_INTERFACE; otherwise the
+     * third/fourth 5 GHz BSS is torn down as a transient orphan.  Keep a
+     * minimum gap per real phy (the manual multi-identity launcher uses 15 s;
+     * 4 s is enough here because the previous AP-ENABLED wait is already
+     * included). */
+    rp0 = real_phy(phy);
+    now0 = own_now_ms();
+    if (rp0 >= 0 && rp0 < 16 && real_apply_ms[rp0] &&
+        now0 < real_apply_ms[rp0] + 4000) {
+        uint64_t wait = real_apply_ms[rp0] + 4000 - now0;
+        printf("vap: phy%d spacing %llums on real phy%d\n", phy,
+               (unsigned long long)wait, rp0);
+        fflush(stdout);
+        usleep((useconds_t)wait * 1000);
+        now0 = own_now_ms();
+    }
+    if (rp0 >= 0 && rp0 < 16)
+        real_apply_ms[rp0] = now0;
 
     /* F45: clear hostapd children killed earlier so a zombie never looks
      * alive to pid_is_zombie()/own_pid_alive() or counts in pidof. */

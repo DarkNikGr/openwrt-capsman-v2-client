@@ -90,10 +90,13 @@ Two manager details matter:
   though the station registration is later reported as `band=6ghz-ax`. With
   the 0x84/9 beacon bit and the full descriptor set the same `6ghz-be` profile
   now works at 80 MHz. A fresh-identity sweep of the 6 GHz band id
-  (`CAPAGENT_BAND6` = 0x07..0x0b) with a `6ghz-ax` profile still reports
-  `no available channels` in every case; with this virtual radio the manager
-  only selects the `be` channel set (`6ghz-be`), even though the station
-  registration is reported as `band=6ghz-ax`.
+  (`CAPAGENT_BAND6` = 0x05..0x1f, including 0x11..0x1f) with a `6ghz-ax`
+  profile still reports `no available channels` in every case; the manager's
+  radio view labels 5955 `be` (band ids outside 0x06 also add `(unknown)`).
+  An HE-only attempt (`CAPAGENT_NO_EHT=1` with the beacon bit, band ids
+  0x04/0x06/0x07) also stayed at `no available channels`. With this virtual
+  radio the manager only selects the `be` channel set (`6ghz-be`), even though
+  the station registration is reported as `band=6ghz-ax`.
 
 ## F78: the beacon-protection capability bit
 

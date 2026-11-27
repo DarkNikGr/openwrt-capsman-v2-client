@@ -191,3 +191,9 @@ master of its SSID, and capagent starts one hostapd per logical radio
 Xiaomi: one `cap=OpenWrt-CAPSOLO` entry with eight radios, eight SSIDs up, all
 eight station tests 0%. The normal single-identity mode (`MACS=auto`) still
 needs no per-SSID rules but only the masters authenticate.
+
+Startup note: the four 5 GHz hostapd instances on the same real phy are
+serialised internally (4 s spacing) and may need up to ~2 minutes to all
+appear; the manager's `Remote CAP` view shows the single CAP immediately.
+If one 5 GHz radio stays down after a cold boot, toggling its provisioning
+rule once re-sends `0x6016` and recovers it.

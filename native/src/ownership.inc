@@ -682,6 +682,29 @@ static void own_load(void)
 
 /* ---- discovery of processes/files that survived a journal loss -------- */
 
+/* Tagged hostapd pid files are named vap-phy<phy>-<tag>.pid, while the
+ * netdev is phy<phy>-<tag>ap<m>.  The pid-file base is therefore a prefix of
+ * the real interface; a live netdev with that prefix means the daemon is not
+ * an orphan.  Without this the solo (one identity, several logical radios per
+ * phy) startup killed its own 5 GHz hostapd and never converged. */
+static int own_netdev_prefix(const char *prefix)
+{
+    DIR *d = opendir("/sys/class/net");
+    size_t n = strlen(prefix);
+    int found = 0;
+    struct dirent *de;
+
+    if (!d) return 0;
+    while ((de = readdir(d)) != NULL) {
+        if (de->d_name[0] == '.') continue;
+        if (strncmp(de->d_name, prefix, n) != 0) continue;
+        if (de->d_name[n] == '\0') continue;
+        if (if_nametoindex(de->d_name) > 0) { found = 1; break; }
+    }
+    closedir(d);
+    return found;
+}
+
 static void own_adopt_pidfiles(void)
 {
     DIR *d = opendir(OWN_RUN_DIR);
@@ -719,6 +742,8 @@ static void own_adopt_pidfiles(void)
             e = own_alloc(0xffff, ifname);
         if (!e)
             continue;
+        if (ifindex <= 0 && own_netdev_prefix(ifname))
+            continue;                      /* tagged pidfile base, live netdev */
         if (ifindex <= 0) {
             /* hostapd without its netdev is an orphan: stop it */
             printf("own: orphan hostapd pid=%d %s (no netdev), stopping\n",
