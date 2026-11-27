@@ -1488,7 +1488,8 @@ static void xm_on_mgmt(void *ctx, const struct extmux_vap *v,
     if (!freq) return;
     if (!band) band = band_code_for_freq(freq);
     printf("EXTMUX: 0x2018 %s port=0x%04x len=%zu freq=%u\n",
-           ((fr[0] >> 4) & 0xf) == 11 ? "auth" : "assocreq",
+           ((fr[0] >> 4) & 0xf) == 11 ? "auth" :
+           (((fr[0] >> 4) & 0xf) == 13 ? "action" : "assocreq"),
            v->port, len, freq);
     fflush(stdout);
     /* SAE/OWE: hostapd already sent the real Auth frames.  PSK: supply the

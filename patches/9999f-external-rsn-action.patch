@@ -1,0 +1,25 @@
+hostapd: relay 802.11k Radio Measurement action frames to the CAP
+
+A station's beacon report is an action frame (category 5).  The CAP's manager
+wants to see it, so notify the external RSN relay the same way as an
+Auth/AssocReq; the frame is then reported as 0x2018.
+
+--- a/src/ap/ieee802_11.c
++++ b/src/ap/ieee802_11.c
+@@ -6380,5 +6380,16 @@
+ 	case WLAN_FC_STYPE_ACTION:
+ 		wpa_printf(MSG_DEBUG, "mgmt::action");
++#ifdef CONFIG_EXTERNAL_RSN_AUTH
++		/*
++		 * 802.11k: a station's beacon report is a Radio Measurement
++		 * action frame (category 5).  Relay it to the manager like an
++		 * Auth/AssocReq so it can act on it.
++		 */
++		if (hapd->conf->external_rsn_auth && len > 25 &&
++		    mgmt->u.action.category == WLAN_ACTION_RADIO_MEASUREMENT)
++			ext_auth_notify_assocreq(hapd, mgmt->sa,
++					 (const u8 *) mgmt, len);
++#endif /* CONFIG_EXTERNAL_RSN_AUTH */
+ 		ret = handle_action(hapd, mgmt, len, freq);
+ 		break;
+ 	default:
