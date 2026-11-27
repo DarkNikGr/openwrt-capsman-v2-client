@@ -223,7 +223,8 @@ static void vap_phy_bss(FILE *f, const char *kw, const struct own_entry *e,
      * (multi-identity, CAPAGENT_RUN_TAG) opening a bridged AP vif on a phy
      * that already has a running AP returns EBUSY on the 5 GHz driver, so
      * those instances bridge it after hostapd is up. */
-    if (bridge[0] && !*ap_tag()) fprintf(f, "bridge=%s\n", bridge);
+    if (bridge[0] && !*ap_tag() && !getenv("CAPAGENT_NO_BRIDGE"))
+        fprintf(f, "bridge=%s\n", bridge);
 
     char rsn[256];
     rsn_conf_write(rsn, sizeof(rsn), &rp);
@@ -500,6 +501,38 @@ static int vap_phy_apply(int phy, const struct cfg *c)
         int idx;
         if (i == master || !vap_phy_row_cfg(e, phy))
             continue;
+        /* CAPAGENT_KEEP_SEC keeps the pre-created secondary netdevs so they
+         * can carry the BSSID the manager assigned (the driver derives its
+         * own addresses for interfaces hostapd creates).  hostapd attaches
+         * via the use_existing patch; the bridge is joined after start. */
+        if (getenv("CAPAGENT_KEEP_SEC")) {
+            struct vap *kvp = vap_get(e->port >> 8, e->port & 0xff);
+            uint8_t want[6];
+            memcpy(want, e->bssid, 6);
+            if (kvp && (kvp->mgr_bssid[0] | kvp->mgr_bssid[1] |
+                        kvp->mgr_bssid[2] | kvp->mgr_bssid[3] |
+                        kvp->mgr_bssid[4] | kvp->mgr_bssid[5]))
+                memcpy(want, kvp->mgr_bssid, 6);
+            idx = if_nametoindex(e->ifname);
+            if (idx <= 0)
+                idx = vap_netdev_create(phy, e->ifname, want);
+            if (idx > 0 && (memcmp(want, e->bssid, 6) != 0 ||
+                            idx <= 0))
+                set_if_mac(e->ifname, want);
+            if (idx > 0) {
+                set_if_flags(e->ifname, 0);
+                printf("vap: phy%d keeping %s with BSSID "
+                       "%02x:%02x:%02x:%02x:%02x:%02x for hostapd\n",
+                       phy, e->ifname, want[0], want[1], want[2], want[3],
+                       want[4], want[5]);
+                fflush(stdout);
+                memcpy(e->bssid, want, 6);
+                e->ifindex = idx;
+                e->handed_over = 0;
+                g_own_dirty = 1;
+            }
+            continue;
+        }
         e->handed_over = 1;
         idx = if_nametoindex(e->ifname);
         if (idx <= 0) continue;
@@ -638,7 +671,7 @@ static int vap_phy_apply(int phy, const struct cfg *c)
     }
     /* Tagged (multi-identity) instances could not use hostapd's bridge= on
      * 5 GHz; join each BSS to its VLAN bridge now that it is up. */
-    if (*ap_tag()) {
+    if (*ap_tag() || getenv("CAPAGENT_NO_BRIDGE")) {
         for (int i = 0; i < OWN_MAX; i++) {
             struct own_entry *e = &g_own[i];
             if (!vap_phy_row_cfg(e, phy) || !e->vlan) continue;

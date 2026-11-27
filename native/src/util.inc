@@ -116,6 +116,24 @@ static int read_sysfs_mac(const char *ifname, uint8_t mac[6])
     return 0;
 }
 
+/* Bring a netdev up or down. */
+static int set_if_flags(const char *name, int up)
+{
+    int fd = socket(AF_INET, SOCK_DGRAM | SOCK_CLOEXEC, 0);
+    if (fd < 0) return -1;
+    struct ifreq ifr;
+    memset(&ifr, 0, sizeof(ifr));
+    { size_t nl = strlen(name);
+      if (nl >= IFNAMSIZ) nl = IFNAMSIZ - 1;
+      memcpy(ifr.ifr_name, name, nl); ifr.ifr_name[nl] = 0; }
+    if (ioctl(fd, SIOCGIFFLAGS, &ifr) < 0) { close(fd); return -1; }
+    ifr.ifr_flags = (short)(up ? (ifr.ifr_flags | IFF_UP)
+                               : (ifr.ifr_flags & ~IFF_UP));
+    int r = ioctl(fd, SIOCSIFFLAGS, &ifr);
+    close(fd);
+    return r;
+}
+
 /* Set a netdev's MAC address.  Most drivers require the interface to be down,
  * so take it down and restore its flags.  Used for the manager-assigned BSSID
  * of an AP netdev we own. */
