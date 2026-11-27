@@ -193,7 +193,10 @@ eight station tests 0%. The normal single-identity mode (`MACS=auto`) still
 needs no per-SSID rules but only the masters authenticate.
 
 Startup note: the four 5 GHz hostapd instances on the same real phy are
-serialised internally (4 s spacing) and may need up to ~2 minutes to all
-appear; the manager's `Remote CAP` view shows the single CAP immediately.
-If one 5 GHz radio stays down after a cold boot, toggling its provisioning
-rule once re-sends `0x6016` and recovers it.
+serialised internally (4 s spacing); the manager's `Remote CAP` view shows the
+single CAP immediately and all eight BSSes appear within about two minutes.
+Verified after a **cold reboot**: one `cap=OpenWrt-CAPSOLO` entry with eight
+radios, eight SSIDs and all eight station tests `authorized: yes`, 3/3, 0%.
+The allocator keeps the manager's fake-radio BSSIDs (locally administered,
+free driver BSS index) instead of remapping them to the phy's `:83` plan —
+remapping made the manager reject the 5 GHz 4-way.

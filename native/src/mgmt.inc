@@ -402,12 +402,18 @@ static int mon_open(int ifindex)
     return fd;
 }
 
-/* Create (or reuse) a monitor VIF on this wiphy. */
-static int mon_create(int phy)
+/* Create (or reuse) a monitor VIF on this wiphy.  `phy` is a real wiphy
+ * index (from sysfs).  The vif-count/BSS-index helpers are keyed by logical
+ * radio and call real_phy() themselves, so resolve one that maps here; using
+ * the real index directly made solo plan the 5 GHz monitor from phy0
+ * (g_phy_map[1] == 0) and shared the wrong BSS ledger. */
+static int mon_create(int real)
 {
     char name[32];
+    int phy = logical_phy_for_real(real);
+    if (phy < 0) phy = real;
     if (nl_cmd_open() != 0) return -1;
-    snprintf(name, sizeof(name), "cm%d", phy % 100);
+    snprintf(name, sizeof(name), "cm%d", real % 100);
     /* W54: a monitor is a real driver interface on both mt76 phys.  On the
      * 4-interface MT7603E it would take one of the four CAPsMAN VAP slots,
      * so it is never created there while VAPs are managed.  On mt76x02 it
@@ -415,7 +421,7 @@ static int mon_create(int phy)
      * give it the first free legal address instead. */
     if (phy_max_vifs(phy) == 4) {
         printf("mon: phy%d is a 4-interface radio; not taking a VAP slot\n",
-               phy);
+               real);
         fflush(stdout);
         return -1;
     }
@@ -423,23 +429,23 @@ static int mon_create(int phy)
     int have_m = vap_bssid_pick_free(phy, mmac);
     if (have_m < 0) {
         printf("mon: phy%d has no free mt76x02 BSS index; no monitor VIF\n",
-               phy);
+               real);
         fflush(stdout);
         return -1;
     }
     struct nl_buf m;
     nlb_init(&m, NL80211_CMD_NEW_INTERFACE, NLM_F_ACK);
-    nlb_u32(&m, NL80211_ATTR_WIPHY, (uint32_t)phy);
+    nlb_u32(&m, NL80211_ATTR_WIPHY, (uint32_t)real);
     nlb_put(&m, NL80211_ATTR_IFNAME, name, strlen(name) + 1);
     nlb_u32(&m, NL80211_ATTR_IFTYPE, NL80211_IFTYPE_MONITOR);
     if (have_m > 0) nlb_put(&m, NL80211_ATTR_MAC, mmac, 6);
     nlb_flag(&m, NL80211_ATTR_SOCKET_OWNER);
     int r = nl_send_ack(g_nl_cmd_fd, &m);
     if (r == -EEXIST) {
-        snprintf(name, sizeof(name), "cm%d_%d", phy % 100,
+        snprintf(name, sizeof(name), "cm%d_%d", real % 100,
                  (int)(getpid() % 100));
         nlb_init(&m, NL80211_CMD_NEW_INTERFACE, NLM_F_ACK);
-        nlb_u32(&m, NL80211_ATTR_WIPHY, (uint32_t)phy);
+        nlb_u32(&m, NL80211_ATTR_WIPHY, (uint32_t)real);
         nlb_put(&m, NL80211_ATTR_IFNAME, name, strlen(name) + 1);
         nlb_u32(&m, NL80211_ATTR_IFTYPE, NL80211_IFTYPE_MONITOR);
         if (have_m > 0) nlb_put(&m, NL80211_ATTR_MAC, mmac, 6);
@@ -448,7 +454,7 @@ static int mon_create(int phy)
     }
     if (r) {
         fprintf(stderr, "mon: NEW_INTERFACE phy=%d %s: %d (%s)\n",
-                phy, name, r, r < 0 ? strerror(-r) : "?");
+                real, name, r, r < 0 ? strerror(-r) : "?");
         if (have_m > 0) vap_bssid_free(phy, mmac);
         return -1;
     }
@@ -456,7 +462,7 @@ static int mon_create(int phy)
     if (ifindex <= 0) return -1;
     if (set_iface_up(name) < 0)
         fprintf(stderr, "mon: %s up: %s\n", name, strerror(errno));
-    printf("mon: %s ifindex=%d on phy%d\n", name, ifindex, phy);
+    printf("mon: %s ifindex=%d on phy%d\n", name, ifindex, real);
     fflush(stdout);
     return ifindex;
 }

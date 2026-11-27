@@ -504,7 +504,13 @@ static void vap_bridge_if_present(const char *ifname, unsigned vlan,
  * on timeout) keep one bad BSS from poisoning the whole radio. */
 static int vap_wait_ap_enabled(const char *logf, int ms)
 {
-    for (int i = 0; i < ms / 100; i++) {
+    /* CAC is not readiness: a sibling hostapd on the same real phy can switch
+     * the channel and abort it, and recording that BSS as applied meant it
+     * was never retried.  Keep polling while CAC runs (up to the 60 s DFS
+     * maximum), but only AP-ENABLED reports success. */
+    int cac = 0;
+    long limit = ms;
+    for (int i = 0; i < limit / 100; i++) {
         FILE *f = fopen(logf, "r");
         if (f) {
             /* A -dd run writes megabytes before AP-ENABLED; scanning only
@@ -519,9 +525,12 @@ static int vap_wait_ap_enabled(const char *logf, int ms)
             n = fread(b, 1, sizeof(b) - 1, f);
             fclose(f);
             b[n] = 0;
-            if (strstr(b, "AP-ENABLED") ||
-                strstr(b, "DFS-CAC-START") ||
-                strstr(b, "DFS-CAC-COMPLETED")) return 1;
+            if (strstr(b, "AP-ENABLED")) return 1;
+            if (!cac && (strstr(b, "DFS-CAC-START") ||
+                         strstr(b, "DFS-CAC-COMPLETED"))) {
+                cac = 1;
+                if (limit < 90000) limit = 90000;
+            }
             if (strstr(b, "AP-DISABLED") ||
                 strstr(b, "driver initialization failed") ||
                 strstr(b, "Could not set interface")) return 0;

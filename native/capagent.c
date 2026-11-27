@@ -128,6 +128,30 @@ static int real_phy(int phy)
 {
     return (phy >= 0 && phy < MAX_RADIOS) ? g_phy_map[phy] : phy;
 }
+
+/* nl80211/sysfs interface the hardware with a real wiphy index, while the
+ * BSS ledgers and the VAP registry are keyed by the logical radio that
+ * --phys maps onto it.  Several logical radios can share one real phy
+ * (solo: 0..3 -> phy0, 4..7 -> phy1), so return one representative logical
+ * radio and let the caller keep the real index for NL80211_ATTR_WIPHY. */
+static int logical_phy_for_real(int rphy)
+{
+    for (int i = 0; i < MAX_RADIOS; i++)
+        if (real_phy(i) == rphy) return i;
+    return -1;
+}
+
+/* True when `phy` is not the only logical radio bound to its real wiphy.
+ * A shared real phy cannot use hostapd's bridge= (a bridged AP vif on a
+ * busy 5 GHz phy returns EBUSY); those BSSes are bridged after start. */
+static int real_phy_shared(int phy, int nradios)
+{
+    int rp = real_phy(phy);
+    if (nradios > MAX_RADIOS) nradios = MAX_RADIOS;
+    for (int i = 0; i < nradios; i++)
+        if (i != phy && real_phy(i) == rp) return 1;
+    return 0;
+}
 #define BODY_MAX   16384
 
 struct cfg {

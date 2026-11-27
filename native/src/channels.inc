@@ -300,18 +300,28 @@ static void vap_bssid_alloc(int phy, const uint8_t want[6], uint8_t out[6])
         for (int i = 0; i < 8; i++) bss_addr_of_idx(base, i, legal[i]);
         nl = 8;
     }
-    /* Use the manager's address unchanged only when the driver publishes
-     * exactly that address.  Matching bytes 1..5 is not enough: byte 0
-     * also selects the index, and an address outside the plan could make
-     * the driver reprogram the radio base MAC on index 0. */
+    /* Keep the manager's address when it is a locally administered unicast
+     * address and its driver BSS index is free.  The driver keys the BSS
+     * index on byte 0 only; bytes 1..5 need not match the phy's published
+     * 2A:...:83-style plan (solo's fake radio MACs are 2A:...:90, and the
+     * manager validates the BSSID it assigned).  Index 0 is the radio base
+     * (not locally administered); it is never taken from the manager. */
+    if (want[0] & 0x02) {
+        int idx = bss_idx_of(base, want);
+        if (idx > 0 && !(g_bss_used[r] & (1u << idx))) {
+            g_bss_used[r] |= (uint8_t)(1u << idx);
+            return;
+        }
+    }
+    /* Otherwise use the published plan (or a free index in it). */
     for (int i = 0; i < nl; i++)
         if (!memcmp(want, legal[i], 6)) {
             int idx = bss_idx_of(base, want);
             if (!(g_bss_used[r] & (1u << idx))) {
                 g_bss_used[r] |= (uint8_t)(1u << idx);
-                return;                  /* manager plan is legal: keep it */
+                return;
             }
-            break;              /* legal, but its index is already taken */
+            break;
         }
     for (int i = 0; i < nl; i++) {
         int idx = bss_idx_of(base, legal[i]);
@@ -648,7 +658,13 @@ static void createvap_response(mbedtls_ssl_context *ssl, const uint8_t hdr[10],
             vp->freq = f;
         }
         if (!vp->freq) vp->freq = phy_freq_hint(phy);
-        if (!vp->freq) vp->freq = (phy & 1) ? 5180u : 2437u;
+        if (!vp->freq) {
+            /* Decide the band from the real radio, never from logical-radio
+             * parity: solo's 5 GHz logical radios 4/6 are even. */
+            struct phy_bands pb;
+            read_phy_bands(phy, &pb);
+            vp->freq = pb.nfreq ? pb.freq[0] : 2437u;
+        }
         curfreq = vp->freq;
         memcpy(vp->mgr_bssid, mac, 6);
         memcpy(vp->bssid, bssid, 6);

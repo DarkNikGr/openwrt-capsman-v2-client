@@ -550,14 +550,20 @@ static uint32_t chan_base_for_freq(uint32_t f)
     return 5950;
 }
 
-/* Current operating frequency of a radio (first VAP), else its first
-   supported frequency, else a safe default. */
+/* Current operating frequency of a radio (first live VAP), else its first
+   supported frequency, else 0. */
 static uint32_t phy_freq_hint(int phy)
 {
-    char ifn[32];
     unsigned f = 0, w = 0;
-    snprintf(ifn, sizeof(ifn), "phy%d-ap0", real_phy(phy));
-    iface_chan(ifn, &f, &w);
+    /* VAP names are built from the *logical* radio (phyN-apM /
+     * phyN-<tag>apM).  Looking for phy<real>-ap0 found nothing in solo,
+     * where logical 4..7 share real phy1. */
+    for (int v = 0; v < 16 && !f; v++) {
+        char ifn[32];
+        ap_ifname(ifn, sizeof(ifn), phy, v);
+        if (if_nametoindex(ifn) <= 0) continue;
+        iface_chan(ifn, &f, &w);
+    }
     if (f) return f;
     struct phy_bands pb;
     read_phy_bands(phy, &pb);

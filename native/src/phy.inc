@@ -25,16 +25,21 @@ static void vap_phy_paths(int phy, char *conf, size_t cl, char *pidf, size_t pl,
                           char *logf, size_t ll)
 {
     const char *t = vap_run_tag();
-    /* Tagged configs must NOT be named vap-*.conf: own_cleanup_stale()
-     * derives an ifname from every /tmp/vap-*.conf and would kill the
-     * hostapd of another instance as an "orphan" whose netdev does not
-     * exist. */
-    if (*t)
+    /* These files are per real *radio*, not per VAP.  They must NOT use the
+     * vap-* names own_cleanup_stale()/own_adopt_pidfiles() scan: those derive
+     * an ifname from the file name (phyN here), find no netdev and unlink
+     * the live hostapd's config/pid.  The tagged form keeps its historical
+     * vap-phyN-<tag>.pid name (multi-identity scripts look for it); the
+     * untagged form uses the distinct cap-phyN base. */
+    if (*t) {
         snprintf(conf, cl, VAP_CONF_DIR "/cap-phy%d-%s.conf", phy, t);
-    else
-        snprintf(conf, cl, VAP_CONF_DIR "/vap-phy%d.conf", phy);
-    snprintf(pidf, pl, "/var/run/vap-phy%d%s%s.pid", phy, *t ? "-" : "", t);
-    snprintf(logf, ll, "/tmp/vap-phy%d%s%s.log", phy, *t ? "-" : "", t);
+        snprintf(pidf, pl, "/var/run/vap-phy%d-%s.pid", phy, t);
+        snprintf(logf, ll, "/tmp/vap-phy%d-%s.log", phy, t);
+    } else {
+        snprintf(conf, cl, VAP_CONF_DIR "/cap-phy%d.conf", phy);
+        snprintf(pidf, pl, "/var/run/cap-phy%d.pid", phy);
+        snprintf(logf, ll, "/tmp/vap-phy%d.log", phy);
+    }
 }
 
 /* Pid of the phy-wide hostapd.  hostapd -B may leave the -P file empty, so
@@ -62,6 +67,22 @@ static int vap_proc_has_conf(pid_t pid, const char *conf)
     return 0;
 }
 
+/* hostapd rewrites its argv after startup, so the config path is no longer
+ * in /proc/<pid>/cmdline.  /proc/<pid>/comm survives and identifies the
+ * daemon; the pid file name already ties the pid to this logical radio. */
+static int vap_proc_is_hostapd(pid_t pid)
+{
+    char p[64], b[32];
+    snprintf(p, sizeof(p), "/proc/%ld/comm", (long)pid);
+    int fd = open(p, O_RDONLY);
+    if (fd < 0) return 0;
+    ssize_t n = read(fd, b, sizeof(b) - 1);
+    close(fd);
+    if (n <= 0) return 0;
+    b[n] = 0;
+    return !strncmp(b, "hostapd", 7) || !strncmp(b, "wpad", 4);
+}
+
 /* pid_is_zombie() lives in ownership.inc (shared with own_pid_alive). */
 
 static pid_t vap_phy_pid(int phy)
@@ -81,7 +102,8 @@ static pid_t vap_phy_pid(int phy)
             fpid = 0;
         } else if (fgot == 1 && fpid > 0 &&
                    (kill((pid_t)fpid, 0) == 0 || errno == EPERM) &&
-                   vap_proc_has_conf((pid_t)fpid, conf))
+                   (vap_proc_has_conf((pid_t)fpid, conf) ||
+                    vap_proc_is_hostapd((pid_t)fpid)))
             return (pid_t)fpid;
     }
     DIR *d = opendir("/proc");
@@ -220,10 +242,12 @@ static void vap_phy_bss(FILE *f, const char *kw, const struct own_entry *e,
             e->bssid[4], e->bssid[5]);
     /* With one hostapd per phy the kernel can bridge the interface while
      * hostapd brings it up.  When several capagent instances share the phy
-     * (multi-identity, CAPAGENT_RUN_TAG) opening a bridged AP vif on a phy
-     * that already has a running AP returns EBUSY on the 5 GHz driver, so
-     * those instances bridge it after hostapd is up. */
-    if (bridge[0] && !*ap_tag() && !getenv("CAPAGENT_NO_BRIDGE"))
+     * (multi-identity, CAPAGENT_RUN_TAG) or several logical radios share one
+     * real phy (solo), opening a bridged AP vif on a phy that already has a
+     * running AP returns EBUSY on the 5 GHz driver, so those BSSes bridge
+     * after hostapd is up. */
+    if (bridge[0] && !*ap_tag() && !getenv("CAPAGENT_NO_BRIDGE") &&
+        !real_phy_shared(e->port >> 8, c->nradios))
         fprintf(f, "bridge=%s\n", bridge);
 
     char rsn[256];
@@ -696,8 +720,10 @@ static int vap_phy_apply(int phy, const struct cfg *c)
         }
     }
     /* Tagged (multi-identity) instances could not use hostapd's bridge= on
-     * 5 GHz; join each BSS to its VLAN bridge now that it is up. */
-    if (*ap_tag() || getenv("CAPAGENT_NO_BRIDGE")) {
+     * 5 GHz; the same is true when several logical radios share one real
+     * phy.  Join each BSS to its VLAN bridge now that it is up. */
+    if (*ap_tag() || getenv("CAPAGENT_NO_BRIDGE") ||
+        real_phy_shared(phy, c->nradios)) {
         for (int i = 0; i < OWN_MAX; i++) {
             struct own_entry *e = &g_own[i];
             if (!vap_phy_row_cfg(e, phy) || !e->vlan) continue;
