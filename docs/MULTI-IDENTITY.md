@@ -90,6 +90,13 @@ The init script uses this file automatically (one procd instance per line).
 debugging; it uses the same file. Each identity enrols its certificate on
 first start.
 
+Starts are **staggered**: with one phy shared by four hostapd instances,
+opening them at the same instant loses the driver race and leaves orphan AP
+vifs that advertise the SSID but answer no authentication (F75). The init
+script delays identity *n* by `n × CAPAGENT_STAGGER` (default 15 s, set
+`CAPAGENT_STAGGER=20` in `capagent.conf` to match the manual launcher); the
+manual launcher uses `DELAY=20`.
+
 ### First-byte rule on 5 GHz (F74)
 
 The mt76x2 driver derives the **BSS index from the first byte** of the

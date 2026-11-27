@@ -73,10 +73,10 @@ common_args() {
 	[ -n "${MLME_PORT:-}" ] && printf '%s\n' --mlme-port "${MLME_PORT}"
 }
 
-# start_instance <procd-instance-name> <command...>
+# start_instance <procd-instance-name> <env-tag|""> <delay-seconds> <command...>
 start_instance() {
-	local instance=$1
-	shift
+	local instance=$1 envtag=$2 delay=$3
+	shift 3
 	if [ -n "$instance" ]; then
 		procd_open_instance "$instance"
 	else
@@ -85,10 +85,21 @@ start_instance() {
 	# The preflight is a thin wait-and-exec wrapper.  It stays in the
 	# foreground, so procd still supervises the real capagent PID.
 	if [ -x "$PREFLIGHT" ]; then
-		procd_set_param command "$PREFLIGHT" "$@"
+		set -- "$PREFLIGHT" "$@"
+	fi
+	# Multi-identity instances share a phy.  Starting two hostapd processes
+	# at the same instant loses the race: the later hostapd dies and leaves
+	# an orphan AP vif that answers nothing.  A fixed gap per identity (see
+	# start_multi) is the same serialisation that the manual launcher uses.
+	if [ "$delay" -gt 0 ]; then
+		procd_set_param command /bin/sh -c \
+			"sleep $delay; exec \"\$@\"" sh "$@"
 	else
 		procd_set_param command "$@"
 	fi
+	# CAPAGENT_RUN_TAG names the hostapd config/pid/log files and the
+	# netdevs; it must be inherited by the hostapd child.
+	[ -n "$envtag" ] && procd_set_param env CAPAGENT_RUN_TAG="$envtag"
 	# Infinite respawn: 3600/5 with retry=0 means "no crash-loop limit".
 	procd_set_param respawn 3600 5 0
 	procd_set_param term_timeout 10
@@ -107,7 +118,8 @@ start_instance() {
 # at once; capagent retries discovery until the manager answers, so a
 # certificate enrolment in one identity does not block the others.
 start_multi() {
-	local tag identity macs rest dir
+	local tag identity macs rest dir idx=0
+	local stagger=${CAPAGENT_STAGGER:-15}
 	while read -r tag identity macs rest; do
 		case "$tag" in ''|\#*) continue ;; esac
 		[ -n "$identity" ] && [ -n "$macs" ] || continue
@@ -120,20 +132,8 @@ start_multi() {
 			--identity "$identity" \
 			--ext-auth-dir "$dir" \
 			--vap-state "/var/run/caps$tag.state"
-		procd_open_instance "cap-$tag"
-		if [ -x "$PREFLIGHT" ]; then
-			procd_set_param command "$PREFLIGHT" "$@"
-		else
-			procd_set_param command "$@"
-		fi
-		# CAPAGENT_RUN_TAG names the hostapd config/pid/log files and the
-		# netdevs; it must be inherited by the hostapd child.
-		procd_set_param env CAPAGENT_RUN_TAG="$tag"
-		procd_set_param respawn 3600 5 0
-		procd_set_param term_timeout 10
-		procd_set_param stdout 1
-		procd_set_param stderr 1
-		procd_close_instance
+		start_instance "cap-$tag" "$tag" $((idx * stagger)) "$@"
+		idx=$((idx + 1))
 	done <"$MULTI_CONF"
 }
 
@@ -162,7 +162,7 @@ start_service() {
 	[ -n "${STATE_FILE:-}" ] && set -- "$@" --state-file "${STATE_FILE}"
 	[ -n "${VAP_STATE:-}" ] && set -- "$@" --vap-state "${VAP_STATE}"
 
-	start_instance "" "$@"
+	start_instance "" "" 0 "$@"
 }
 
 service_triggers() {
