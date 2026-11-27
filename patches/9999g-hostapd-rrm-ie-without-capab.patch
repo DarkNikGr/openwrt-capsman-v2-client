@@ -1,0 +1,16 @@
+hostapd: parse the station RM IE even without the capability bit
+
+wpa_supplicant 2.11 adds the RM Enabled Capabilities element to its
+Association Request but does not set WLAN_CAPABILITY_RADIO_MEASUREMENT in the
+capability field, so hostapd drops the element and req_beacon refuses with
+'does not support ... beacon report'.  A CAP that wants to relay 802.11k
+reports should accept the explicit IE.
+
+--- a/src/ap/ieee802_11.c
++++ b/src/ap/ieee802_11.c
+@@ -4418,4 +4418,3 @@
+-	if ((sta->capability & WLAN_CAPABILITY_RADIO_MEASUREMENT) &&
+-	    elems->rrm_enabled &&
++	if (elems->rrm_enabled &&
+ 	    elems->rrm_enabled_len >= sizeof(sta->rrm_enabled_capa))
+ 		os_memcpy(sta->rrm_enabled_capa, elems->rrm_enabled,

@@ -210,6 +210,11 @@ static void vap_phy_bss(FILE *f, const char *kw, const struct own_entry *e,
         if (d) fprintf(f, "dtim_period=%u\n", d);
     }
     if (ssid && sl) fprintf(f, "ssid=%.*s\n", (int)sl, (const char *)ssid);
+    /* CAPAGENT_RRM advertises the RM Enabled Capabilities element so a
+     * station enables its own RRM (and answers beacon-report requests).  The
+     * manager does not send RRM caps in 0x6016, so this is opt-in. */
+    if (getenv("CAPAGENT_RRM"))
+        fprintf(f, "rrm_neighbor_report=1\nrrm_beacon_report=1\n");
     fprintf(f, "bssid=%02x:%02x:%02x:%02x:%02x:%02x\n",
             e->bssid[0], e->bssid[1], e->bssid[2], e->bssid[3],
             e->bssid[4], e->bssid[5]);
