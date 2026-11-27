@@ -10,12 +10,23 @@
  * `interface=` plus `bss=` sections, which is what this does.
  */
 
+/* A second capagent instance (a distinct CAP identity for the same wiphy, see
+ * the multi-identity experiment) must not share the per-phy config/pid/log
+ * paths with the first one.  CAPAGENT_RUN_TAG adds a suffix to them. */
+static const char *vap_run_tag(void)
+{
+    const char *t = getenv("CAPAGENT_RUN_TAG");
+    return (t && *t) ? t : "";
+}
+
 static void vap_phy_paths(int phy, char *conf, size_t cl, char *pidf, size_t pl,
                           char *logf, size_t ll)
 {
-    snprintf(conf, cl, VAP_CONF_DIR "/vap-phy%d.conf", phy);
-    snprintf(pidf, pl, "/var/run/vap-phy%d.pid", phy);
-    snprintf(logf, ll, "/tmp/vap-phy%d.log", phy);
+    const char *t = vap_run_tag();
+    snprintf(conf, cl, VAP_CONF_DIR "/vap-phy%d%s%s.conf", phy,
+             *t ? "-" : "", t);
+    snprintf(pidf, pl, "/var/run/vap-phy%d%s%s.pid", phy, *t ? "-" : "", t);
+    snprintf(logf, ll, "/tmp/vap-phy%d%s%s.log", phy, *t ? "-" : "", t);
 }
 
 /* Pid of the phy-wide hostapd.  hostapd -B may leave the -P file empty, so
