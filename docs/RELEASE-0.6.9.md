@@ -90,6 +90,24 @@ from v0.6.8 is unchanged.
   check `/sys/class/ieee80211/phy1/macaddress` before provisioning.
 * `CAPAGENT_5G_PER_VAP=yes` is kept as an alias; prefer `PER_VAP=auto`.
 
+## Verified on
+
+Xiaomi Mi Router 4A Gigabit (ramips/mt7621, OpenWrt 24.10), RB1100AHx4 /
+RouterOS 7.25.1, `capagent 0.6.9`, stock `mt76x02` modules:
+
+```
+ssids=8  capagent=1  hostapd=7
+capagent 0.6.9
+```
+
+The zero-touch sysupgrade image ships `KEEP_SEC=yes`, `SLAVES_STATIC=yes` and
+`PER_VAP=auto` by default.
+
+* image: `6fdeadc76e2bf74998dffea8b5c8e004de25bb9a717a69d4f87ef208d99e036e`
+  (7,537,762 B)
+* `capagent-mipsel`: `142f872ae7abe2e2cff52d67bb673cb279218626a5e2b57b58a93b8b075a4aa9`
+* `capagent-aarch64`: `f0f0cd158551140eaf6b91716c57c3c00a73073927c31570951dca2460eca71f`
+
 ## Not in this release
 
 * Dynamic manager 5G slaves (`2A:...:85/86/87`) on mt76x02 — driver/hardware
