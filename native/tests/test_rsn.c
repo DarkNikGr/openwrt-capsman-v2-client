@@ -581,6 +581,26 @@ static void case_blob(void)
     assert(bl == 0);
 }
 
+/* 6 GHz / be VAP: beacon_prot=1 is only emitted when the band policy asks
+ * for it (phy.inc sets it for a >=5925 MHz BSS whose binary supports it). */
+static void case_beacon_prot(void)
+{
+    struct rsn_info ri;
+    struct rsn_policy rp;
+    char conf[512];
+
+    rsn_parse(ie_psk_sae, sizeof(ie_psk_sae), &ri);
+    rsn_policy_from_ie(&ri, 1, &rp);
+
+    assert(rp.beacon_prot == 0);
+    size_t n = rsn_conf_write(conf, sizeof(conf), &rp);
+    assert(n && !strstr(conf, "beacon_prot"));
+
+    rp.beacon_prot = 1;
+    n = rsn_conf_write(conf, sizeof(conf), &rp);
+    assert(n && strstr(conf, "beacon_prot=1\n"));
+}
+
 /* The writer must never overflow the caller's buffer. */
 static void case_truncation(void)
 {
@@ -618,6 +638,7 @@ int main(void)
     case_ft();
     case_unsupported();
     case_blob();
+    case_beacon_prot();
     case_truncation();
     puts("RSN decision (PSK/MFPC/MFPR/SAE/OWE/PSK256/EAP/FT): PASS");
     return 0;

@@ -634,34 +634,51 @@ static void build_newphy(uint8_t *b, const uint8_t mac[6], int phy, size_t *out)
         put32(v32, pc.rx_chain);
         n += put_el(b+n, 0x4c, v32, 4);   /* rx chains */
     }
-    for (int i = 0; i < pb.nband; i++) {
-        uint8_t bd[5] = { pb.band[i], 0, 0, 0, 0x01 };
-        if (pb.band[i] == 0x82 || pb.band[i] == 0x03) bd[4] = 0x03;
-        if (pb.band[i] == 0x03 || pb.band[i] == 0x06 ||
-            pb.band[i] == 0x04) bd[4] = 0x07;
-        n += put_el(b+n, 0x4d, bd, 5);
-    }
-
-    /* WiFi 6/7 band ids, only when the phy reports HE/EHT AP support. */
+    /* One 0x4d per band id.  pb.band[] already contains the generation id
+     * for each physical band (0x04/0x06 for 6 GHz).  The HE/EHT additions
+     * below must not repeat an id: 0x06 is both the 5 GHz and the 6 GHz
+     * "be" label, so a tri-band EHT radio used to emit it two or three
+     * times, and a duplicate makes the manager's band row ambiguous. */
     {
+        uint8_t ids[8];
+        int nid = 0;
         int have5 = 0, have6 = 0, have_ax = 0;
         int no_eht = getenv("CAPAGENT_NO_EHT") != NULL;
         for (int i = 0; i < pb.nfreq; i++) {
             if (pb.freq[i] >= 4900 && pb.freq[i] < 5925) have5 = 1;
             if (pb.freq[i] >= 5925) have6 = 1;
         }
-        for (int i = 0; i < pb.nband; i++)
+        for (int i = 0; i < pb.nband && nid < (int)sizeof(ids); i++) {
+            int dup = 0;
+            for (int k = 0; k < nid; k++)
+                if (ids[k] == pb.band[i]) dup = 1;
+            if (!dup) ids[nid++] = pb.band[i];
             if (pb.band[i] == 0x04) have_ax = 1;
-        if (have5 && pc.has_he && !have_ax) {
-            uint8_t bd[5] = { 0x04, 0, 0, 0, 0x07 };
-            n += put_el(b+n, 0x4d, bd, 5);
         }
-        if (!no_eht && have5 && pc.has_eht) {
-            uint8_t bd[5] = { 0x06, 0, 0, 0, 0x07 };
-            n += put_el(b+n, 0x4d, bd, 5);
+        /* A 5 GHz HE radio needs 0x04 even when the same wiphy also has a
+         * 6 GHz HE radio (whose pb.band[] entry is already 0x04): the
+         * dedupe above turns that into one id, and without this line the
+         * 5 GHz HE band would be missing entirely on a tri-band HE wiphy. */
+        if (have5 && pc.has_he && !have_ax && nid < (int)sizeof(ids))
+            ids[nid++] = 0x04;
+        if (!no_eht && pc.has_eht) {
+            if (have5) {
+                int dup = 0;
+                for (int k = 0; k < nid; k++) if (ids[k] == 0x06) dup = 1;
+                if (!dup && nid < (int)sizeof(ids)) ids[nid++] = 0x06;
+            }
+            if (have6) {
+                uint8_t e = band6_for(pc.has_eht);
+                int dup = 0;
+                for (int k = 0; k < nid; k++) if (ids[k] == e) dup = 1;
+                if (!dup && nid < (int)sizeof(ids)) ids[nid++] = e;
+            }
         }
-        if (!no_eht && have6 && pc.has_eht && band6_for(pc.has_eht) == 0x06) {
-            uint8_t bd[5] = { 0x06, 0, 0, 0, 0x07 };
+        for (int i = 0; i < nid; i++) {
+            uint8_t bd[5] = { ids[i], 0, 0, 0, 0x01 };
+            if (ids[i] == 0x82 || ids[i] == 0x03) bd[4] = 0x03;
+            if (ids[i] == 0x03 || ids[i] == 0x06 || ids[i] == 0x04)
+                bd[4] = 0x07;
             n += put_el(b+n, 0x4d, bd, 5);
         }
     }

@@ -19,8 +19,8 @@ top-level [`README.md`](../README.md); the documents below go deeper.
 | [`REGRESSION-GATE.md`](REGRESSION-GATE.md) | acceptance modes, pass rules, baselines |
 | [`../SECURITY.md`](../SECURITY.md) | threat model and deployment hardening |
 | [`../patches/README.md`](../patches/README.md) | hostapd patch series (999 … 9999j) |
-| [`RELEASES.md`](RELEASES.md) | index of per-release notes (v0.4.0 → v0.6.6) |
+| [`RELEASES.md`](RELEASES.md) | index of per-release notes (v0.4.0 → v0.6.7) |
 | [`history/`](history/README.md) | superseded work reports, kept as evidence only |
 
-Current version: **v0.6.6** ([release](RELEASE-0.6.6.md),
+Current version: **v0.6.7** ([release](RELEASE-0.6.7.md),
 [all releases](RELEASES.md)).

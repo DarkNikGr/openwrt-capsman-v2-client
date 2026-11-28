@@ -203,7 +203,12 @@ static void vap_write_channel(FILE *f, uint32_t freq, int wcode)
         switch (wcode) {
         case 2:  width = 40; break;
         case 3:  width = 80; break;
-        case 4:  width = 160; break;
+        /* RouterOS 7.25.1 sends width 5 for a 160 MHz 6 GHz profile and
+         * reserves 4 for 80+80 (a 6 GHz profile cannot use it).  Accept
+         * both for 160 so a profile provisioned by either encoding runs at
+         * 160; width 6 (320) has no HE hostapd encoding and falls back. */
+        case 4:
+        case 5:  width = 160; break;
         default: width = 20; break;
         }
         opclass = width == 160 ? 134 : width == 80 ? 133 :

@@ -125,7 +125,7 @@
  * can never drift from the tag again.  The literal below is only the fallback
  * for a plain `cc capagent.c` and must be bumped with VERSION. */
 #ifndef CAPAGENT_VERSION
-#define CAPAGENT_VERSION "0.6.6"
+#define CAPAGENT_VERSION "0.6.7"
 #endif
 
 static uint64_t g_sta_ident;   /* last manager station-level ident */

@@ -100,6 +100,7 @@ struct rsn_policy {
     int external_auth;   /* SAE/OWE present and the CAP owns 802.11 Auth */
     int local_owe;       /* OWE handled by this hostapd (no manager relay) */
     int want_rsnxe;      /* relay element 244 (RSNXE) too */
+    int beacon_prot;     /* emit beacon_prot=1 (6 GHz / be, 0x84 bit 9) */
 };
 
 static void rsn_key_mgmt_add(char *buf, size_t n, size_t *len, const char *s)
@@ -233,6 +234,7 @@ static size_t rsn_conf_write(char *out, size_t n, const struct rsn_policy *p)
                      "ieee80211w=%d\n"
                      "%s"
                      "%s"
+                     "%s"
                      "%s",
                      (p->ft && p->mdid[0]) ? p->key_mgmt :
                          (p->key_mgmt_base[0] ? p->key_mgmt_base
@@ -241,7 +243,8 @@ static size_t rsn_conf_write(char *out, size_t n, const struct rsn_policy *p)
                      p->group_mgmt_cmac ?
                          "group_mgmt_cipher=AES-128-CMAC\n" : "",
                      p->sae_pwe ? "sae_pwe=2\n" : "",
-                     p->local_owe ? "" : "external_rsn_auth=1\n");
+                     p->local_owe ? "" : "external_rsn_auth=1\n",
+                     p->beacon_prot ? "beacon_prot=1\n" : "");
     }
     if (r < 0) return 0;
     if (p->wpa && p->ft && p->mdid[0]) {

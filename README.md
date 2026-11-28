@@ -1,6 +1,6 @@
 # MikroTik CAPsMAN v2 client for OpenWrt
 
-**v0.6.6** — see [`docs/RELEASE-0.6.6.md`](docs/RELEASE-0.6.6.md) and the
+**v0.6.7** — see [`docs/RELEASE-0.6.7.md`](docs/RELEASE-0.6.7.md) and the
 [release index](docs/RELEASES.md). Canonical documentation index:
 [`docs/README.md`](docs/README.md).
 
@@ -48,7 +48,7 @@ OpenWrt 24.10, MediaTek MT7603E + MT7612E), managed by an
 >   advertises all eight fake radios in one TLS session (`IDENTITY=OpenWrt-CAPSOLO`,
 >   `MACS=…`, `PHYS=0,0,0,0,1,1,1,1`), so the manager shows a single
 >   `cap=OpenWrt-CAPSOLO` with 8 radios. After a **cold reboot** all eight
->   station tests are `authorized: yes`, 3/3, 0% (v0.6.6). The eight-identity
+>   station tests are `authorized: yes`, 3/3, 0% (v0.6.7). The eight-identity
 >   fallback (`/etc/cap/identities.conf`, one CAP entry per SSID) still works.
 >   The plain single-identity default (`MACS=auto`) still broadcasts all eight
 >   SSIDs but only the master BSS per radio authenticates (F58–F60); use solo
@@ -65,11 +65,13 @@ OpenWrt 24.10, MediaTek MT7603E + MT7612E), managed by an
 >   Beacon report token 1, relayed as `0x2018 action len=235` (F69/F71).
 >   802.11v/BTM: request `0x2019 action len=49`, response `0x2018 action
 >   len=29` (F67). The bench Intel 3168 still drops the RM IE.
-> * **6 GHz `6ghz-ax` is live on `mac80211_hwsim`** (SAE, 20/80 MHz, ping
->   0%). The manager matches the descriptor band byte, not the NEWPHY label:
->   `0x04` gives `5955/ax`, `0x06` gives `6ghz-be` for EHT (F85). A SAE
->   station is `authorized: yes` with 0% loss. The reference Xiaomi has no
->   6 GHz hardware; real RF/AFC are still untested.
+> * **6 GHz `6ghz-ax` is live on `mac80211_hwsim` at 20/40/80/160** (SAE,
+>   ping 0%). The manager matches the descriptor band byte, not the NEWPHY
+>   label: `0x04` gives `5955/ax`, `0x06` gives `6ghz-be` for EHT (F85);
+>   160 MHz is descriptor width 5, not 4. A SAE station is
+>   `authorized: yes` with 0% loss; `6ghz-be` 160 works on EHT hwsim. 320 is
+>   manager-accepted but hostapd runs 20 MHz (F89). The reference Xiaomi has
+>   no 6 GHz hardware; real RF/AFC are untested.
 > * **OWE is live.** RouterOS 7.25.1 never sends a DH-bearing `0x6019`, so a
 >   pure-OWE VAP is completed by the CAP's own hostapd while the manager still
 >   provisions SSID/security/channel/VLAN. A station does the OWE DH, the
@@ -184,7 +186,7 @@ control plane; only the data path differs.
 
 ## Status
 
-Last updated 2026-11-28 against `main` (v0.6.6). "Live" means the reference Xiaomi
+Last updated 2026-11-28 against `main` (v0.6.7). "Live" means the reference Xiaomi
 Mi Router 4A + RB1100AHx4 / RouterOS 7.25.1; "lab" means CHR 7.25.1 + hwsim.
 
 | Capability | State |
@@ -316,10 +318,11 @@ Still open, in priority order:
 3. **Soak / concurrency.** SAE, OWE and PMF across several VAPs at once, GTK
    rekey under load, and a hardware matrix beyond the two reference devices.
    OWE itself is live now (CAP-local OWE, F80); the remaining item is scale.
-4. **6 GHz / MLO.** The 6 GHz SAE datapath and `channel.band=6ghz-ax` are
-   proven on a virtual radio (20/80 MHz, F85); real 6 GHz RF/AFC and ath12k
-   per-link MLO plumbing are not implemented. The Deco BE65 is read-only; the
-   hardware plan is `docs/HARDWARE-6GHZ-MLO-PLAN.md`.
+4. **6 GHz / MLO.** The 6 GHz SAE datapath and `6ghz-ax` are proven at
+   20/40/80/160 (F85); 320 is manager-accepted but hostapd runs 20 MHz (F89).
+   Real 6 GHz RF/AFC and ath12k per-link MLO plumbing are not implemented.
+   The Deco BE65 is read-only; the hardware plan is
+   `docs/HARDWARE-6GHZ-MLO-PLAN.md`.
 5. **Boot-time PSK pull** for local forwarding — validated prototype only; the
    supported path is `traffic-processing=on-cap` with the manager as
    authenticator.
@@ -488,7 +491,7 @@ wifi-scripts package recipe, the patch-series check and the recorded hashes,
 see [`docs/BUILD.md`](docs/BUILD.md). The build is reproducible: two clean
 clones of the same commit produce the same binary.
 
-The version is printed by `capagent --version` (`0.6.6`) and stored in
+The version is printed by `capagent --version` (`0.6.7`) and stored in
 `VERSION`. Output: `dist/capagent-mipsel` / `dist/capagent-aarch64` (static,
 stripped). `dist/` is a local, gitignored build directory; published binaries
 live under

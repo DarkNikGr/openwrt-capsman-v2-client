@@ -51,15 +51,15 @@ static void check(const char *what, uint32_t got, uint32_t want)
 }
 
 /* Parse one descriptor and verify fields.  Returns 1 on structural error. */
-static int parse_desc(const uint8_t *b, size_t n, uint32_t freq, uint8_t width,
-                      uint8_t band, uint32_t ccfi)
+static int parse_desc2(const uint8_t *b, size_t n, uint32_t freq, uint8_t width,
+                       uint8_t band, uint32_t ccfi, uint32_t ccfi2)
 {
     if (n < 4 || rd16(b) != 0x0a) { printf("FAIL outer TLV id\n"); fails++; return 1; }
     uint16_t ol = rd16(b + 2);
     const uint8_t *s = b + 4;
-    uint32_t got_f = 0, got_c = 0;
+    uint32_t got_f = 0, got_c = 0, got_c2 = 0;
     uint8_t got_w = 0, got_b = 0;
-    int have_c = 0;
+    int have_c = 0, have_c2 = 0;
     for (uint16_t i = 0; i + 4 <= ol; ) {
         uint16_t id = rd16(s + i), l = rd16(s + i + 2);
         const uint8_t *v = s + i + 4;
@@ -67,6 +67,7 @@ static int parse_desc(const uint8_t *b, size_t n, uint32_t freq, uint8_t width,
         if (id == 0x0b && l == 4) got_f = rd32(v);
         if (id == 0x0c && l == 1) got_w = v[0];
         if (id == 0x0d && l == 4) { got_c = rd32(v); have_c = 1; }
+        if (id == 0x0e && l == 4) { got_c2 = rd32(v); have_c2 = 1; }
         if (id == 0x10 && l == 1) got_b = v[0];
         i += 4 + l;
     }
@@ -75,7 +76,15 @@ static int parse_desc(const uint8_t *b, size_t n, uint32_t freq, uint8_t width,
     check("band", got_b, band);
     check("centre present", (uint32_t)have_c, width > 1 ? 1 : 0);
     if (width > 1) check("centre freq", got_c, ccfi);
+    check("second centre present", (uint32_t)have_c2, ccfi2 ? 1 : 0);
+    if (ccfi2) check("second centre freq", got_c2, ccfi2);
     return 0;
+}
+
+static int parse_desc(const uint8_t *b, size_t n, uint32_t freq, uint8_t width,
+                      uint8_t band, uint32_t ccfi)
+{
+    return parse_desc2(b, n, freq, width, band, ccfi, 0);
 }
 
 int main(void)
@@ -85,15 +94,27 @@ int main(void)
     setenv("CAPAGENT_CHAN_BAND6", "04", 1);
     check("chan_band6 override", chan_band6(), 0x04);
 
-    /* Exactly the calls add_channel_tlvs() makes for 5955 MHz. */
-    static const struct { uint8_t w; uint32_t ccfi; } d[] = {
-        { 1, 0 }, { 2, 5965 }, { 3, 5985 }, { 4, 6025 },
+    /* Exactly the calls add_channel_tlvs() makes for 5955 MHz.  On
+     * RouterOS 7.25.1 width 5 is 160 MHz (centre 6025) and width 4 is the
+     * two-centre 80+80 form; width 6 is 320 MHz, whose centre for 5955 in
+     * a 64-channel block is channel 31 (6105 MHz). */
+    static const struct { uint8_t w; uint32_t ccfi, ccfi2; } d[] = {
+        { 1, 0, 0 }, { 2, 5965, 0 }, { 3, 5985, 0 }, { 5, 6025, 0 },
+        { 6, 6105, 0 }, { 4, 5985, 5775 },
     };
     for (size_t i = 0; i < sizeof(d) / sizeof(d[0]); i++) {
         uint8_t b[64] = {0};
-        size_t n = add_chan_desc(b, 0, 5955, d[i].w, chan_band6(), d[i].ccfi);
+        size_t n = add_chan_desc2(b, 0, 5955, d[i].w, 0x06,
+                                  d[i].ccfi, d[i].ccfi2);
         printf("-- 5955/width %u\n", d[i].w);
-        parse_desc(b, n, 5955, d[i].w, 0x04, d[i].ccfi);
+        parse_desc2(b, n, 5955, d[i].w, 0x06, d[i].ccfi, d[i].ccfi2);
+    }
+
+    /* Width 6 must not grow an inferred second-centre field. */
+    {
+        uint8_t b[64] = {0};
+        size_t n = add_chan_desc(b, 0, 5955, 6, 0x06, 6105);
+        parse_desc(b, n, 5955, 6, 0x06, 6105);
     }
 
     printf(fails ? "\n%d FAILURE(S)\n" : "\nall checks passed\n", fails);

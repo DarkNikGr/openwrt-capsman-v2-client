@@ -68,13 +68,26 @@ static uint32_t c160_6g(uint32_t f)
     return 5950 + (uint32_t)(start + 14) * 5;
 }
 
+/* 320 MHz is a 64-channel block; its centre is start+30.  In 6 GHz the
+ * 320 MHz-1 centres are 31/95/159/223.  (The offset 320 MHz-2 alignment
+ * uses 63/127/191; a single primary frequency cannot select both, so only
+ * the aligned-64 form is advertised.) */
+static uint32_t c320_6g(uint32_t f)
+{
+    int ch = (int)((f - 5950) / 5);
+    int start = ((ch - 1) / 64) * 64 + 1;
+    return 5950 + (uint32_t)(start + 30) * 5;
+}
+
 static size_t add_channel_tlvs(uint8_t *b, size_t n, int phy)
 {
     struct phy_bands pb;
     read_phy_bands(phy, &pb);
     for (int i = 0; i < pb.nfreq; i++) {
         uint32_t f = pb.freq[i];
-        if (n + 4 * 48 > BODY_MAX) break;
+        /* A frequency now emits at most six descriptors (20/40/80/160/320
+         * plus opt-in 80+80); 48 bytes covers each one. */
+        if (n + 6 * 48 > BODY_MAX) break;
         if (f < 3000) {                                   /* 2.4 GHz */
             n = add_chan_desc(b, n, f, 1, 0x81, f);       /* g  20 */
             n = add_chan_desc(b, n, f, 1, 0x82, f);       /* n  20 */
@@ -90,6 +103,17 @@ static size_t add_channel_tlvs(uint8_t *b, size_t n, int phy)
             }
             if (ccfi80(f) != f)                           /* ac 80 */
                 n = add_chan_desc(b, n, f, 3, 0x03, ccfi80(f));
+            /* 80+80 is a 5 GHz-only construct.  On RouterOS 7.25.1 the
+             * manager renders width 4 with no second segment as
+             * "5955/ax/eeee/?(4/6025/0)" and refuses a 160 profile, but
+             * width 4 *with* a 0x0e second centre is the 80+80 form.  The
+             * 0x0e id is inferred, not captured, so it stays behind
+             * CAPAGENT_CHAN_8080 until a manager reply confirms it. */
+            if (getenv("CAPAGENT_CHAN_8080") && ccfi80(f) != f) {
+                uint32_t s0 = ccfi80(f);
+                uint32_t s1 = s0 < 5500 ? 5775 : 5210;
+                n = add_chan_desc2(b, n, f, 4, 0x03, s0, s1);
+            }
         } else {                                          /* 6 GHz */
             /* The reply is bounded by BODY_MAX; stop before overflowing it.
              * The descriptor band is 0x04 for a HE-only (6ghz-ax) radio and
@@ -97,11 +121,25 @@ static size_t add_channel_tlvs(uint8_t *b, size_t n, int phy)
              * configuration band against this byte, not against the NEWPHY
              * label. */
             uint8_t b6 = band6_for(phy_has_eht(phy));
-            if (n + 4 * 48 > BODY_MAX) break;
+            if (n + 6 * 48 > BODY_MAX) break;
             n = add_chan_desc(b, n, f, 1, b6, f);
             n = add_chan_desc(b, n, f, 2, b6, c40_6g(f));
             n = add_chan_desc(b, n, f, 3, b6, c80_6g(f));
-            n = add_chan_desc(b, n, f, 4, b6, c160_6g(f));
+            /* RouterOS 7.25.1 matches a 160 MHz profile against width 5,
+             * not width 4.  A width-4 descriptor without a second centre is
+             * rendered as "eeee/?(4/<centre>/0)" and never provisioned;
+             * width 5 is rendered "Ceeeeeee" and is accepted.  Keep 160 as
+             * width 5 so the manager's 160 profile has a descriptor. */
+            n = add_chan_desc(b, n, f, 5, b6, c160_6g(f));
+            /* EHT is the only 6 GHz generation that defines 320 MHz.  It
+             * is a capability, not a per-frequency one: advertise it for
+             * every 6 GHz primary on an EHT radio (iw has no bandwidth
+             * list to consult); CAPAGENT_NO_320 turns it off for a lab.
+             * CAPAGENT_CHAN_320 forces the descriptor onto a HE-only phy so
+             * the manager side can be tested separately from the radio. */
+            int want320 = phy_has_eht(phy) || getenv("CAPAGENT_CHAN_320");
+            if (want320 && !getenv("CAPAGENT_NO_320"))
+                n = add_chan_desc(b, n, f, 6, b6, c320_6g(f));
         }
     }
     return n;

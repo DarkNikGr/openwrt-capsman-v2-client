@@ -189,6 +189,15 @@ static void vap_phy_bss(FILE *f, const char *kw, const struct own_entry *e,
     rsn_parse(ie, il, &ri);
     struct rsn_policy rp;
     rsn_policy_from_ie(&ri, hostapd_has_sae_override(), &rp);
+    /* NEWPHY 0x84 bit 9 (caps84[1] 0x02) is set whenever the phy has a
+     * >= 5925 MHz frequency, i.e. the CAP tells the manager it supports
+     * beacon protection.  Actually enable it on the matching BSS, or the
+     * claim is only a join gate.  hostapd requires PMF, and the option
+     * name is beacon_prot in the 2.10+ sample config; probe the binary so
+     * an older/patched hostapd cannot make the whole phy config invalid. */
+    if (e->freq >= 5925 && rp.wpa && rp.ieee80211w &&
+        hostapd_has_opt("beacon_prot"))
+        rp.beacon_prot = 1;
     if (rp.ft) {
         uint8_t md[2];
         if (rsn_mde_mdid(ie, il, md))
