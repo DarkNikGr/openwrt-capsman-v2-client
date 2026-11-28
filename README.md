@@ -1,6 +1,6 @@
 # MikroTik CAPsMAN v2 client for OpenWrt
 
-**v0.6.7** — see [`docs/RELEASE-0.6.7.md`](docs/RELEASE-0.6.7.md) and the
+**v0.6.8** — see [`docs/RELEASE-0.6.8.md`](docs/RELEASE-0.6.8.md) and the
 [release index](docs/RELEASES.md). Canonical documentation index:
 [`docs/README.md`](docs/README.md).
 
@@ -48,7 +48,7 @@ OpenWrt 24.10, MediaTek MT7603E + MT7612E), managed by an
 >   advertises all eight fake radios in one TLS session (`IDENTITY=OpenWrt-CAPSOLO`,
 >   `MACS=…`, `PHYS=0,0,0,0,1,1,1,1`), so the manager shows a single
 >   `cap=OpenWrt-CAPSOLO` with 8 radios. After a **cold reboot** all eight
->   station tests are `authorized: yes`, 3/3, 0% (v0.6.7). The eight-identity
+>   station tests are `authorized: yes`, 3/3, 0% (v0.6.8). The eight-identity
 >   fallback (`/etc/cap/identities.conf`, one CAP entry per SSID) still works.
 >   The plain single-identity default (`MACS=auto`) still broadcasts all eight
 >   SSIDs but only the master BSS per radio authenticates (F58–F60); use solo
@@ -186,7 +186,7 @@ control plane; only the data path differs.
 
 ## Status
 
-Last updated 2026-11-28 against `main` (v0.6.7). "Live" means the reference Xiaomi
+Last updated 2026-11-28 against `main` (v0.6.8). "Live" means the reference Xiaomi
 Mi Router 4A + RB1100AHx4 / RouterOS 7.25.1; "lab" means CHR 7.25.1 + hwsim.
 
 | Capability | State |
@@ -491,7 +491,7 @@ wifi-scripts package recipe, the patch-series check and the recorded hashes,
 see [`docs/BUILD.md`](docs/BUILD.md). The build is reproducible: two clean
 clones of the same commit produce the same binary.
 
-The version is printed by `capagent --version` (`0.6.7`) and stored in
+The version is printed by `capagent --version` (`0.6.8`) and stored in
 `VERSION`. Output: `dist/capagent-mipsel` / `dist/capagent-aarch64` (static,
 stripped). `dist/` is a local, gitignored build directory; published binaries
 live under

@@ -29,8 +29,10 @@ static uint32_t ccfi80(uint32_t f)
    emitted.  Widths: 1 = 20, 2 = 40, 3 = 80 MHz; 0x0d is the centre
    frequency and is required for widths > 20 MHz.
    The builder lives in chan_desc.inc so the host unit test can compile the
-   exact shipped code. */
+   exact shipped code; the 6 GHz centre/width mapping is in chan6.inc so the
+   hostapd writer and the descriptor builder share one source. */
 #include "chan_desc.inc"
+#include "chan6.inc"
 
 /* Centre of the 40 MHz block that contains a 20 MHz primary. */
 static uint32_t c40_for(uint32_t f)
@@ -42,41 +44,6 @@ static uint32_t c40_for(uint32_t f)
     }
     uint32_t ch = (f - 5000) / 5;
     return (((ch - 36) % 8) < 4) ? f + 10 : f - 10;
-}
-
-/* 6 GHz blocks: 20 MHz channels are numbered 1,5,9,... (5 MHz steps in the
- * channel number per 20 MHz).  A 40/80/160 MHz block starts at 1, 1, 1 and
- * the centre channel is start+2/+6/+14. */
-static uint32_t c40_6g(uint32_t f)
-{
-    int ch = (int)((f - 5950) / 5);
-    int start = ((ch - 1) / 8) * 8 + 1;
-    return 5950 + (uint32_t)(start + 2) * 5;
-}
-
-static uint32_t c80_6g(uint32_t f)
-{
-    int ch = (int)((f - 5950) / 5);
-    int start = ((ch - 1) / 16) * 16 + 1;
-    return 5950 + (uint32_t)(start + 6) * 5;
-}
-
-static uint32_t c160_6g(uint32_t f)
-{
-    int ch = (int)((f - 5950) / 5);
-    int start = ((ch - 1) / 32) * 32 + 1;
-    return 5950 + (uint32_t)(start + 14) * 5;
-}
-
-/* 320 MHz is a 64-channel block; its centre is start+30.  In 6 GHz the
- * 320 MHz-1 centres are 31/95/159/223.  (The offset 320 MHz-2 alignment
- * uses 63/127/191; a single primary frequency cannot select both, so only
- * the aligned-64 form is advertised.) */
-static uint32_t c320_6g(uint32_t f)
-{
-    int ch = (int)((f - 5950) / 5);
-    int start = ((ch - 1) / 64) * 64 + 1;
-    return 5950 + (uint32_t)(start + 30) * 5;
 }
 
 static size_t add_channel_tlvs(uint8_t *b, size_t n, int phy)

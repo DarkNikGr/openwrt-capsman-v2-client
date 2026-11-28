@@ -72,7 +72,7 @@ w34-tests:
 	    -o $(W34_TEST_DIR)/test_netifd_status ../tests/test_netifd_status.c
 	$(QEMU) $(W34_TEST_DIR)/test_netifd_status
 
-check: capagent-mipsel w34-tests extmux-test iw-freq-test rsn-test datachan-test chan-desc-test
+check: capagent-mipsel w34-tests extmux-test iw-freq-test rsn-test datachan-test chan-desc-test chan6-test
 	$(QEMU) ./capagent-mipsel --crypto-selftest
 	$(QEMU) ./capagent-mipsel --selftest-policy
 	@got=$$($(QEMU) ./capagent-mipsel --version | awk '{print $$2}'); \
@@ -111,6 +111,13 @@ chan-desc-test: tests/test_chan_desc.c src/chan_desc.inc
 	    tests/test_chan_desc.c
 	$(W53_TEST_DIR)/test_chan_desc
 
+# Pure host test: 6 GHz width/op_class/centre -> hostapd config mapping.
+chan6-test: tests/test_chan6.c src/chan6.inc
+	mkdir -p $(W53_TEST_DIR)
+	$(HOSTCC) -O2 -Wall -Wextra -Werror -o $(W53_TEST_DIR)/test_chan6 \
+	    tests/test_chan6.c
+	$(W53_TEST_DIR)/test_chan6
+
 # Pure host test: 0x500b a2/0x402b key selection per VAP.  Includes
 # src/datachan.inc with test VAP helpers; no radio or manager.
 datachan-test: tests/test_datachan.c src/datachan.inc src/datapath.inc
@@ -124,4 +131,4 @@ clean:
 	rm -f capagent-mipsel
 	rm -rf $(W34_TEST_DIR) $(W53_TEST_DIR)
 
-.PHONY: all check clean w34-tests extmux-test iw-freq-test rsn-test datachan-test chan-desc-test
+.PHONY: all check clean w34-tests extmux-test iw-freq-test rsn-test datachan-test chan-desc-test chan6-test

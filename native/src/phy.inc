@@ -233,7 +233,9 @@ static void vap_phy_bss(FILE *f, const char *kw, const struct own_entry *e,
                 c->ext_ctrl_dir ? c->ext_ctrl_dir : c->ext_auth_dir);
     if (is_first) {
         fprintf(f, "driver=nl80211\nauth_algs=1\n");
-        vap_write_channel(f, e->freq, vap_mgr_width(chv, cl));
+        vap_write_channel(f, e->freq, vap_mgr_width(chv, cl),
+                          e->freq >= 5925 && phy_has_eht(e->port >> 8) &&
+                          hostapd_has_eht());
     }
     /* dtim-period is per VAP (0x6016 TLV 0x24, a u32). */
     if (dtv && dtl >= 4) {

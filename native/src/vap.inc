@@ -187,41 +187,27 @@ static int vap_ht40_sign5(uint32_t freq)
     return (chan % 8 == 4) ? 1 : -1;
 }
 
+static int hostapd_has_eht(void)
+{
+    static int cached = -1;
+    if (cached < 0) cached = hostapd_has_opt("ieee80211be");
+    return cached;
+}
+
 /* hostapd channel lines for one VAP.  wcode is the manager's 0x0c width code.
  * A VHT80 BSS needs both vht_oper_chwidth and the centre-frequency index,
  * otherwise hostapd's DFS start-channel computation fails even on ch36. */
-static void vap_write_channel(FILE *f, uint32_t freq, int wcode)
+static void vap_write_channel(FILE *f, uint32_t freq, int wcode, int eht_ok)
 {
-    /* 6 GHz: HE-only, and hostapd needs op_class 131 so it selects the
-     * 6 GHz mode instead of 2.4/5 GHz (the channel numbers overlap).
-     * Wider channels need he_oper_chwidth and the centre channel index. */
+    /* 6 GHz: hostapd needs an operating class so it selects the 6 GHz mode
+     * instead of 2.4/5 GHz (the channel numbers overlap).  Widths and
+     * centres live in chan6.inc so the descriptor builder and this writer
+     * cannot disagree.  Width 6 is 320 MHz only on an EHT BSS: without EHT
+     * it falls back to 160 MHz rather than starting at 20 MHz (F89). */
     if (freq >= 5925) {
-        int chan = (int)((freq - 5950) / 5);
-        int width, opclass, chw;
-        uint32_t center;
-        if (chan < 1 || chan > 233) chan = 1;
-        switch (wcode) {
-        case 2:  width = 40; break;
-        case 3:  width = 80; break;
-        /* RouterOS 7.25.1 sends width 5 for a 160 MHz 6 GHz profile and
-         * reserves 4 for 80+80 (a 6 GHz profile cannot use it).  Accept
-         * both for 160 so a profile provisioned by either encoding runs at
-         * 160; width 6 (320) has no HE hostapd encoding and falls back. */
-        case 4:
-        case 5:  width = 160; break;
-        default: width = 20; break;
-        }
-        opclass = width == 160 ? 134 : width == 80 ? 133 :
-                  width == 40 ? 132 : 131;
-        chw = width == 160 ? 3 : width == 80 ? 2 : width == 40 ? 1 : 0;
-        center = width == 160 ? c160_6g(freq) : width == 80 ? c80_6g(freq) :
-                 width == 40 ? c40_6g(freq) : freq;
-        fprintf(f, "hw_mode=a\nchannel=%d\nop_class=%d\n", chan, opclass);
-        fprintf(f, "ieee80211ax=1\nhe_6ghz_reg_pwr_type=0\n");
-        if (width > 20)
-            fprintf(f, "he_oper_chwidth=%d\n"
-                       "he_oper_centr_freq_seg0_idx=%d\n",
-                    chw, (int)((center - 5950) / 5));
+        struct chan6_plan p;
+        chan6_plan_for(wcode, eht_ok, freq, &p);
+        chan6_write(f, &p);
         return;
     }
     if (!vap_is_5g(freq)) {
