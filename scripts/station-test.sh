@@ -161,6 +161,23 @@ while [ "$i" -lt "$SECS" ]; do
 	fi
 done
 
+# HOLD_SECS keeps the association up after CONNECTED, so a manager group-key
+# rekey can be exercised before the final ping.
+if [ "$CONNECTED" -eq 1 ] && [ -n "${HOLD_SECS:-}" ]; then
+	say "holding the association for ${HOLD_SECS}s"
+	i=0
+	while [ "$i" -lt "$HOLD_SECS" ]; do
+		sleep 5
+		i=$((i + 5))
+		if ! $SUDO ip netns exec "$NETNS" iw dev "$IFNAME" link 2>/dev/null |
+			grep -q "Connected"; then
+			say "link lost during hold"
+			CONNECTED=0
+			break
+		fi
+	done
+fi
+
 say "--- evidence ---"
 grep -aE "Trying to associate|Associated with|4-Way Handshake|CTRL-EVENT-CONNECTED|does not match|deauth|SAE|OWE" "$LOG" | tail -8 || true
 $SUDO ip netns exec "$NETNS" iw dev "$IFNAME" link 2>&1 | head -6 || true

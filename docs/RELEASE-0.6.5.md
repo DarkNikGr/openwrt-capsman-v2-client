@@ -68,6 +68,17 @@ cap-iot 5 GHz : authorized: yes, 3/3, 0%
 * `capagent-solo.conf` documents `DATACHAN`/`DATAPATH_BRIDGE` and
   `LOCAL_OWE`.
 
+## Soak and regression
+
+* **10/10 cold reboots** reached `ssids=8 capagent=1 hostapd=10` (5/8 at
+  two minutes, all eight by three minutes; no stuck BSS, no manual step).
+* **GTK rekey**: with `security.group-key-update=30s` a station held for 70 s
+  logged `RSN: Group rekeying completed with … [GTK=CCMP]` and pinged 3/3 0%;
+  the CAP installed `0x201f NEW_KEY GROUP idx=1/2` and relayed `0x201c`.
+* **Live `0x6017` passphrase change** kept 8/8 (the teardown path above).
+* Final regression after the soak/rekey: all eight SSIDs
+  `authorized: yes`, 3/3, 0% (2.4 and 5 GHz test/guest/iot/hidden).
+
 ## Verified on
 
 Xiaomi Mi Router 4A Gigabit, RB1100AHx4 / RouterOS 7.25.1, one
