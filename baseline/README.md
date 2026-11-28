@@ -6,7 +6,7 @@ the Xiaomi Mi Router 4A CAP. The device was shared with other live tracks
 (W39/W40/W41) during the session; the JSON is the authoritative snapshot of
 the instant, not a permanent claim.
 
-> **Historical snapshot.** These captures predate the current v0.6.4 PASS state;
+> **Historical snapshot.** These captures predate the current v0.6.5 PASS state;
 > the FAIL rows below are kept as evidence of that run, not as the present
 > status. See the top-level [README](../README.md) and
 > [REGRESSION-GATE](../docs/REGRESSION-GATE.md) for current results.

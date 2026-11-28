@@ -78,12 +78,13 @@ L2 forwarder and the only RSN authenticator. Two wire variants exist:
 | `on-capsman-secure` | `2` | AES-256-CCM + 16-byte tag | advertises join `0xa7 = 01 00 07`; `a7` alone is not the manager's selector (F70), and the RB1100 selected `a2=2` later (F72) |
 
 The client implements both codecs (AES-CCM with a single active TX key and a
-replay watermark; the per-VAP key table is in place but multi-VAP TX selection
-is still open). The secure variant is live on the reference RB1100 (F72); the
-plain `a2=1` variant has been exercised in the lab (26 frames) but not as a
-live traffic test. Rekey slot handling is proven on the wire but not merged
-into the client yet. The manager never downgrades a secure configuration to
-plain: it either creates the matching datachan or none.
+replay watermark; the per-VAP key table is in place and the `a2` variant is
+kept per VAP). The secure variant is live on the reference RB1100 (F72); the
+plain `a2=1` variant is live on the Xiaomi 5 GHz radio with a station ping 0%
+(F81). The 2.4 GHz radio is refused by the manager (`a2=0`). Rekey slot
+handling is proven on the wire but not merged into the client yet. The manager
+never downgrades a secure configuration to plain: it either creates the
+matching datachan or none.
 
 ## Split-MAC chain, step by step
 

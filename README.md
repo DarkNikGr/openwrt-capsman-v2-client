@@ -313,7 +313,7 @@ Still open, in priority order:
    radio-less CHR, so the CHR lab remains unable to exercise it.
 3. **Soak / concurrency.** SAE, OWE and PMF across several VAPs at once, GTK
    rekey under load, and a hardware matrix beyond the two reference devices.
-   OWE has no live success yet (the manager deauthenticates it).
+   OWE itself is live now (CAP-local OWE, F80); the remaining item is scale.
 4. **6 GHz / MLO.** The 6 GHz SAE datapath is proven on a virtual radio with
    `6ghz-be` (20/80 MHz); the literal `6ghz-ax` band value is vendor-blocked
    (F79), and ath12k per-link MLO plumbing (Deco BE65) is not implemented. The

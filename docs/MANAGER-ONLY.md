@@ -5,7 +5,7 @@ wireless configuration that is provisioned entirely by an unmodified RouterOS
 7.25.1 CAPsMAN v2 manager.** This page records what is proven, what is still
 open, and how to reproduce the zero-local-config experiment on the bench.
 
-The goal is met on the reference hardware (v0.6.4): zero `wifi-iface`, 8/8
+The goal is met on the reference hardware (v0.6.5): zero `wifi-iface`, 8/8
 SSIDs, manager-owned 4-way, and a factory-reset image that re-provisions
 itself. The one-CAP/eight-radio **solo** topology is reliable after a cold
 boot. Everything below is measured on:
@@ -25,7 +25,7 @@ boot. Everything below is measured on:
 | 3 | capagent **starts one hostapd per radio with `bss=` sections** from `0x6016` (SSID `0x03`, IE blob `0x04`, channel `0x0a`): `external_rsn_auth=1`, `ext_auth_socket=/var/run/hostapd/ext-auth-<ifname>`, **no PSK anywhere in the generated config**. Live: 8/8 netdevs, two hostapd processes with `hostapd up with 4 BSS(es)` each, the four 2.4 GHz BSSes beacon the manager's SSIDs. Solo mode starts one hostapd per logical radio instead (eight BSSes in one session). | `native/src/vap.inc`; `docs/OPEN-PROBLEMS.md` F8/F14 |
 | 4 | **EAPOL relay works on the real manager**: station M2 → `0x201b` → manager runs the 4-way → `0x201c` M3 back to the station. | live RB1100 log `EXT-AUTH: EAPOL ... -> 0x201b` |
 | 5 | **RSN-IE equality**: the manager's 28-byte M3 RSN IE (`… 80 00 00 00 00 0f ac 06`, MFPC + BIP-CMAC) differs from what hostapd generates (`… 8c 00`, 22 B). Patch `patches/9997-external-rsn-ie.patch` adds `external_rsn_ie=<hex>` and hostapd then emits the manager's element **byte-for-byte** in Beacon / Probe Response / (Re)Assoc Response / EAPOL. capagent writes the option automatically when the installed `wpad` contains the string. | `patches/9997-…`; host log `RSN: Own IEs` identical; qemu-mipsel parse check |
-| 6 | **One CAP / eight radios (solo)** appears as a single `cap=OpenWrt-CAPSOLO` with 8 radios; after a cold reboot eight SSIDs, eight capagent/hostapd BSSes and all eight station tests `authorized: yes`, 3/3, 0% (v0.6.4). | `docs/MULTI-IDENTITY.md`, `docs/RELEASE-0.6.4.md` |
+| 6 | **One CAP / eight radios (solo)** appears as a single `cap=OpenWrt-CAPSOLO` with 8 radios; after a cold reboot eight SSIDs, eight capagent/hostapd BSSes and all eight station tests `authorized: yes`, 3/3, 0% (v0.6.5). | `docs/MULTI-IDENTITY.md`, `docs/RELEASE-0.6.4.md` |
 | 7 | **`MANAGER=auto` works through DHCP option 138**: `/etc/udhcpc.user.d/99-cap-dhcp138` writes `/tmp/cap-manager` (`10.0.0.1`), so no baked address is needed. | live, `docs/OPEN-PROBLEMS.md` F57 |
 | 8 | **Live security changes** arrive as `0x6017`; capagent re-joins and `own_cfg_hash` rebuilds hostapd when a repeated `0x6016` changed SSID/RSN/channel/VLAN/DTIM, with no identity restart. PMF-required is live. | live, F76/F50 |
 
@@ -64,7 +64,7 @@ authenticate; both are proven 8/8.
 
 ### 2.2 OWE, 6 GHz band value and MLO
 
-* OWE is lab-only: a live attempt makes the manager deauthenticate.
+* OWE is live: a pure-OWE VAP is completed by the CAP's hostapd because RouterOS 7.25.1 has no manager-side OWE DH (F80).
 * 6 GHz works on the virtual radio with `6ghz-be` at 20/80 MHz; the literal
   `channel.band=6ghz-ax` is vendor-blocked (F79).
 * MLO/EHT multi-link and 6 GHz 160/320 MHz are not implemented; the Deco BE65

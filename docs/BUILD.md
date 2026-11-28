@@ -3,7 +3,7 @@
 Everything here was run on the reference build host (Fedora, x86_64) on
 2026-11-10 against `main` @ `0e8960e`.  Absolute paths are the ones that were
 actually used; substitute your own if they differ.  The recipe and pinned
-inputs are unchanged for the current release (v0.6.4); the later `9999c`–`9999j`
+inputs are unchanged for the current release (v0.6.5); the later `9999c`–`9999j`
 patches are listed in [`../patches/README.md`](../patches/README.md).
 
 The tree builds **three artefacts**:

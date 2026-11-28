@@ -83,8 +83,8 @@ picks the host Wi-Fi card (phy11 here).
 Two manager details matter:
 
 * **6 GHz requires WPA3.** With `wpa2-psk` the CAP's hostapd refuses to start
-  (`Invalid AKM suite for 6 GHz`). Use `wpa3-psk`/SAE; OWE is lab-only and a
-  live attempt is deauthenticated by the manager.
+  (`Invalid AKM suite for 6 GHz`). Use `wpa3-psk`/SAE. OWE on 6 GHz is not
+  tested; on 2.4/5 GHz a pure-OWE VAP is live through CAP-local OWE (F80).
 * **Band name.** The manager labels a 6 GHz-capable CAP's channels `be`
   (`cap print`/`radio print` show `5955/be`), and `6ghz-ax` gets
   `no available channels`; `6ghz-be` is the working configuration value even
