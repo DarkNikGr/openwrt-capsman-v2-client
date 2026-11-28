@@ -13,6 +13,19 @@
  * the identity while the netdev exists and drop only what is really gone. */
 static void cap_reset_session(void)
 {
+    /* g_vap[] is zero-initialised, so the fd fields start at 0, not at the
+     * "no socket" sentinel -1.  ext_auth_close() would then close fd 0
+     * (stdin) on the first session.  Install the sentinels once before any
+     * slot is inspected. */
+    static int fds_ready;
+    if (!fds_ready) {
+        for (int r = 0; r < MAX_RADIOS; r++)
+            for (int w = 0; w < 16; w++) {
+                g_vap[r][w].extfd = -1;
+                g_vap[r][w].l2fd = -1;
+            }
+        fds_ready = 1;
+    }
     if (g_extmux) {
         extmux_free(g_extmux);
         g_extmux = NULL;
@@ -574,15 +587,31 @@ static int run_once(struct cfg *c)
                  * hostapds lets that burst race the 5 GHz starts (some BSSes
                  * stay down until a manual service restart).  Tear the local
                  * objects down first so the re-join rebuilds from a clean
-                 * journal, exactly like a cold boot. */
-                printf("0x6017: tearing down local VAPs before re-join\n");
-                fflush(stdout);
-                for (int r = 0; r < MAX_RADIOS; r++)
-                    for (int w = 0; w < 16; w++)
-                        if (g_vap[r][w].used)
-                            vap_destroy((r << 8) | w, c);
-                for (int r = 0; r < MAX_RADIOS; r++)
-                    vap_phy_stop(r);
+                 * journal, exactly like a cold boot.
+                 *
+                 * 0x6017 carries no port/VAP identity (len 0), and a live
+                 * VLAN/datapath change exists only in 0x500b, which
+                 * own_cfg_hash() never sees.  A per-VAP/phy teardown or a
+                 * debounced re-apply therefore cannot tell what changed and
+                 * leaves stale journal rows in the burst; the full teardown
+                 * is the safe option.  It is still bounded by the ownership
+                 * contract: --no-vap-teardown and the netifd read-only mode
+                 * must not stop hostapds or delete netdevs they do not own. */
+                if (c->vap_teardown != 0 && !own_forced_readonly(c) &&
+                    !wl_legacy()) {
+                    printf("0x6017: tearing down local VAPs before re-join\n");
+                    fflush(stdout);
+                    for (int r = 0; r < MAX_RADIOS; r++)
+                        for (int w = 0; w < 16; w++)
+                            if (g_vap[r][w].used)
+                                vap_destroy((r << 8) | w, c);
+                    for (int r = 0; r < MAX_RADIOS; r++)
+                        vap_phy_stop(r);
+                } else {
+                    printf("0x6017: teardown disabled (no-vap-teardown/"
+                           "read-only), re-joining only\n");
+                    fflush(stdout);
+                }
                 break;
             }
         } else if (type != TYPE_ECHO_RESP && type != TYPE_JOIN_RESP) {

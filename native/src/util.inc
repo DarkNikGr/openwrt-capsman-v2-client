@@ -491,6 +491,30 @@ static void iface_chan(const char *ifn, unsigned *freq, unsigned *width);
 
 #include "iw_freq.inc"
 
+/* Default 6 GHz wire id: 0x04 is what RouterOS labels 6ghz-ax and what the
+ * 0xD00B channel descriptor must carry for a 6ghz-ax profile; 0x06 is
+ * 6ghz-be.  CAPAGENT_BAND6 overrides both the NEWPHY label and the
+ * descriptor band for a lab sweep. */
+static uint8_t band6_code(void)
+{
+    const char *e = getenv("CAPAGENT_BAND6");
+    return (e && *e) ? (uint8_t)strtol(e, NULL, 16) : 0x04;
+}
+
+static uint8_t band6_for(int has_eht)
+{
+    const char *e = getenv("CAPAGENT_BAND6");
+    if (e && *e) return (uint8_t)strtol(e, NULL, 16);
+    return has_eht ? 0x06 : 0x04;
+}
+
+static int phy_has_eht(int phy)
+{
+    struct phy_caps pc;
+    read_phy_caps(phy, &pc);
+    return pc.has_eht;
+}
+
 /* Supported frequencies/bands of a radio, from `iw phy phyN info`.  Falls
    back to the legacy 2.4/5 GHz tables only when iw gives nothing. */
 static void read_phy_bands(int phy, struct phy_bands *pb)
@@ -525,22 +549,16 @@ static void read_phy_bands(int phy, struct phy_bands *pb)
     }
     if (have2) { pb->band[pb->nband++] = 0x81; pb->band[pb->nband++] = 0x82; }
     if (have5) { pb->band[pb->nband++] = 0x01; pb->band[pb->nband++] = 0x03; }
-    if (have6) {
-        const char *e6 = getenv("CAPAGENT_BAND6");
-        pb->band[pb->nband++] = (e6 && *e6) ? (uint8_t)strtol(e6, NULL, 16)
-                                            : 0x06;
-    }
+    if (have6) pb->band[pb->nband++] = band6_for(phy_has_eht(phy));
 }
 
 static uint8_t band_code_for_freq(uint32_t f)
 {
     if (f < 3000) return 0x81;      /* 2ghz-g */
     if (f < 5925) return 0x03;      /* 5ghz-ac */
-    /* 6 GHz band id: CAPAGENT_BAND6 lets a test sweep the manager's value
-       (the id was reverse-engineered for 2.4/5 GHz only). */
-    const char *e6 = getenv("CAPAGENT_BAND6");
-    if (e6 && *e6) return (uint8_t)strtol(e6, NULL, 16);
-    return 0x06;                    /* 6ghz */
+    /* 6 GHz band id fallback (the real value normally comes from the
+       manager's 0x6016 start and is kept in vchan). */
+    return band6_code();
 }
 
 static uint32_t chan_base_for_freq(uint32_t f)
@@ -619,19 +637,22 @@ static void build_newphy(uint8_t *b, const uint8_t mac[6], int phy, size_t *out)
     for (int i = 0; i < pb.nband; i++) {
         uint8_t bd[5] = { pb.band[i], 0, 0, 0, 0x01 };
         if (pb.band[i] == 0x82 || pb.band[i] == 0x03) bd[4] = 0x03;
-        if (pb.band[i] == 0x03 || pb.band[i] == 0x06) bd[4] = 0x07;
+        if (pb.band[i] == 0x03 || pb.band[i] == 0x06 ||
+            pb.band[i] == 0x04) bd[4] = 0x07;
         n += put_el(b+n, 0x4d, bd, 5);
     }
 
     /* WiFi 6/7 band ids, only when the phy reports HE/EHT AP support. */
     {
-        int have5 = 0, have6 = 0;
+        int have5 = 0, have6 = 0, have_ax = 0;
         int no_eht = getenv("CAPAGENT_NO_EHT") != NULL;
         for (int i = 0; i < pb.nfreq; i++) {
             if (pb.freq[i] >= 4900 && pb.freq[i] < 5925) have5 = 1;
             if (pb.freq[i] >= 5925) have6 = 1;
         }
-        if (have5 && pc.has_he) {
+        for (int i = 0; i < pb.nband; i++)
+            if (pb.band[i] == 0x04) have_ax = 1;
+        if (have5 && pc.has_he && !have_ax) {
             uint8_t bd[5] = { 0x04, 0, 0, 0, 0x07 };
             n += put_el(b+n, 0x4d, bd, 5);
         }
@@ -639,7 +660,7 @@ static void build_newphy(uint8_t *b, const uint8_t mac[6], int phy, size_t *out)
             uint8_t bd[5] = { 0x06, 0, 0, 0, 0x07 };
             n += put_el(b+n, 0x4d, bd, 5);
         }
-        if (!no_eht && have6 && pc.has_eht) {
+        if (!no_eht && have6 && pc.has_eht && band6_for(pc.has_eht) == 0x06) {
             uint8_t bd[5] = { 0x06, 0, 0, 0, 0x07 };
             n += put_el(b+n, 0x4d, bd, 5);
         }

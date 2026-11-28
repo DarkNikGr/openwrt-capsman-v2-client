@@ -37,8 +37,10 @@ HOSTCC ?= cc
 W34_TEST_DIR := $(CURDIR)/.w34-tests
 W53_TEST_DIR := $(CURDIR)/.w53-tests
 
+VERSION := $(shell cat $(CURDIR)/../VERSION)
+
 CFLAGS ?= -O2 -Wall -Wextra -Wno-unused-parameter
-CFLAGS += -I$(MBEDTLS_INC) -Isrc
+CFLAGS += -I$(MBEDTLS_INC) -Isrc -DCAPAGENT_VERSION=\"$(VERSION)\"
 LIBS   := $(MBEDTLS_LIB)/libmbedtls.a \
           $(MBEDTLS_LIB)/libmbedx509.a \
           $(MBEDTLS_LIB)/libmbedcrypto.a
@@ -70,9 +72,14 @@ w34-tests:
 	    -o $(W34_TEST_DIR)/test_netifd_status ../tests/test_netifd_status.c
 	$(QEMU) $(W34_TEST_DIR)/test_netifd_status
 
-check: capagent-mipsel w34-tests extmux-test iw-freq-test rsn-test
+check: capagent-mipsel w34-tests extmux-test iw-freq-test rsn-test datachan-test chan-desc-test
 	$(QEMU) ./capagent-mipsel --crypto-selftest
 	$(QEMU) ./capagent-mipsel --selftest-policy
+	@got=$$($(QEMU) ./capagent-mipsel --version | awk '{print $$2}'); \
+	 test "$$got" = "$(VERSION)" || { \
+	     echo "version-test: --version reports $$got, ../VERSION says $(VERSION)" >&2; \
+	     exit 1; }; \
+	 echo "version-test: capagent $$got == VERSION $(VERSION)"
 
 # W53: host-side gate for the hostapd EXT_AUTH_TX contract (wire format +
 # one-shot fallback).  extmux.c is mbedTLS/nl80211-free on purpose.
@@ -97,8 +104,24 @@ rsn-test: tests/test_rsn.c src/rsn_decide.h
 	    tests/test_rsn.c
 	$(W53_TEST_DIR)/test_rsn
 
+# Pure host test: 0xD00B 0x000A descriptor builder (6 GHz band byte 0x04/0x06).
+chan-desc-test: tests/test_chan_desc.c src/chan_desc.inc
+	mkdir -p $(W53_TEST_DIR)
+	$(HOSTCC) -O2 -Wall -Wextra -Werror -o $(W53_TEST_DIR)/test_chan_desc \
+	    tests/test_chan_desc.c
+	$(W53_TEST_DIR)/test_chan_desc
+
+# Pure host test: 0x500b a2/0x402b key selection per VAP.  Includes
+# src/datachan.inc with test VAP helpers; no radio or manager.
+datachan-test: tests/test_datachan.c src/datachan.inc src/datapath.inc
+	mkdir -p $(W53_TEST_DIR)
+	$(HOSTCC) -O2 -Wall -Wextra -Werror -Wno-unused-function -Isrc \
+	    -o $(W53_TEST_DIR)/test_datachan tests/test_datachan.c \
+	    -lmbedcrypto
+	$(W53_TEST_DIR)/test_datachan
+
 clean:
 	rm -f capagent-mipsel
 	rm -rf $(W34_TEST_DIR) $(W53_TEST_DIR)
 
-.PHONY: all check clean w34-tests extmux-test iw-freq-test rsn-test
+.PHONY: all check clean w34-tests extmux-test iw-freq-test rsn-test datachan-test chan-desc-test

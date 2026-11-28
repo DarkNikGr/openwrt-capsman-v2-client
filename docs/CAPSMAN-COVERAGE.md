@@ -49,7 +49,7 @@ Legend:
 | `hide-ssid=yes` | ✅ live | `cap-hidden` is not in scan results |
 | `security` (see below) | ✅ live | RSN IE from the manager, byte-identical |
 | `datapath` (see below) | ✅ live | VLAN per VAP |
-| `channel.frequency`, `band`, `width` (20/40/80) | ✅ live | `hw_mode`/`channel`/`ht_capab` derived. 6 GHz only with `6ghz-be` on the virtual radio; `6ghz-ax` is vendor-blocked (F79) |
+| `channel.frequency`, `band`, `width` (20/40/80) | ✅ live | `hw_mode`/`channel`/`ht_capab` derived. 6 GHz `6ghz-ax` is live on the virtual radio with descriptor band `0x04` (F85); `6ghz-be` uses `0x06` for EHT |
 | `country` | ➖ not provisioned | CAPsMAN v2 sends no regulatory country; the CAP uses `--country` |
 | `dtim-period` | ✅ live | `0x6016` TLV `0x24` (u32) written as `dtim_period=` in that BSS only |
 | `tx-power` (configuration) | 🟡 applied, driver pins it | manager sends `0x500b` TLV `0x61`; the agent calls `NL80211_CMD_SET_WIPHY` (`ret=0`). The reference mt76 driver keeps reporting 20 dBm for every value, so it is a no-op on this hardware |
@@ -111,7 +111,7 @@ Legend:
 | ACL / `access-list` | ✅ **live (manager-side)** | `access-list action=reject` (all) → station cannot associate (`NOT CONNECTED`); removing it → `authorized: yes`, ping 3/3 0%. The manager filters before the CAP, so no CAP change is needed |
 | 802.11k steering hints | ✅ **live on a virtual station** | `CAPAGENT_RRM=1` advertises the RM element, patch `9999f` relays the station's Beacon Report as `0x2018`, `9999i` keeps the short RM IE: `rrm-capa=0x70`, `Beacon report token 1`, `0x2018 action len=235` (F69/F71). The Intel 3168 still drops the RM IE |
 | 802.11v / BTM | ✅ **live on the virtual bench** | a steering group + `CAPAGENT_FAKE_RSSI=-80` makes the manager send a BTM Request (`0x2019 action len=49`); patch `9999j` relays the BTM Response (`0x2018 action len=29`) (F67). RouterOS 7.25.1 sends no FT MD |
-| 6 GHz | 🟡 virtual radio only | `mac80211_hwsim` + `6ghz-be`/5955: 20 and 80 MHz SAE datapath, `authorized: yes`, ping 0%. The literal `channel.band=6ghz-ax` is vendor-blocked (band-id sweep 0x05–0x1f and a no-EHT/no-UHR build still give `5955/be` + `no available channels`, F79). The reference Xiaomi has no 6 GHz hardware |
+| 6 GHz | ✅ virtual radio (no 6 GHz on the Xiaomi) | `mac80211_hwsim` at 5955: `channel.band=6ghz-ax` with descriptor band `0x04` gives `5955/ax`, VAP `MDB`, SAE station `authorized: yes` + ping 0%; `6ghz-be` (`0x06`) works for EHT (F85). The reference Xiaomi has no 6 GHz hardware; real RF/AFC are untested |
 | MLO / EHT multi-link | ➖ not implemented | no MLD is established; the Deco BE65 stays read-only |
 | Sniffer (`/tool sniffer` over CAPsMAN) | ➖ not exposed | no sniffer provisioning reaches the CAP |
 

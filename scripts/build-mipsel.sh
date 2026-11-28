@@ -36,8 +36,13 @@ OUT=${OUT:-${ROOT}/dist/capagent-mipsel}
 
 mkdir -p "$(dirname "${OUT}")"
 
+# The version string comes from VERSION, never from the C fallback, so
+# `capagent --version` matches the tag and the release notes.
+CAPAGENT_VERSION=$(cat "${ROOT}/VERSION")
+
 "${CC}" -O2 -Wall -Wextra -Wno-unused-parameter \
     -I"${MBEDTLS_INC}" -I"${ROOT}/native/src" \
+    -DCAPAGENT_VERSION="\"${CAPAGENT_VERSION}\"" \
     -o "${OUT}" "${ROOT}/native/capagent.c" "${ROOT}/native/src/extmux.c" \
     "${MBEDTLS_LIB}/libmbedtls.a" \
     "${MBEDTLS_LIB}/libmbedx509.a" \

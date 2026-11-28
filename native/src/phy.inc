@@ -741,3 +741,25 @@ static int vap_phy_apply(int phy, const struct cfg *c)
     fflush(stdout);
     return hp > 0 ? (int)hp : -1;
 }
+
+/* F80: does this port belong to a pure-OWE BSS completed by hostapd?  The
+ * live VAP registry answers while a 0x6016 is in force.  After a capagent
+ * restart (vap->used == 0 until the manager re-sends the start body) fall
+ * back to the journaled 0x6016 body, so the key/Auth plane never mistakes a
+ * local-OWE BSS for a manager-relay one.  Used by 0x201c/0x201f and by
+ * cap_vap_ready() (forward-declared in mgmt.inc). */
+static int own_port_local_owe(uint16_t port)
+{
+    struct vap *vp = vap_get((port >> 8) & 0xff, port & 0x0f);
+    struct own_entry *e;
+    const uint8_t *ie = NULL;
+    uint16_t il = 0;
+    struct rsn_info ri;
+
+    if (vp && vp->local_owe) return 1;
+    e = own_by_port(port);
+    if (!e || !e->start_len) return 0;
+    if (!find_el(e->start, e->start_len, 0x04, &ie, &il)) return 0;
+    rsn_parse(ie, il, &ri);
+    return rsn_local_owe(&ri);
+}

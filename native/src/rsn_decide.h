@@ -112,6 +112,38 @@ static void rsn_key_mgmt_add(char *buf, size_t n, size_t *len, const char *s)
     buf[*len] = 0;
 }
 
+/* CAPAGENT_LOCAL_OWE: a pure-OWE VAP can be completed by the CAP's own
+ * hostapd (it derives the OWE PMK from the station's DH element and runs
+ * the 4-way).  The manager then never sees the association, which is what
+ * RouterOS 7.25.1 needs: it has no manager-side OWE DH and would answer
+ * the relayed 0x2018 assocreq with a deauth.
+ *
+ * This is also the one RSN decision the per-VAP key plane has to know about:
+ * a local-OWE BSS must never take the manager's 0x201f PTK/GTK/IGTK (they
+ * belong to a 4-way that never happened) and must not run an ext-auth relay.
+ * `ri->valid` is required so an open VAP (no RSN IE) is never mistaken for
+ * one.  Empty/unset CAPAGENT_LOCAL_OWE keeps the local path; 0/no restores
+ * the manager relay. */
+static int rsn_local_owe(const struct rsn_info *ri)
+{
+    const char *lo = getenv("CAPAGENT_LOCAL_OWE");
+    int local_ok = !lo || (strcmp(lo, "0") && strcmp(lo, "no"));
+    return local_ok && ri->valid && ri->akm_owe && !ri->akm_sae &&
+           !ri->akm_eap && !ri->akm_psk && !ri->akm_psk256;
+}
+
+/* Split-MAC switches for one parsed RSN IE: local_owe = hostapd completes
+ * OWE itself; external_auth = the manager owns the 802.11 Auth exchange
+ * (SAE/OWE/802.1X).  The two are mutually exclusive: a local-OWE BSS has
+ * no manager-owned Auth to relay, so its 0x2019 Auth/0x6019 assoc-resp/
+ * 0x201c EAPOL paths and extmux registration must stay off. */
+static void rsn_vap_flags(const struct rsn_info *ri, int *local_owe,
+                          int *external_auth)
+{
+    *local_owe = rsn_local_owe(ri);
+    *external_auth = !*local_owe && (ri->akm_sae || ri->akm_owe);
+}
+
 /* Turn a parsed IE into the hostapd decision.  sae_override is false when
  * the installed wpad lacks external_rsn_sae: then hostapd cannot suppress
  * its own SAE and the BSS must fall back to wpa=0 (the manager then still
@@ -122,7 +154,14 @@ static void rsn_policy_from_ie(const struct rsn_info *ri, int sae_override,
     memset(p, 0, sizeof(*p));
 
     int have_psk = ri->valid && (ri->akm_psk || ri->akm_psk256);
-    int have_sae = ri->valid && (ri->akm_sae || ri->akm_owe) && sae_override;
+    /* A local-OWE BSS is not asking hostapd to suppress anything: hostapd
+     * runs the OWE state machine itself.  So it must be built from a stock
+     * hostapd that only supports OWE, without external_rsn_sae; otherwise
+     * wpa would stay 0 and the CAP would emit an OPEN BSS while pretending
+     * to be Enhanced Open. */
+    p->local_owe = rsn_local_owe(ri);
+    int have_sae = ri->valid && (ri->akm_sae || ri->akm_owe) &&
+                   (sae_override || p->local_owe);
     int have_eap = ri->valid && (ri->akm_eap || ri->akm_eap256);
     int have_ft = ri->valid && (ri->akm_ft_eap || ri->akm_ft_psk);
 
@@ -132,15 +171,6 @@ static void rsn_policy_from_ie(const struct rsn_info *ri, int sae_override,
     /* FT-EAP carries 802.1X inside the FT exchange, so the manager owns the
      * Auth there too.  FT-PSK keeps hostapd's open-system Auth (which we
      * mirror to the manager as 0x2018) exactly like plain PSK. */
-    /* CAPAGENT_LOCAL_OWE: a pure-OWE VAP can be completed by the CAP's own
-     * hostapd (it derives the OWE PMK from the station's DH element and runs
-     * the 4-way).  The manager then never sees the association, which is what
-     * RouterOS 7.25.1 needs: it has no manager-side OWE DH and would answer
-     * the relayed 0x2018 assocreq with a deauth. */
-    const char *lo = getenv("CAPAGENT_LOCAL_OWE");
-    int local_ok = !lo || (strcmp(lo, "0") && strcmp(lo, "no"));
-    p->local_owe = local_ok && ri->akm_owe && !ri->akm_sae &&
-                   !ri->akm_eap && !ri->akm_psk && !ri->akm_psk256;
     p->external_auth = (have_sae && !p->local_owe) || have_eap ||
                        (have_ft && ri->akm_ft_eap);
     p->want_rsnxe = have_sae;

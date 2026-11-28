@@ -27,22 +27,10 @@ static uint32_t ccfi80(uint32_t f)
    only when a descriptor with the profile's band and frequency exists in
    the width the profile asks for, so every supported combination is
    emitted.  Widths: 1 = 20, 2 = 40, 3 = 80 MHz; 0x0d is the centre
-   frequency and is required for widths > 20 MHz. */
-static size_t add_chan_desc(uint8_t *b, size_t n, uint32_t freq,
-                            uint8_t width, uint8_t band, uint32_t ccfi)
-{
-    uint8_t sub[48], f[4], c[4];
-    size_t sn = 0;
-    put32(f, freq);
-    sn += put_el(sub + sn, 0x0b, f, 4);
-    sn += put_el(sub + sn, 0x0c, &width, 1);
-    if (width > 1) {
-        put32(c, ccfi);
-        sn += put_el(sub + sn, 0x0d, c, 4);
-    }
-    sn += put_el(sub + sn, 0x10, &band, 1);
-    return n + put_el(b + n, 0x0a, sub, (uint16_t)sn);
-}
+   frequency and is required for widths > 20 MHz.
+   The builder lives in chan_desc.inc so the host unit test can compile the
+   exact shipped code. */
+#include "chan_desc.inc"
 
 /* Centre of the 40 MHz block that contains a 20 MHz primary. */
 static uint32_t c40_for(uint32_t f)
@@ -103,12 +91,17 @@ static size_t add_channel_tlvs(uint8_t *b, size_t n, int phy)
             if (ccfi80(f) != f)                           /* ac 80 */
                 n = add_chan_desc(b, n, f, 3, 0x03, ccfi80(f));
         } else {                                          /* 6 GHz */
-            /* The reply is bounded by BODY_MAX; stop before overflowing it. */
+            /* The reply is bounded by BODY_MAX; stop before overflowing it.
+             * The descriptor band is 0x04 for a HE-only (6ghz-ax) radio and
+             * 0x06 for an EHT (6ghz-be) radio; the manager matches the
+             * configuration band against this byte, not against the NEWPHY
+             * label. */
+            uint8_t b6 = band6_for(phy_has_eht(phy));
             if (n + 4 * 48 > BODY_MAX) break;
-            n = add_chan_desc(b, n, f, 1, 0x06, f);
-            n = add_chan_desc(b, n, f, 2, 0x06, c40_6g(f));
-            n = add_chan_desc(b, n, f, 3, 0x06, c80_6g(f));
-            n = add_chan_desc(b, n, f, 4, 0x06, c160_6g(f));
+            n = add_chan_desc(b, n, f, 1, b6, f);
+            n = add_chan_desc(b, n, f, 2, b6, c40_6g(f));
+            n = add_chan_desc(b, n, f, 3, b6, c80_6g(f));
+            n = add_chan_desc(b, n, f, 4, b6, c160_6g(f));
         }
     }
     return n;

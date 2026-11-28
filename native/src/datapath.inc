@@ -29,17 +29,28 @@ struct vap {
     uint8_t key[DC_KEY_MAX];
     size_t klen;
     uint8_t keyidx;
+    /* Per-VAP 0x402b two-slot state.  The datachan is shared by every VAP but
+       the manager installs a separate key per VAP, so slots must not live in
+       dc_ctx: another VAP's keyidx would select this VAP's frame with the
+       wrong key. */
+    uint8_t slot_key[2][DC_KEY_MAX];
+    size_t slot_keylen[2];
+    int slot_valid[2];
     uint64_t tx_seq, rx_max, rx_bitmap;
     int rx_started;
     int mode;                   /* 0 = ACCESS, 1 = TAG */
     int dc_variant;             /* 0x500b TLV 0xa2 for this VAP: 1 plain, 2 secure */
+    int dc_variant_set;         /* a2 was present (a2=0 is a real value) */
     int l2fd;                   /* AF_PACKET RX on the VAP */
     int extfd;                  /* hostapd external-RSN dgram */
     /* W46: per-VAP RSN policy.  mfp = the manager's RSN caps advertise
        MFPC/MFPR; external_auth = SAE/OWE (the manager owns the 802.11 Auth
-       exchange, so 0x2019 Auth frames must go through this BSS's hostapd). */
+       exchange, so 0x2019 Auth frames must go through this BSS's hostapd).
+       local_owe = hostapd completes a pure-OWE BSS itself: no manager key
+       install (0x201f), no Auth/EAPOL relay, no extmux record (F80). */
     int mfp;
     int external_auth;
+    int local_owe;
     /* Per-phy hostapd: the manager's start body for this VAP, kept so one
        hostapd process can carry every BSS of the radio (bss= sections). */
     int have_start;
@@ -99,6 +110,9 @@ static void vap_set_key(int rid, int wid, const uint8_t *key, size_t klen,
     if (rid < 0 || wid < 0) return;
     v = &g_vap[rid % MAX_RADIOS][wid & 0x0f];
     if (key && (klen == 16 || klen == 32)) {
+        memcpy(v->slot_key[keyidx & 1], key, klen);
+        v->slot_keylen[keyidx & 1] = klen;
+        v->slot_valid[keyidx & 1] = 1;
         memcpy(v->key, key, klen);
         v->klen = klen;
         v->keyidx = keyidx;
@@ -594,6 +608,16 @@ static void dp_rx_frame(struct dc_ctx *d, int rid, int wid,
 
     if (plen < 14) {
         printf("datachan: short payload %zu rid=%d wid=%d\n", plen, rid, wid);
+        return;
+    }
+    /* dc_service() accepts datagrams of up to
+     * DC_PFX_LEN + DC_HDR_LEN + DC_MAX_PAYLOAD + DC_TAG_LEN bytes.  For an
+     * a2=1 (plain) datachan it passes plen = datagram_len - 10 straight to
+     * this function, so a frame for an unknown (rid,wid) could exceed the
+     * local copy target before any VLAN policy rejected it. */
+    if (plen > sizeof(out)) {
+        printf("datachan: oversized payload %zu rid=%d wid=%d\n",
+               plen, rid, wid);
         return;
     }
     if (!v) {

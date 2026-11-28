@@ -1,10 +1,11 @@
 # Release notes index
 
-Current release: **v0.6.5**. The version is stored in
+Current release: **v0.6.6**. The version is stored in
 [`../VERSION`](../VERSION) and printed by `capagent --version`.
 
 | Release | Headline |
 |---|---|
+| [`0.6.6`](RELEASE-0.6.6.md) | `6ghz-ax` live, datachan/OWE hardening, honest `--version` |
 | [`0.6.5`](RELEASE-0.6.5.md) | OWE live (CAP-local), `a2=1` datachan live, live `0x6017` keeps 8/8 |
 | [`0.6.4`](RELEASE-0.6.4.md) | one CAP identity with eight radios (solo); reliable after cold reboot |
 | [`0.6.3`](RELEASE-0.6.3.md) | 802.11v BTM live on the virtual bench; `6ghz-ax` closed as manager-side |
@@ -22,8 +23,8 @@ Current release: **v0.6.5**. The version is stored in
 | [`0.5.0`](RELEASE-0.5.0.md) | PSK-free CAP completes the 4-way; zero-touch image flashed |
 | [`0.4.0`](RELEASE-0.4.0.md) | initial manager-only image and certificate enrolment |
 
-The v0.6.5 image sha256 is
-`58ab0c2ecd2cf17257c670a91bebd5f158f0cf276a1b3c47e9fb28cc8cdd5dd9`
+The v0.6.6 image sha256 is
+`c5f8813e4d2e0065f336c03556ea9d887dece7d7dc4c08451cb5acd5c3b5fc3d`
 (7,472,226 B). The one-CAP/eight-radio topology uses one
 `cap=OpenWrt-CAPSOLO` with 8 radios, 8 SSIDs and all eight station tests
 `authorized: yes`, 3/3, 0% — including after a cold reboot.

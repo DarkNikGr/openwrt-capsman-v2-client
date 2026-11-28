@@ -15,6 +15,7 @@
 #include <time.h>
 #include <signal.h>
 #include <dirent.h>
+#include <net/if.h>
 #include <sys/stat.h>
 
 /* ---- stubs required by ownership.inc ---------------------------------- */

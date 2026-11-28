@@ -118,8 +118,15 @@
 
 #define MAX_RADIOS   8
 
-/* Release version, reported by --version and recorded in the release notes. */
-#define CAPAGENT_VERSION "0.4.0"
+/* Release version, reported by --version and recorded in the release notes.
+ *
+ * The build always overrides this from ../VERSION
+ * (-DCAPAGENT_VERSION="0.6.6" in native/Makefile, scripts/build-*.sh), so it
+ * can never drift from the tag again.  The literal below is only the fallback
+ * for a plain `cc capagent.c` and must be bumped with VERSION. */
+#ifndef CAPAGENT_VERSION
+#define CAPAGENT_VERSION "0.6.6"
+#endif
 
 static uint64_t g_sta_ident;   /* last manager station-level ident */
 static struct extmux *g_extmux; /* W8 multi-VAP ext-auth relay, or NULL */

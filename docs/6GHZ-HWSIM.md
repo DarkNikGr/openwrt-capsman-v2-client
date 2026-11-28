@@ -85,24 +85,17 @@ Two manager details matter:
 * **6 GHz requires WPA3.** With `wpa2-psk` the CAP's hostapd refuses to start
   (`Invalid AKM suite for 6 GHz`). Use `wpa3-psk`/SAE. OWE on 6 GHz is not
   tested; on 2.4/5 GHz a pure-OWE VAP is live through CAP-local OWE (F80).
-* **Band name.** The manager labels a 6 GHz-capable CAP's channels `be`
-  (`cap print`/`radio print` show `5955/be`), and `6ghz-ax` gets
-  `no available channels`; `6ghz-be` is the working configuration value even
-  though the station registration is later reported as `band=6ghz-ax`. With
-  the 0x84/9 beacon bit and the full descriptor set the same `6ghz-be` profile
-  now works at 80 MHz. A fresh-identity sweep of the 6 GHz band id
-  (`CAPAGENT_BAND6` = 0x05..0x1f, including 0x11..0x1f) with a `6ghz-ax`
-  profile still reports `no available channels` in every case; the manager's
-  radio view labels 5955 `be` (band ids outside 0x06 also add `(unknown)`).
-  An HE-only attempt (`CAPAGENT_NO_EHT=1` with the beacon bit, band ids
-  0x04/0x06/0x07) also stayed at `no available channels`. With this virtual
-  radio the manager only selects the `be` channel set (`6ghz-be`), even though
-  the station registration is reported as `band=6ghz-ax`. A **no-EHT hwsim
-  build** (`has_eht=false`, `has_uhr=false`; `iw phy` shows HE-only iftypes,
-  no EHT/UHR) with the same `cfg6`/descriptors still reports
-  `5955/be` and `no available channels` for every band id. This isolates the
-  `6ghz-ax` limitation to RouterOS's CAP 6 GHz band mapping, not to the CAP's
-  advertised EHT capability.
+* **Band name and descriptor band (F85).** Two different manager inputs matter:
+  the NEWPHY `0x4d` radio label (`0x04` => `6ghz-ax`, `0x06` => `6ghz-be`) and
+  the `0xD00B` `0x000A` channel-descriptor band byte. The manager matches the
+  profile band **for equality against the descriptor byte**. F79 swept only the
+  NEWPHY id while every descriptor stayed `0x06`, which is why `6ghz-ax` always
+  reported `no available channels`. With descriptor band `0x04` (HE-only
+  radio) the manager lists `5955/ax`, the VAP is `MDB`, hostapd is
+  `AP-ENABLED` and a SAE station is `authorized: yes` with ping 0%. EHT radios
+  use `0x06` (`6ghz-be`). The agent now chooses `0x04` for HE-only and `0x06`
+  for EHT; `CAPAGENT_BAND6` overrides for a lab sweep. The historical F79
+  sweep below is kept as evidence of the confound.
 
 ## F78: the beacon-protection capability bit
 
@@ -186,6 +179,7 @@ EXT-AUTH: station 02:00:00:00:01:00 authorized by external authenticator
 * The datapath was verified at 20 MHz and 80 MHz (center 5985). 160 MHz is
   advertised but not exercised, and 320 MHz is not generated. MLO is not
   implemented.
-* The literal `channel.band=6ghz-ax` is **not** a working configuration value
-  on this RouterOS/hwsim combination (F79); do not read the station's
-  `band=6ghz-ax` registration back as proof that `6ghz-ax` provisioning works.
+* `channel.band=6ghz-ax` **is** a working configuration value with descriptor
+  band `0x04` (F85); `6ghz-be` (`0x06`) is the EHT value. The station's
+  `band=6ghz-ax` registration alone is not proof; the `5955/ax` radio view and
+  the `MDB` VAP are.

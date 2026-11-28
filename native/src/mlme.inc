@@ -462,6 +462,7 @@ static int mlme_on_mgmt(mbedtls_ssl_context *ssl, struct nlattr *at, int alen,
     if (vt != 0 || memcmp(fr + 16, m->bssid, 6) != 0) return 0;
 
     if (st == 11) {                            /* authentication */
+        if (fl < 30) return 0;                 /* alg/seq/status body */
         uint16_t alg = (uint16_t)(fr[24] | (fr[25] << 8));
         uint16_t seq = (uint16_t)(fr[26] | (fr[27] << 8));
         if (alg == 0 && seq == 1) {             /* open system */
@@ -478,6 +479,7 @@ static int mlme_on_mgmt(mbedtls_ssl_context *ssl, struct nlattr *at, int alen,
         return 0;                              /* SAE etc.: manager answers */
     }
     if (st == 0 || st == 2) {                  /* AssocReq / ReassocReq */
+        if (fl < 28) return 0;                 /* capab/listen fixed fields */
         uint16_t capab = (uint16_t)(fr[24] | (fr[25] << 8));
         uint8_t rates[16];
         int rl = 0;

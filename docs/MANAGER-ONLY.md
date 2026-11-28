@@ -65,8 +65,8 @@ authenticate; both are proven 8/8.
 ### 2.2 OWE, 6 GHz band value and MLO
 
 * OWE is live: a pure-OWE VAP is completed by the CAP's hostapd because RouterOS 7.25.1 has no manager-side OWE DH (F80).
-* 6 GHz works on the virtual radio with `6ghz-be` at 20/80 MHz; the literal
-  `channel.band=6ghz-ax` is vendor-blocked (F79).
+* 6 GHz `6ghz-ax` is live on the virtual radio at 20/80 MHz (descriptor band
+  `0x04`, F85); `6ghz-be` (`0x06`) is the EHT value.
 * MLO/EHT multi-link and 6 GHz 160/320 MHz are not implemented; the Deco BE65
   is read-only.
 

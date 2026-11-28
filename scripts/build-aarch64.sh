@@ -16,8 +16,10 @@ STRIP=${CROSS}strip
 [ -f "${MBEDTLS}/library/libmbedtls.a" ] || {
     echo "mbedTLS static libs not found in ${MBEDTLS}" >&2; exit 1; }
 mkdir -p "$(dirname "${OUT}")"
+CAPAGENT_VERSION=$(cat "${ROOT}/VERSION")
 "${CC}" -O2 -Wall -Wextra -Wno-unused-parameter -I"${MBEDTLS}/include" \
     -I"${ROOT}/native/src" \
+    -DCAPAGENT_VERSION="\"${CAPAGENT_VERSION}\"" \
     -o "${OUT}" "${ROOT}/native/capagent.c" "${ROOT}/native/src/extmux.c" \
     "${MBEDTLS}/library/libmbedtls.a" \
     "${MBEDTLS}/library/libmbedx509.a" \

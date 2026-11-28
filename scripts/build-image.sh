@@ -58,15 +58,36 @@ rm -rf "$SDK/build_dir/target-mipsel_24kc_musl/hostapd-wpad-full-mbedtls"
 
 # 3. capagent package (static binary from native/).  A clean clone does not
 #    contain native/capagent-mipsel (it is a build artefact), so build it from
-#    the SDK's toolchain + the mbedTLS that step 1 just staged.
+#    the SDK's toolchain + the mbedTLS that step 1 just staged.  An existing
+#    in-tree binary is reused only when it is newer than the sources and
+#    VERSION; otherwise the image would silently ship a stale agent.
 CAPAGENT_BIN=$REPO/native/capagent-mipsel
-if [ ! -f "$CAPAGENT_BIN" ]; then
+need_build=0
+if [ -f "$CAPAGENT_BIN" ]; then
+	[ "$CAPAGENT_BIN" -nt "$REPO/VERSION" ] || need_build=1
+	if find "$REPO/native" -name '*.c' -newer "$CAPAGENT_BIN" | grep -q .; then
+		need_build=1
+	fi
+	if find "$REPO/native/src" -name '*.inc' -newer "$CAPAGENT_BIN" | grep -q .; then
+		need_build=1
+	fi
+	[ "$need_build" = 1 ] &&
+		say "native/capagent-mipsel is older than the tree; rebuilding it"
+else
+	need_build=1
+fi
+if [ "$need_build" = 1 ]; then
 	say "building capagent-mipsel (scripts/build-mipsel.sh)"
 	CAPAGENT_BIN=$WORK/capagent-mipsel
 	SDK=$SDK OUT=$CAPAGENT_BIN "$REPO/scripts/build-mipsel.sh" >&2
 fi
 rm -rf "$SDK/package/capagent"
 cp -a "$REPO/openwrt/capagent" "$SDK/package/capagent"
+# `make package/capagent/compile` is a no-op while the SDK tree still has the
+# package's build stamps and ipk, so a changed CAPAGENT_BIN (or a new VERSION)
+# would silently ship the previous binary.  Force a clean rebuild.
+( cd "$SDK" && make package/capagent/clean >&2 || true )
+rm -f "$SDK"/bin/packages/mipsel_24kc/base/capagent_*.ipk
 ( cd "$SDK" && make package/capagent/compile \
 	CAPAGENT_BIN="$CAPAGENT_BIN" PKG_VERSION="$(cat "$REPO/VERSION")" \
 	MULTI_CAP="$REPO/scripts/multi-cap.sh" ) >&2
@@ -119,8 +140,10 @@ unsquashfs -q -no-exit-code -d "$TMP" "$WORK/payload.sqsh" >/dev/null
 need() { [ -e "$TMP/$1" ] || { say "MISSING $1"; exit 1; }; }
 need usr/sbin/capagent
 need usr/sbin/wpad
+need usr/sbin/multi-cap.sh
 need etc/init.d/capagent
 need etc/cap/capagent.conf
+need etc/cap/capagent-solo.conf.example
 for s in external_rsn_sae EXT_AUTH_MGMT_TX external_rsn_ie; do
 	grep -q "$s" "$TMP/usr/sbin/wpad" ||
 		{ say "the wpad in the image is the stock one (missing $s)"; exit 1; }

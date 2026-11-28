@@ -151,6 +151,98 @@ static int dc_replay_ok(struct vap *v, uint64_t seq)
     return dc_replay_window(&v->rx_max, &v->rx_bitmap, &v->rx_started, seq);
 }
 
+/* The manager sends one 0x500b per VAP.  a2=0 is a real value ("no datachan
+   on this VAP"), so it must not be confused with "this VAP never carried a
+   variant" (fall back to the last create). */
+static int dc_variant_for(const struct vap *v, const struct dc_ctx *d)
+{
+    if (v && v->dc_variant_set) return v->dc_variant;
+    return d->variant;
+}
+
+static void dc_store_variant(int rid, int wid, int a2)
+{
+    struct vap *v;
+    if (rid < 0 || wid < 0 || wid > 15) return;
+    v = &g_vap[rid % MAX_RADIOS][wid];
+    v->dc_variant = a2;
+    v->dc_variant_set = 1;
+}
+
+/* TX key selection.  The per-VAP key/slot always wins; the dc_ctx slots are
+   only a fallback for a VAP whose 0x500b did not carry a key (e.g. the
+   --dc-key test override).  Using the global active slot first encrypted
+   VAP A's frames with VAP B's key whenever both creates used the same
+   keyidx. */
+static int dc_select_tx_key(const struct vap *v, const struct dc_ctx *d,
+                            int rid, int wid, const uint8_t **key,
+                            size_t *klen, uint8_t *keyidx)
+{
+    int idx;
+
+    *key = NULL;
+    *klen = 0;
+    *keyidx = 0;
+    if (v) {
+        idx = v->keyidx & 1;
+        if (v->slot_valid[idx] && v->slot_keylen[idx]) {
+            *key = v->slot_key[idx];
+            *klen = v->slot_keylen[idx];
+            *keyidx = (uint8_t)idx;
+            return 0;
+        }
+        if (v->klen) {
+            *key = v->key;
+            *klen = v->klen;
+            *keyidx = v->keyidx;
+            return 0;
+        }
+    }
+    if (d->have_key && (int)d->rid == rid && (int)d->wid == wid) {
+        *key = d->key;
+        *klen = d->key_len;
+        *keyidx = d->keyidx;
+        return 0;
+    }
+    return -1;
+}
+
+/* RX keys in preference order: this VAP's indicated slot, its other slot
+   (the 0x402b transition), its installed key, then the per-VAP create copy
+   and finally the legacy global slots.  dc_service tries each candidate, so
+   a frame that arrives with a stale keyidx still decrypts with the right
+   per-VAP key. */
+static int dc_rx_key_candidates(const struct vap *v, const struct dc_ctx *d,
+                                const struct dc_keyent *ke, int keyidx,
+                                const uint8_t *keys[], size_t lens[], int max)
+{
+    int n = 0, idx = keyidx & 1;
+
+#define DC_ADD_KEY(k, l)                                                     \
+    do {                                                                     \
+        if ((l) && n < (max)) {                                              \
+            keys[n] = (k);                                                   \
+            lens[n] = (l);                                                   \
+            n++;                                                             \
+        }                                                                    \
+    } while (0)
+
+    if (v) {
+        DC_ADD_KEY(v->slot_key[idx], v->slot_valid[idx] ? v->slot_keylen[idx] : 0);
+        DC_ADD_KEY(v->slot_key[idx ^ 1],
+                   v->slot_valid[idx ^ 1] ? v->slot_keylen[idx ^ 1] : 0);
+        DC_ADD_KEY(v->key, v->klen);
+    }
+    if (ke && ke->used) DC_ADD_KEY(ke->key, ke->key_len);
+    DC_ADD_KEY(d->slot_key[idx], d->slot_valid[idx] ? d->slot_keylen[idx] : 0);
+    DC_ADD_KEY(d->slot_key[idx ^ 1],
+               d->slot_valid[idx ^ 1] ? d->slot_keylen[idx ^ 1] : 0);
+    DC_ADD_KEY(d->key, d->have_key ? d->key_len : 0);
+#undef DC_ADD_KEY
+    return n;
+}
+
+
 static int dc_open(struct dc_ctx *d, uint16_t port)
 {
     int one = 1;
@@ -291,6 +383,9 @@ static int dc_rekey(struct dc_ctx *d, int idx, const uint8_t *key, size_t len)
     if (old != idx) {
         d->active = idx;
         d->tx_seq = 0;
+        d->rx_started = 0;
+        d->rx_max = 0;
+        d->rx_bitmap = 0;
     }
     if (old >= 0 && old != idx && d->slot_valid[old]) {
         d->pending_del = old;
@@ -300,25 +395,68 @@ static int dc_rekey(struct dc_ctx *d, int idx, const uint8_t *key, size_t len)
     d->key_len = len;
     d->have_key = 1;
     d->keyidx = (uint8_t)idx;
-    /* Every VAP's transmit path keeps its own seq; a slot change resets it. */
+    /* A rekey belongs to the secure datachan.  Never arm a key on an a2=1
+       (plain) or a2=0 (no datachan) VAP: the old code applied it to every
+       VAP and reset plain VAPs' TX sequence.  Each secure VAP keeps its own
+       slots and sequence; a changed slot restarts both directions because
+       the manager restarts its TX sequence as well. */
     for (int r = 0; r < MAX_RADIOS; r++)
         for (int w = 0; w < 16; w++) {
             struct vap *v = &g_vap[r][w];
             struct dc_keyent *e = &g_dckey[r][w];
-            if (v->used) {
-                memcpy(v->key, key, len);
-                v->klen = len;
+            if (!v->used || !v->dc_variant_set || v->dc_variant != 2)
+                continue;
+            memcpy(v->slot_key[idx], key, len);
+            v->slot_keylen[idx] = len;
+            v->slot_valid[idx] = 1;
+            if ((v->keyidx & 1) != idx) {
                 v->keyidx = (uint8_t)idx;
-                if (old != idx) v->tx_seq = 0;
+                v->tx_seq = 0;
+                v->rx_started = 0;
+                v->rx_max = 0;
+                v->rx_bitmap = 0;
             }
+            memcpy(v->key, key, len);
+            v->klen = len;
             if (e->used) {
                 memcpy(e->key, key, len);
                 e->key_len = len;
             }
         }
-    printf("datachan: key slot=%d active %d->%d tx_seq=%llu key=%02x%02x..%02x\n",
-           idx, old, d->active, (unsigned long long)d->tx_seq,
-           key[0], key[1], key[len - 1]);
+    /* Never log key material: a syslog reader must not learn even a few
+     * bytes of the datachan key. */
+    printf("datachan: key slot=%d active %d->%d tx_seq=%llu key_len=%zu\n",
+           idx, old, d->active, (unsigned long long)d->tx_seq, len);
+    return 0;
+}
+
+/* Same host for the datachan peer check.  A plain (a2=1) datachan has no
+ * authentication at all, so the UDP source must at least be the manager we
+ * joined over TLS; otherwise any host that can reach the CAP's datachan port
+ * (a wireless client on a bridged VLAN, for example) could inject Ethernet
+ * frames into any VAP. */
+static int dc_same_host(const struct sockaddr_storage *a,
+                        const struct sockaddr_storage *b)
+{
+    if (a->ss_family == AF_INET && b->ss_family == AF_INET)
+        return ((const struct sockaddr_in *)a)->sin_addr.s_addr ==
+               ((const struct sockaddr_in *)b)->sin_addr.s_addr;
+    if (a->ss_family == AF_INET6 && b->ss_family == AF_INET6)
+        return !memcmp(&((const struct sockaddr_in6 *)a)->sin6_addr,
+                       &((const struct sockaddr_in6 *)b)->sin6_addr,
+                       sizeof(struct in6_addr));
+    if (a->ss_family == AF_INET && b->ss_family == AF_INET6) {
+        const struct sockaddr_in6 *b6 = (const struct sockaddr_in6 *)b;
+        if (IN6_IS_ADDR_V4MAPPED(&b6->sin6_addr))
+            return !memcmp(b6->sin6_addr.s6_addr + 12,
+                           &((const struct sockaddr_in *)a)->sin_addr, 4);
+    }
+    if (a->ss_family == AF_INET6 && b->ss_family == AF_INET) {
+        const struct sockaddr_in6 *a6 = (const struct sockaddr_in6 *)a;
+        if (IN6_IS_ADDR_V4MAPPED(&a6->sin6_addr))
+            return !memcmp(a6->sin6_addr.s6_addr + 12,
+                           &((const struct sockaddr_in *)b)->sin_addr, 4);
+    }
     return 0;
 }
 
@@ -329,8 +467,22 @@ static void dc_service(struct dc_ctx *d)
 
     if (d->fd < 0) return;
     if (d->pending_del >= 0 && dc_now_ms() >= d->pending_ms) {
-        d->slot_valid[d->pending_del] = 0;
-        printf("datachan: old slot=%d deleted after 1 s\n", d->pending_del);
+        int o = d->pending_del;
+        d->slot_valid[o] = 0;
+        /* Drop the matching per-VAP slot as well.  Frames on the new slot may
+           restart at sequence 1, so reset the VAP's replay window when its
+           old slot disappears (c2.ko resets the watermark on slot delete). */
+        for (int r = 0; r < MAX_RADIOS; r++)
+            for (int w = 0; w < 16; w++) {
+                struct vap *v = &g_vap[r][w];
+                if (!v->used || !v->slot_valid[o]) continue;
+                if ((v->keyidx & 1) == o) continue;
+                v->slot_valid[o] = 0;
+                v->rx_started = 0;
+                v->rx_max = 0;
+                v->rx_bitmap = 0;
+            }
+        printf("datachan: old slot=%d deleted after 1 s\n", o);
         d->pending_del = -1;
     }
     for (;;) {
@@ -369,7 +521,16 @@ static void dc_service(struct dc_ctx *d)
                 !memcmp(buf + DC_PFX_LEN, d->cookie, d->cookie_len))
                 matched = 1;
             if (matched) {
-                if (!d->peer_len || memcmp(&src, &d->peer, sizeof(src)) != 0) {
+                /* Match the cookie, but only let the manager host move the
+                 * peer port.  A LAN sniffer that saw the cleartext cookie
+                 * could otherwise redirect all datachan traffic to itself. */
+                if (d->peer_len && !dc_same_host(&src, &d->peer) &&
+                    !getenv("CAPAGENT_DC_ANY_SOURCE")) {
+                    printf("datachan: keepalive from non-manager host ignored\n");
+                    continue;
+                }
+                if (!d->peer_len || slen != d->peer_len ||
+                    memcmp(&src, &d->peer, (size_t)slen) != 0) {
                     memcpy(&d->peer, &src, sizeof(src));
                     d->peer_len = slen;
                     printf("datachan: peer learned from keepalive\n");
@@ -377,6 +538,12 @@ static void dc_service(struct dc_ctx *d)
                 printf("datachan keepalive len=%d\n", (int)r);
                 continue;
             }
+            /* A keepalive-shaped frame with an unknown cookie is not data.
+             * Falling through used to feed its cookie bytes to the plain
+             * parser, which could turn a forged keepalive into an injected
+             * Ethernet frame. */
+            printf("datachan: keepalive with unknown cookie dropped\n");
+            continue;
         }
         if (buf[1] & DC_PFX_FRAG) {
             printf("datachan: fragmented frame, unsupported\n");
@@ -387,9 +554,24 @@ static void dc_service(struct dc_ctx *d)
         /* (rid,wid) identify the VAP that owns the key.  Do not rewrite it
            from the first frame: every VAP shares the datachan. */
         struct vap *v = vap_get(rid, wid);
-        int variant = (v && v->dc_variant) ? v->dc_variant : d->variant;
+        int variant = dc_variant_for(v, d);
+        /* a2=1 is unauthenticated on the wire.  Only the manager peer may
+         * inject it; a2=2 frames are CCM-authenticated and can be accepted
+         * independently of the source address (useful after a manager
+         * address change). */
+        if (variant == 1 && d->peer_len &&
+            !dc_same_host(&src, &d->peer) &&
+            !getenv("CAPAGENT_DC_ANY_SOURCE")) {
+            printf("datachan: plain frame from non-manager source dropped\n");
+            continue;
+        }
         plen = (size_t)r - DC_PFX_LEN - DC_HDR_LEN;
         ct = buf + DC_PFX_LEN + DC_HDR_LEN;
+        if (v && v->dc_variant_set && v->dc_variant == 0) {
+            printf("datachan: frame for a2=0 VAP rid=%u wid=%u dropped\n",
+                   rid, wid);
+            continue;
+        }
         if (variant == 1) {             /* 0xa2=1: bare Ethernet, no tag */
             int ok = v ? dc_replay_ok(v, seq)
                        : dc_replay_window(&d->rx_max, &d->rx_bitmap,
@@ -397,6 +579,11 @@ static void dc_service(struct dc_ctx *d)
             if (!ok) {
                 printf("datachan replay dropped seq=%llu\n",
                        (unsigned long long)seq);
+                continue;
+            }
+            if (plen > DC_MAX_PAYLOAD) {
+                printf("datachan: oversize plain frame %zu rid=%u wid=%u\n",
+                       plen, rid, wid);
                 continue;
             }
             printf("datachan plain rid=%u wid=%u seq=%llu ethtype=%02x%02x "
@@ -408,28 +595,32 @@ static void dc_service(struct dc_ctx *d)
         }
         {
             struct dc_keyent *ke = &g_dckey[rid % MAX_RADIOS][wid & 0x0f];
-            const uint8_t *kk = NULL;
-            size_t kkl = 0;
-            if (d->slot_valid[keyidx & 1]) {
-                kk = d->slot_key[keyidx & 1];
-                kkl = d->slot_keylen[keyidx & 1];
-            } else if (v && v->klen) {
-                kk = v->key; kkl = v->klen;
-            } else if (ke->used) {
-                kk = ke->key; kkl = ke->key_len;
-            } else {
-                kk = d->key; kkl = d->key_len;
-            }
-            if (!kkl || plen < DC_TAG_LEN) {
-                printf("datachan frame rid=%u wid=%u len=%zu (no key)\n",
+            const uint8_t *keys[8];
+            size_t lens[8];
+            int nk, got = 0;
+
+            if (plen < DC_TAG_LEN) {
+                printf("datachan frame rid=%u wid=%u len=%zu (short)\n",
                        rid, wid, plen);
                 continue;
             }
             ct_len = plen - DC_TAG_LEN;
             if (ct_len > sizeof(pt)) continue;
             tag = ct + ct_len;
-            if (dc_decrypt_key(kk, kkl, buf + DC_PFX_LEN, ct, ct_len,
-                               tag, pt) != 0) {
+            nk = dc_rx_key_candidates(v, d, ke, keyidx, keys, lens, 8);
+            if (!nk) {
+                printf("datachan frame rid=%u wid=%u len=%zu (no key)\n",
+                       rid, wid, plen);
+                continue;
+            }
+            for (int i = 0; i < nk; i++) {
+                if (dc_decrypt_key(keys[i], lens[i], buf + DC_PFX_LEN, ct,
+                                   ct_len, tag, pt) == 0) {
+                    got = 1;
+                    break;
+                }
+            }
+            if (!got) {
                 printf("datachan auth failed rid=%u wid=%u keyidx=%u "
                        "flags=%u seq=%llu len=%zu\n", rid, wid, keyidx,
                        flags, (unsigned long long)seq, plen);
@@ -467,28 +658,23 @@ static int dc_send_frame_vap(struct dc_ctx *d, int rid, int wid,
     const uint8_t *key = NULL;
     size_t klen = 0;
     uint8_t keyidx = 0;
-    int ret, active;
+    int ret;
 
     if (rid < 0 || wid < 0) return -EINVAL;
     v = &g_vap[rid % MAX_RADIOS][wid & 0x0f];
-    active = d->active;
-    if (active >= 0 && active <= 1 && d->slot_valid[active]) {
-        key = d->slot_key[active];
-        klen = d->slot_keylen[active];
-        keyidx = (uint8_t)active;
-    } else if (v->klen) {
-        key = v->key; klen = v->klen; keyidx = v->keyidx;
-    } else if (d->have_key && (int)d->rid == rid && (int)d->wid == wid) {
-        key = d->key; klen = d->key_len; keyidx = d->keyidx;
-    }
     if (d->fd < 0 || !d->peer_len) return -1;
     if (flen > DC_MAX_PAYLOAD) return -1;
+    int variant = dc_variant_for(v, d);
+    /* a2=0 is "this VAP has no datachan", not the legacy default.  Do not
+       fall through to the secure path and borrow another VAP's global key. */
+    if (v->dc_variant_set && variant == 0) return -EINVAL;
+
+    dc_select_tx_key(v, d, rid, wid, &key, &klen, &keyidx);
 
     pkt[0] = DC_PFX_MAGIC;
     pkt[1] = 0x00;                  /* unfragmented, not keepalive */
     dc_hdr_write(cdh, (uint8_t)rid, (uint8_t)wid, 0, keyidx, ++v->tx_seq);
     memcpy(pkt + DC_PFX_LEN, cdh, sizeof(cdh));
-    int variant = (v->dc_variant) ? v->dc_variant : d->variant;
     if (variant == 1) {             /* 0xa2=1: no tag, no crypto */
         memcpy(pkt + DC_PFX_LEN + DC_HDR_LEN, frame, flen);
         return sendto(d->fd, pkt, DC_PFX_LEN + DC_HDR_LEN + flen, 0,
@@ -542,11 +728,9 @@ static void dc_handle_create(struct dc_ctx *d, const struct cfg *c,
         d->variant = a2;
         d->secure = (a2 != 1);
         /* The a2 variant is per VAP: the manager sends one 0x500b for every
-         * VAP, and the on-cap VAPs carry a2=0.  Keeping only the last value
-         * in dc_ctx made a 5 GHz a2=1 datachan parse its frames as AES-CCM
-         * after a later a2=0 create. */
-        struct vap *av = vap_get(vrid, vwid);
-        if (av) av->dc_variant = a2;
+         * VAP, and the on-cap VAPs carry a2=0.  The VAP is resolved from
+         * 0x7d/0x08 below, so store the variant after that resolution, not
+         * on the request port (which can be the master VAP). */
         printf("0x500b datachan variant a2=%d (%s)\n", a2,
                a2 == 2 ? "AES-CCM" : a2 == 1 ? "plain" : "none");
     }
@@ -560,7 +744,6 @@ static void dc_handle_create(struct dc_ctx *d, const struct cfg *c,
     }
     /* 0xa9 = key index (c2.ko cm_datachan_key_add takes 0/1) */
     if (find_el(body, len, 0xa9, &v, &l) && l == 1) keyidx = (uint8_t)(v[0] & 1);
-    if (!key && !cookie && !c->dc_key_len && !c->dc_cookie_len) return;
 
     if (c->dc_key_len) { key = c->dc_key; key_len = c->dc_key_len; }
     if (c->dc_cookie_len) {
@@ -602,6 +785,11 @@ static void dc_handle_create(struct dc_ctx *d, const struct cfg *c,
             }
         }
     }
+
+    /* Apply a2 to the VAP the key/VLAN actually resolved to.  vrid/vwid may
+       have changed from create_port when 0x7d/0x08 named a VLAN VAP. */
+    if (a2 >= 0) dc_store_variant(vrid, vwid, a2);
+    if (!key && !cookie && !c->dc_key_len && !c->dc_cookie_len) return;
 
     printf("0x500b datachan id=%u port=%u key=%zuB cookie=%zuB a2=%d\n",
            id, port, key_len, cookie_len, a2);

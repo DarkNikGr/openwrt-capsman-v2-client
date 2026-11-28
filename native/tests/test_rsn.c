@@ -347,6 +347,79 @@ static void case_owe_relay(void)
     expect_line(conf, "external_rsn_auth=1");
 }
 
+/* F80: local OWE does not rely on the external_rsn_sae patch (hostapd runs
+ * OWE itself), so a stock hostapd that reports no override must still get a
+ * real OWE BSS.  Before this fix wpa stayed 0 and the CAP emitted an OPEN
+ * BSS while suppressing external_rsn_auth: a silent security downgrade. */
+static void case_owe_stock_hostapd(void)
+{
+    struct rsn_info ri;
+    struct rsn_policy rp;
+    char conf[256];
+
+    conf_of(ie_owe, sizeof(ie_owe), 0, &ri, &rp, conf, sizeof(conf));
+    assert(rp.wpa == 2 && rp.local_owe && !rp.external_auth);
+    assert(strcmp(rp.key_mgmt, "OWE") == 0);
+    assert(rp.group_mgmt_cmac && rp.want_rsnxe);
+    expect_head(conf, "wpa=2");
+    expect_line(conf, "wpa_key_mgmt=OWE");
+    expect_absent(conf, "external_rsn_auth");
+}
+
+/* With the relay forced on but no patched hostapd there is no way to suppress
+ * hostapd's own OWE, so the BSS must stay open rather than half-configured.
+ * Pinned so a future local-OWE change cannot silently turn this into wpa=2. */
+static void case_owe_relay_stock_hostapd(void)
+{
+    struct rsn_info ri;
+    struct rsn_policy rp;
+    char conf[256];
+
+    setenv("CAPAGENT_LOCAL_OWE", "0", 1);
+    conf_of(ie_owe, sizeof(ie_owe), 0, &ri, &rp, conf, sizeof(conf));
+    unsetenv("CAPAGENT_LOCAL_OWE");
+    assert(rp.wpa == 0 && !rp.local_owe && !rp.external_auth);
+    expect_head(conf, "wpa=0");
+}
+
+/* The per-VAP key/Auth plane consumes exactly these two switches: a
+ * local-OWE BSS must have external_auth == 0 (no 0x201f install, no 0x2019
+ * Auth TX, no 0x201c EAPOL injection, no extmux record), and the relay path
+ * must still report external_auth == 1. */
+static void case_vap_flags(void)
+{
+    struct rsn_info ri;
+    int lo, ext;
+
+    rsn_parse(ie_owe, sizeof(ie_owe), &ri);
+    rsn_vap_flags(&ri, &lo, &ext);
+    assert(lo == 1 && ext == 0);
+
+    setenv("CAPAGENT_LOCAL_OWE", "0", 1);
+    rsn_parse(ie_owe, sizeof(ie_owe), &ri);
+    rsn_vap_flags(&ri, &lo, &ext);
+    unsetenv("CAPAGENT_LOCAL_OWE");
+    assert(lo == 0 && ext == 1);
+
+    /* SAE and 802.1X stay manager-owned (the manager can do their DH/EAP
+     * itself); PSK and open own neither. */
+    rsn_parse(ie_sae, sizeof(ie_sae), &ri);
+    rsn_vap_flags(&ri, &lo, &ext);
+    assert(lo == 0 && ext == 1);
+    rsn_parse(ie_psk, sizeof(ie_psk), &ri);
+    rsn_vap_flags(&ri, &lo, &ext);
+    assert(lo == 0 && ext == 0);
+    rsn_parse(NULL, 0, &ri);
+    rsn_vap_flags(&ri, &lo, &ext);
+    assert(lo == 0 && ext == 0);
+
+    /* OWE+SAE (transition) is not "pure OWE": hostapd must not take it over,
+     * because the manager owns the SAE half. */
+    rsn_parse(ie_psk_sae, sizeof(ie_psk_sae), &ri);
+    rsn_vap_flags(&ri, &lo, &ext);
+    assert(lo == 0 && ext == 1);
+}
+
 /* WPA-PSK-SHA256 is its own AKM keyword and must not become plain WPA-PSK. */
 static void case_psk256(void)
 {
@@ -537,6 +610,9 @@ int main(void)
     case_sae_only();
     case_owe();
     case_owe_relay();
+    case_owe_stock_hostapd();
+    case_owe_relay_stock_hostapd();
+    case_vap_flags();
     case_psk256();
     case_eap();
     case_ft();

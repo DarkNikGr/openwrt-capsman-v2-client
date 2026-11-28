@@ -46,9 +46,17 @@ static void vap_note_rsn(struct vap *vp, const uint8_t *ie, size_t il)
 
     if (!vp) return;
     rsn_parse(ie, il, &ri);
-    if (!ri.valid) return;
+    /* Reset both switches first: a VAP re-provisioned without an RSN IE
+     * (open, or an OWE transition-mode master) must not keep a previous
+     * profile's local-OWE/external-auth decision alive. */
+    vp->local_owe = 0;
+    vp->external_auth = 0;
+    if (!ri.valid) {
+        vp->mfp = 0;
+        return;
+    }
     vp->mfp = getenv("CAPAGENT_NO_MFP") ? 0 : (ri.mfpc || ri.mfpr);
-    vp->external_auth = ri.akm_sae || ri.akm_owe;
+    rsn_vap_flags(&ri, &vp->local_owe, &vp->external_auth);
 }
 
 /* Path of the hostapd binary capagent starts.  Production uses the OpenWrt

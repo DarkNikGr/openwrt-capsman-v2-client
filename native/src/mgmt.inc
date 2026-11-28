@@ -17,6 +17,12 @@ static int  cap_hostapd_ctrl(const struct cfg *c, const char *ifname,
 /* Defined with the VAP lifecycle in vap.inc (W33). */
 static int  vap_refresh_ifindex(int port, uint8_t mac[6], int *changed);
 static int  hostapd_has_mgmt_tx(void);
+/* Defined with the per-phy hostapd in phy.inc (F80): is this port a pure-OWE
+ * BSS whose keys/Auth are owned by hostapd and not by the manager?  Reads the
+ * live `struct vap` when there is one and falls back to the journaled 0x6016
+ * body, so it also answers right after a capagent restart (vap->used == 0)
+ * before the manager re-sends the start body. */
+static int  own_port_local_owe(uint16_t port);
 
 /* W36: in-CAP MLME hooks (definitions in mlme.inc, included after this). */
 static int mlme_owns_ifindex(int ifindex);
@@ -92,6 +98,16 @@ static void handle_201c(mbedtls_ssl_context *ssl, int port,
            manager's EAPOL would race its 4-way.  Read-only. */
         printf("0x201c: port 0x%04x is not capagent-owned, not relaying\n",
                port);
+        fflush(stdout);
+        return;
+    }
+
+    if (own_port_local_owe(xm_canon_port(port))) {
+        /* F80: hostapd runs this BSS's OWE + 4-way itself.  The manager has
+           no session for the station, so any 0x201c EAPOL it sends belongs to
+           a 4-way that never happened and would desynchronise hostapd's. */
+        printf("0x201c: port 0x%04x is local-OWE, manager EAPOL not "
+               "injected\n", port);
         fflush(stdout);
         return;
     }
@@ -532,6 +548,11 @@ static void mgmt_monitor_add(int ifindex)
     int fd = mon_open(mi);
     if (fd < 0) {
         fprintf(stderr, "mon: open ifindex=%d: %s\n", mi, strerror(errno));
+        /* Leave a valid sentinel: a fresh zeroed slot would otherwise make
+         * the poll loop/watchdog treat fd 0 as this monitor. */
+        g_mon[slot].phy = phy;
+        g_mon[slot].fd = -1;
+        g_mon[slot].ifindex = -1;
         return;
     }
     g_mon[slot].phy = phy;
@@ -1096,6 +1117,20 @@ static void handle_201f(mbedtls_ssl_context *ssl, int port,
         return;
     }
 
+    if (own_port_local_owe(xm_canon_port(port))) {
+        /* F80: hostapd completed this BSS's OWE DH and 4-way, so it already
+           derived the PTK, GTK and IGTK.  The manager has no session with the
+           station; its key descriptors belong to a 4-way that never happened.
+           Installing them would overwrite hostapd's GTK (multicast breaks)
+           and IGTK (PMF/BIP validation fails), and its PTK would clobber the
+           unicast path.  Keep hostapd's keys; the caller still acks 0x201f
+           with 0xE01f, which is what the manager expects. */
+        printf("0x201f: port 0x%04x is local-OWE, %d key(s) left to "
+               "hostapd\n", port, nkd);
+        fflush(stdout);
+        return;
+    }
+
     uint8_t mac[6] = {0};
     int refreshed = 0;
     /* W33: refresh ifindex/pmap before NEW_KEY.  A netdev that hostapd or a
@@ -1616,6 +1651,16 @@ static void cap_vap_ready(int phy, int vapid, int ifindex, const char *ifname,
     }
 
     vp = vap_get(phy, vapid);
+    /* F80: a local-OWE BSS runs its own 802.11 Auth/4-way inside hostapd.
+     * Registering it with extmux would relay 0x2018 Auth frames to a manager
+     * that cannot do OWE DH, and would give extmux sessions with no hostapd
+     * ext-auth socket behind them.  pmap/vchan above stay. */
+    if (own_port_local_owe(port)) {
+        printf("wl: %s is local-OWE (hostapd owns the 4-way), no ext-auth "
+               "relay\n", ifname);
+        fflush(stdout);
+        return;
+    }
     if (g_extmux) {
         if (extmux_vap_ensure(g_extmux, port, ifname, ifindex,
                               mac ? mac : (vp ? vp->bssid : NULL)) == 0) {
