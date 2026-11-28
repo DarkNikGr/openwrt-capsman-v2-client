@@ -23,7 +23,7 @@ Current release: **v0.6.5**. The version is stored in
 | [`0.4.0`](RELEASE-0.4.0.md) | initial manager-only image and certificate enrolment |
 
 The v0.6.5 image sha256 is
-`05a3c52e2955282308846ad23abb7c38ae6b33f5715fc385fedc96c5f9232d76`
+`58ab0c2ecd2cf17257c670a91bebd5f158f0cf276a1b3c47e9fb28cc8cdd5dd9`
 (7,472,226 B). The one-CAP/eight-radio topology uses one
 `cap=OpenWrt-CAPSOLO` with 8 radios, 8 SSIDs and all eight station tests
 `authorized: yes`, 3/3, 0% — including after a cold reboot.

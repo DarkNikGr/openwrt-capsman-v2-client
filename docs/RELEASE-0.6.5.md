@@ -75,7 +75,7 @@ Xiaomi Mi Router 4A Gigabit, RB1100AHx4 / RouterOS 7.25.1, one
 change both give `ssids=8`, `capagent=1`, `hostapd=10`; all eight station
 tests are `authorized: yes`, 3/3, 0%.
 
-Image sha256 `__SHA__` (7,472,226 B).
+Image sha256 `58ab0c2ecd2cf17257c670a91bebd5f158f0cf276a1b3c47e9fb28cc8cdd5dd9` (7,472,226 B).
 
 ## Still open
 
