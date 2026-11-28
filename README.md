@@ -74,10 +74,11 @@ OpenWrt 24.10, MediaTek MT7603E + MT7612E), managed by an
 >   pure-OWE VAP is completed by the CAP's own hostapd while the manager still
 >   provisions SSID/security/channel/VLAN. A station does the OWE DH, the
 >   4-way and pings 0% (F80); `CAPAGENT_LOCAL_OWE=0` restores the relay.
-> * **`on-capsman` (`a2=1`) is live on the 5 GHz radio.** The `a2` variant is
->   per VAP; a station on the Xiaomi 5 GHz VAP is `authorized: yes` and pings
->   0% through the manager (F81). The 2.4 GHz radio is refused by the manager
->   (`a2=0`).
+> * **`on-capsman` (`a2=1`) is live on both radios.** The `a2` variant is
+>   per VAP; stations on the Xiaomi 5 GHz and 2.4 GHz VAPs are
+>   `authorized: yes` and ping 0% through the manager (F81/F88). The 2.4 VAP
+>   needs `datapath.traffic-processing=on-capsman` explicitly on the
+>   configuration, not only `datapath=dt-cm`.
 > * There is **no configuration tree** in CAPsMAN v2: the manager keeps the
 >   passphrase and is the authenticator, so it never sends the PSK to the CAP.
 >
@@ -132,7 +133,7 @@ The control plane is always the same. Only the data path changes.
 | Mode | Manager datapath | Client data | PSK on CAP | State |
 |---|---|---|---|---|
 | **Local forwarding** | `traffic-processing=on-cap` (default) | kernel bridge/VLAN on the AP | yes — static, or pulled at boot | **Working** (PSK local or boot-pull) |
-| **Split-MAC, plain** | `traffic-processing=on-capsman` | every client frame in the c2 datachan (`0x500b` `a2=1`), plaintext | no — manager authenticates | ✅ live on the Xiaomi 5 GHz with `DATACHAN`+`DATAPATH_BRIDGE`: station `authorized: yes`, ping 0%, `datachan plain` both ways (F81); 2.4 GHz returns `a2=0` |
+| **Split-MAC, plain** | `traffic-processing=on-capsman` | every client frame in the c2 datachan (`0x500b` `a2=1`), plaintext | no — manager authenticates | ✅ live on the Xiaomi 2.4 and 5 GHz with `DATACHAN`+`DATAPATH_BRIDGE`: station `authorized: yes`, ping 0%, `datachan plain` both ways (F81/F88); the 2.4 VAP needs the explicit `datapath.traffic-processing=on-capsman` |
 | **Split-MAC, secure** | `traffic-processing=on-capsman-secure` | same datachan (`a2=2`) with AES-256-CCM | no — manager authenticates | Codec/keepalive proven; `a2=2` live on the RB1100 (F72); radio-less CHR key gate open |
 
 Notes:

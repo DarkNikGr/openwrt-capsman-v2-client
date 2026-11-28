@@ -81,8 +81,9 @@ Image sha256 `c5f8813e4d2e0065f336c03556ea9d887dece7d7dc4c08451cb5acd5c3b5fc3d` 
 
 ## Still open
 
-* `on-capsman` on the 2.4 GHz radio: RouterOS refuses the 2.4-only band class
-  (`a2=0`); the 5 GHz radio is live (F84).
+* `on-capsman-secure` (`a2=2`) on the 2.4 GHz radio: not exercised. Plain
+  `a2=1` is live on both radios (the 2.4 VAP needs
+  `datapath.traffic-processing=on-capsman` explicitly, F88).
 * Real 6 GHz / MLO hardware: the 6 GHz AX datapath is proven on hwsim; see
-  `docs/HARDWARE-6GHZ-MLO-PLAN.md` for the hardware matrix.
+  `docs/HARDWARE-6GHZ-MLO-PLAN.md`.
 * Slave-VAP authentication in the plain single-identity topology (F58–F60).

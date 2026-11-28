@@ -81,7 +81,7 @@ The client implements both codecs (AES-CCM with a single active TX key and a
 replay watermark; the per-VAP key table is in place and the `a2` variant is
 kept per VAP). The secure variant is live on the reference RB1100 (F72); the
 plain `a2=1` variant is live on the Xiaomi 5 GHz radio with a station ping 0%
-(F81). The 2.4 GHz radio is refused by the manager (`a2=0`). Rekey slot
+(F81); the 2.4 GHz radio is also live when the configuration explicitly sets `datapath.traffic-processing=on-capsman` (F88). Rekey slot
 handling is proven on the wire but not merged into the client yet. The manager
 never downgrades a secure configuration to plain: it either creates the
 matching datachan or none.

@@ -39,7 +39,7 @@ Legend:
 | `0x201f` keys | manager → CAP | ✅ live | GTK/IGTK/BIGTK, PTK + `SET_STATION` authorize |
 | `0x200e` / `0x2015` / `0x6027` stats | both | ✅ live | signal, counters, poll |
 | `0x402b` datachan rekey | manager → CAP | 🟡 protocol only | never observed on the reference manager |
-| datachan c2 (`a2=1`, `a2=2`) | both | ✅ **live** | `a2=2` on the RB1100 (F72); `a2=1` on the Xiaomi 5 GHz with a station `authorized: yes` and ping 0% after the per-VAP variant fix (F81). The 2.4 GHz radio is refused by the manager (`a2=0`) because of its radio class |
+| datachan c2 (`a2=1`, `a2=2`) | both | ✅ **live** | `a2=2` on the RB1100 (F72); `a2=1` on the Xiaomi **2.4 and 5 GHz** with a station `authorized: yes` and ping 0% after the per-VAP variant fix (F81/F88). The 2.4 VAP needs `datapath.traffic-processing=on-capsman` explicitly on the configuration |
 
 ## `configuration` settings
 
@@ -89,7 +89,7 @@ Legend:
 |---|---|---|
 | `traffic-processing=on-cap` | ✅ **live, ping 0% loss** (master BSS, or a per-SSID CAP identity — F63/F74) | the supported mode: the manager is the authenticator, the CAP forwards. The agent creates `br-vlan<N>` on demand; the image ships the `br-vlan*` zone |
 | `vlan-id` | ✅ live | per-VAP `bridge=` to `br-vlan<N>` |
-| `traffic-processing=on-capsman` (`a2=1`) | ✅ **live on the Xiaomi 5 GHz** (F81) | manager sends `a2=1`; the CAP arms the plain datachan on UDP 5248 and a station gets `authorized: yes` + ping 3/3 0% through the manager (`datachan plain` frames both ways). The 2.4 GHz radio gets `a2=0` (the manager refuses on-capsman for the 2.4-only band class; max-vlans/hw-type spoofs did not change it, F84); `--datachan --datapath-bridge` is required |
+| `traffic-processing=on-capsman` (`a2=1`) | ✅ **live on the Xiaomi 2.4 and 5 GHz** (F81/F88) | manager sends `a2=1`; the CAP arms the plain datachan on UDP 5248 and a station gets `authorized: yes` + ping 3/3 0% through the manager (`datachan plain` frames both ways). The 2.4 VAP needs `datapath.traffic-processing=on-capsman` explicitly on the configuration (F88); `--datachan --datapath-bridge` is required |
 | `traffic-processing=on-capsman-secure` (`a2=2`) | ✅ **live on the RB1100** (F72) | manager sends `a2=2` + 32-byte key + cookie; CAP installs it, listens on UDP 5248, station `authorized: yes` + ping 0% with encrypted datachan frames. The radio-less CHR still never runs the manager key install |
 | multi-passphrase / PPSK | ➖ not available | RouterOS 7.25.1 exposes only a `multi-passphrase-group` boolean (no passphrase-group object), so there is nothing to provision; per-station keys are manager-side anyway |
 | `bridge`, `interface`, `interface-list` | ➖ not provisioned | the CAP derives the bridge from `vlan-id`; no such TLV is sent |
