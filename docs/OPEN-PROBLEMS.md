@@ -5,7 +5,7 @@ CAPsMAN v2 manager, the manager provisions every SSID/VLAN/security setting,
 clients connect with the manager's credentials, and **nothing on the CAP needs
 SSH, a local wireless file or a second service**.
 
-Current reality (v0.6.4): the control plane joins, the manager provisions 8/8
+Current reality (v0.6.5): the control plane joins, the manager provisions 8/8
 VAPs with no local `wifi-iface`, the CAP creates the netdevs and runs one
 hostapd per radio, and the manager is the RSN authenticator. The one-CAP/eight-
 radio **solo** mode is reliable after a cold reboot (8 SSIDs, all eight station
@@ -54,7 +54,9 @@ F79 > earlier 6 GHz attempts). Current status is summarised in
 | F48 | **WPA3/SAE works live.** With `configuration.security=wpa3-psk` the CAP writes `sae_pwe=2` + `group_mgmt_cipher=AES-128-CMAC` + `external_rsn_sae=1`; the relay carries the manager's larger M1 (`RX 0x201c eapol-tx port=0x0000 len=209`), the station answers (`0x201b`), and the manager installs the PTK (`0x201f NEW_KEY PAIRWISE`, `SET_STATION MFP`, authorize). Station: `authorized: yes`, `authenticated: yes`, -37 dBm. | live, `station-test.sh` with `KEY_MGMT=SAE MFP=2` |
 | F49b | **Two reasons the station stayed unauthorized, both fixed.** (a) `ctrl_interface=` was written only in the first section, so hostapd created a control socket for the master BSS only; `EXT_AUTH_AUTHORIZE` for a secondary could never be delivered. It is now repeated in every section (5 sockets for 5 BSSes). (b) extmux's abstract source address can be taken (`abstract bind extmux.<pid>.<n> failed: Address in use`), leaving `ctrl_fd < 0`; the authorize then waited for the 4-way deadline and deauthenticated. When there is no control socket the agent now authorizes through nl80211 immediately. Live: `extmux: no ctrl socket on phy1-ap1; authorized … through nl80211`, and `iw dev … station dump` shows `authorized: yes`. | live `f51.log`/`f52.log` |
 | F69 | **802.11k action relay: implemented in hostapd, live test blocked by the bench.** Patch `9999f` hooks `WLAN_FC_STYPE_ACTION` in `ieee802_11_mgmt` and relays a Radio Measurement (category 5) frame through `ext_auth_notify_assocreq` as 0x2018 (applies with `patch --fuzz=0`, wpad rebuilds and runs). The live check needs a category-5 action frame from an associated station. Both injection paths fail on this bench: (a) from the station's iwlwifi via `NL80211_CMD_FRAME` the call returns success but hostapd never logs `mgmt::action` (the frame is not delivered); (b) a CAP-side **monitor interface** (`iw phy phy0 interface add mon0 type monitor` with an associated station on the same BSS) sends the same frame and gets `nl80211 error: Not supported (-122)` — mt76x02 does not implement `mgmt_tx` on a monitor vif, with or without `NL80211_ATTR_DONT_WAIT_FOR_ACK`. A real beacon report was then attempted with a purpose-built `hostapd-utils`/`hostapd_cli` (the SDK package is normally commented out; it builds and installs fine, `hostapd_cli v2.12-devel`, PONG on `phy0-ap0`). `req_beacon` needs the measurement request as hex (operating class, channel, randomization, duration, mode, BSSID — not `dst dur`), and for every mode hostapd answers `FAIL` with `Beacon request: <sta> does not support passive/active/table beacon report`: the only station available here (Intel 3168 + distro wpa_supplicant) advertises **no RRM beacon-report capability** in its (Re)Assoc Request, so hostapd refuses to send the request by design. The manager also never sends an action frame (F67). **LIVE on a virtual station** (`docs/11K-HWSIM.md`): a hwsim station advertises `46 05 70 ...` (passive/active/table), patch `9999i` keeps the RM caps through the external-RSN early return, `hostapd_cli req_beacon` (duration 1) gets `Beacon report token 1 len 206`, and the CAP relays it as `0x2018 action len=235` to the manager. The bench Intel remains blocked. | live (virtual station) |
-| F80 | **OWE live: the Association Response lacks the AP's Diffie-Hellman Parameter.** With `sec-owe` (`authentication-types=owe`) the CAP writes `wpa_key_mgmt=OWE`, `ieee80211w=2`, `external_rsn_sae=1` and the manager's VAP is `MDB`. The OWE station associates and relays its AssocReq (`0x2018 assocreq len=190`), but reports `OWE: No Diffie-Hellman Parameter element found in Association Response frame`: hostapd's local AssocResp reaches the station before/without the manager's DH-bearing `0x6019`, so the OWE exchange cannot complete and the manager deauthenticates. Fix path: in `external_rsn_auth` mode defer/merge the AssocResp so the manager's DH Parameter IE is what goes on air. OWE remains lab-only. | live attempt, blocked by CAP AssocResp path |
+| F80 | **OWE is completed by the CAP's hostapd (RouterOS has no manager-side OWE DH).** With a pure-OWE VAP (`authentication-types=owe`) the CAP used to set `external_rsn_auth=1`, relay the station's AssocReq (`0x2018 assocreq len=190/191`) and wait for a DH-bearing `0x6019`; the manager never sent one (it answered with `0x2019 deauth`), and the station reported `OWE: No Diffie-Hellman Parameter element found in Association Response frame`. Captures also showed the manager deauthenticating the relayed association in the supported open+hidden-OWE transition layout. The CAP now leaves a **pure-OWE** VAP to its own hostapd (`wpa_key_mgmt=OWE`, `ieee80211w=2`, no `external_rsn_auth`, no `ext_auth_socket`; `CAPAGENT_LOCAL_OWE=0` restores the old relay). The manager still provisions SSID/security/channel/VLAN; the station completes OWE, the 4-way and pings 3/3 0% (`OWE: Diffie-Hellman Parameter element`, `CTRL-EVENT-CONNECTED`, `authorized: yes`). The manager's registration table does not list the local-OWE client. | live |
+| F81 | **`a2=1` is per VAP, and the 5 GHz radio accepts `on-capsman` while 2.4 GHz does not.** A `traffic-processing=on-capsman` datapath gives the Xiaomi 5 GHz radio `0x500b a2=1` (key + cookie + `0x7d`), but the 2.4 GHz radio gets `a2=0` (the manager refuses on-capsman for that radio class). The datachan variant used to live only in `dc_ctx`, so a later `a2=0` create for another VAP reset it and the 5 GHz frames were parsed as AES-CCM (`datachan auth failed`). The variant is now stored per VAP (`vap->dc_variant`) and used for RX/TX. With `--datachan --datapath-bridge`, a station on the 5 GHz `on-capsman` VAP is `authorized: yes` and pings 3/3 0% with `datachan plain` frames in both directions. | live |
+| F82 | **A live `0x6017` change keeps 8/8 when the CAP tears down first.** The manager sends `0x6017`, the CAP re-joins and pushes every `0x500b/0x6016` in one burst. Keeping the old VAPs/hostapds let that burst race the 5 GHz starts: after a passphrase change only 5/8 SSIDs came up and a manual `/etc/init.d/capagent restart` was needed. The CAP now destroys every local VAP and stops every per-radio hostapd before re-joining, so the burst rebuilds from a clean journal like a cold boot. Verified: change `sec-iot` passphrase → `0x6017: tearing down local VAPs before re-join` → `ssids=8`, and 2.4/5 GHz `cap-iot` stations ping 0% with the new key, no restart. | live |
 | F79 | **`channel.band=6ghz-ax` is blocked by RouterOS, not the CAP.** With a **no-EHT mac80211_hwsim build** (`has_eht=false`, `has_uhr=false`, HE-only iftypes verified by `iw phy`), a fresh identity and `cfg6` at 5955 MHz with the full 20/40/80 descriptors and the `0x84/9` beacon bit, the manager still labels the CAP's 6 GHz channels `5955/be` and answers `no available channels` for `6ghz-ax`; `6ghz-be` works (20/80 MHz, station `band=6ghz-ax`, ping 0%). The sweep covered band ids 0x05–0x1f plus HE-only. So the literal `6ghz-ax` configuration value is vendor-blocked; the 6 GHz AX data path itself is live via `6ghz-be`. | blocked by RouterOS |
 | F78 | **6 GHz works end to end on a virtual radio (mac80211_hwsim).** The host module is not shipped by Fedora; build it from the vanilla 7.2.14 source and load with `radios=2`, then `iw reg set GR` so 5955 has IR. The native capagent (x86_64) drives it with `--phys <hwsim>` and a hostapd built from the patched tree; the manager provisions `cfg6` (`ssid=cap-6g`, `channel.band=6ghz-be`, `frequency=5955`, `width=20mhz`, `security=wpa3-psk` + PMF). Two radio/provisioning findings: (a) 6 GHz rejects WPA2 (`hostapd: Invalid AKM suite for 6 GHz`), and 6ghz-ax gives `no available channels` while `6ghz-be` works; (b) the manager refuses a WiFi 7 CAP (`beacon protection must be enabled for wifi7 cap`) until NEWPHY `0x84` byte 1 bit 1 (bit 9) is set — the agent now sets it automatically when the phy has frequencies >= 5925. The VAP is `MDB` and hostapd is `AP-ENABLED` on channel 1 (5955 MHz), 20 MHz. A second hwsim radio's SAE station completes SAE + the 4-way (patch `9999h` queues the early M1 until the station is associated), is `authorized: yes`, and the manager registers it as `auth-type=wpa3-psk mfp=yes band=6ghz-ax vlan-id=20`; with the station in its own netns, ping is **3/3, 0% in both directions**; with `channel.width=20/40/80mhz` the AP runs at **80 MHz** (center 5985) and the station pings 0% as well. 160 MHz is advertised but untested; MLO is still open. Recipe: `docs/6GHZ-HWSIM.md`. | live (virtual radio, 20/80 MHz datapath) |
 | F77 | **Removing an identity from `/etc/cap/identities.conf` leaves its AP vif behind.** A service restart stops the procd instances but the last hostapd-owned vif of a removed tag (`phy0-iap0` in the SAE test) survived, still occupies one of the four per-phy slots, and the next identity's hostapd fails `start failed 1/5 … 5/5` (`Resource busy`). Same symptom if a test replaces an identity and does not delete the old vif. Manual cleanup: kill the hostapd whose cmdline names `/tmp/cap-phyN-<tag>.conf`, `iw dev phyN-<tag>apM del`, remove `/tmp/cap-phyN-<tag>.conf` and `/var/run/vap-phyN-<tag>.pid`, then restart (or let the instance respawn). A future `multi-cap.sh cleanup` should automate this; until then treat identities.conf edits as "remove the vif too". | live |
@@ -113,7 +115,7 @@ netns that survives the association. | live |
 | F23 | With `9999c` hostapd **attaches** to our secondaries (good), but then only the master reaches `AP-ENABLED` and the secondaries stay `type AP` with no SSID: hostapd's static `bss=` path expects to own those netdevs. The OpenWrt model (delete the secondaries, let hostapd create them) does bring all four SSIDs up (W61 measured 28 s stable, zero `-23`), but the journal then loops: a handover row has `ifindex=0`, so the reconcile recreates the netdev it just gave away. Next step is to refresh each row's ifindex **after** `AP-ENABLED` and never treat `ifindex=0` on a handed-over row as "needs a netdev". | live runs `final4`/`final6` |
 | F21 | The inline station harness used `iw phy phy0 set netns`, but the test host's station wiphy is **phy1** (`wlp39s0`), so `wpa_supplicant` never started and every earlier "station not connected / no 0x2018" result was a harness artefact. | `scripts/station-test.sh` (verified: phy1 moved, scan listed SSIDs, host restored) |
 
-## Open blockers at v0.6.4 (ranked)
+## Open blockers at v0.6.5 (ranked)
 
 1. **Slave-VAP authentication (F58–F60).** In the plain single-identity
    topology the manager still answers no `0x201c` for a station on a virtual
@@ -124,8 +126,11 @@ netns that survives the association. | live |
    implemented and `a2=2` is live on the reference RB1100, but a radio-less CHR
    manager never runs its own datachan key install. This is a lab gate, not a
    CAP framing issue.
-3. **OWE live.** The lab matrix is 14/14, but a live attempt makes the manager
-   deauthenticate the station. Treat OWE as lab/unproven, not green.
+3. **OWE live.** Solved CAP-side: a pure-OWE VAP is completed by the CAP's
+   hostapd because RouterOS 7.25.1 never sends a DH-bearing `0x6019`; the
+   station does OWE, the 4-way and pings 0% (F80). The manager's registration
+   table does not list that client. `on-capsman` (`a2=1`) is live on the 5 GHz
+   radio (F81); the 2.4 GHz radio is refused by the manager.
 4. **6 GHz hardware and `6ghz-ax`.** The virtual radio proves the 6 GHz SAE
    datapath at 20/80 MHz with `6ghz-be`; the literal `channel.band=6ghz-ax` is
    vendor-blocked (F79). The reference Xiaomi has no 6 GHz radio; real 6 GHz,
@@ -207,7 +212,7 @@ still open without checking the facts above.
 
 ---
 
-## Update 2026-11-28 — status at v0.6.4
+## Update 2026-11-28 — status at v0.6.5
 
 Resolved and merged into `main` since this log started:
 
@@ -230,9 +235,10 @@ Resolved and merged into `main` since this log started:
   first byte per fake radio (F74), four identities per phy live-proven.
 * **One CAP / eight radios (solo)** — one TLS session, eight fake radios, eight
   SSIDs, all eight station tests `authorized: yes`, 3/3, 0% after a cold
-  reboot (v0.6.4).
-* **Live security changes** — `0x6017` re-join + `own_cfg_hash`, no identity
-  restart (F76).
+  reboot (v0.6.5).
+* **Live security changes** — `0x6017` tears down the local VAPs/hostapds
+  first, then re-joins; 8/8 survives a passphrase change with no service
+  restart (F76/F82).
 * **Live DHCP option 138** — the image hook writes `/tmp/cap-manager`
   (`10.0.0.1`), so `MANAGER=auto` works without a baked address (F57).
 * **11k / 11v on the virtual bench** — Beacon Report `0x2018 action len=235`;
@@ -240,11 +246,12 @@ Resolved and merged into `main` since this log started:
 * **Zero-touch boot and factory reset** — flashed with `sysupgrade -n`, the
   image enrols itself and re-provisions 8/8 (F43/F46).
 
-Still open at v0.6.4 (details in the ranked list above):
+Still open at v0.6.5 (details in the ranked list above):
 
 * slave-VAP authentication in the plain single-identity topology (F58–F60);
 * secure datachan on a radio-less CHR (live on the RB1100, F72);
-* OWE live (manager deauthenticates; lab only);
+* `on-capsman` on the 2.4 GHz radio (the manager returns `a2=0`; the 5 GHz
+  radio is live, F81);
 * `6ghz-ax` (vendor-blocked; `6ghz-be` is the working value, F79);
 * MLO/EHT multi-link and 6 GHz 160/320 MHz;
 * soak/concurrency and hardware breadth;

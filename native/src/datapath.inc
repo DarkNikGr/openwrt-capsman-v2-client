@@ -32,6 +32,7 @@ struct vap {
     uint64_t tx_seq, rx_max, rx_bitmap;
     int rx_started;
     int mode;                   /* 0 = ACCESS, 1 = TAG */
+    int dc_variant;             /* 0x500b TLV 0xa2 for this VAP: 1 plain, 2 secure */
     int l2fd;                   /* AF_PACKET RX on the VAP */
     int extfd;                  /* hostapd external-RSN dgram */
     /* W46: per-VAP RSN policy.  mfp = the manager's RSN caps advertise

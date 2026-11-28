@@ -569,6 +569,20 @@ static int run_once(struct cfg *c)
             fflush(stdout);
             if (time(NULL) - last_cfg >= 5) {
                 last_cfg = time(NULL);
+                /* A live security change re-joins and the manager then pushes
+                 * every 0x500b/0x6016 in one burst.  Keeping the old VAPs and
+                 * hostapds lets that burst race the 5 GHz starts (some BSSes
+                 * stay down until a manual service restart).  Tear the local
+                 * objects down first so the re-join rebuilds from a clean
+                 * journal, exactly like a cold boot. */
+                printf("0x6017: tearing down local VAPs before re-join\n");
+                fflush(stdout);
+                for (int r = 0; r < MAX_RADIOS; r++)
+                    for (int w = 0; w < 16; w++)
+                        if (g_vap[r][w].used)
+                            vap_destroy((r << 8) | w, c);
+                for (int r = 0; r < MAX_RADIOS; r++)
+                    vap_phy_stop(r);
                 break;
             }
         } else if (type != TYPE_ECHO_RESP && type != TYPE_JOIN_RESP) {

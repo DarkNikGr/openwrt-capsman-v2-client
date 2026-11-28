@@ -99,7 +99,13 @@ start_instance() {
 	fi
 	# CAPAGENT_RUN_TAG names the hostapd config/pid/log files and the
 	# netdevs; it must be inherited by the hostapd child.
-	[ -n "$envtag" ] && procd_set_param env CAPAGENT_RUN_TAG="$envtag"
+	# Pure-OWE VAPs are completed by this hostapd by default (RouterOS
+	# 7.25.1 has no manager-side OWE DH); LOCAL_OWE=no forces the old
+	# relay path.
+	local envs=""
+	[ -n "$envtag" ] && envs="CAPAGENT_RUN_TAG=$envtag"
+	[ "${LOCAL_OWE:-}" = no ] && envs="$envs CAPAGENT_LOCAL_OWE=0"
+	[ -n "$envs" ] && procd_set_param env $envs
 	# Infinite respawn: 3600/5 with retry=0 means "no crash-loop limit".
 	procd_set_param respawn 3600 5 0
 	procd_set_param term_timeout 10

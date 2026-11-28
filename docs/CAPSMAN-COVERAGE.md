@@ -30,7 +30,7 @@ Legend:
 | `0x500b` create VAP | manager → CAP | ✅ live | MAC, VLAN (`0x7d`), datachan variant (`a2`) |
 | `0xd00b` create reply | CAP → manager | ✅ live | real ifindex |
 | `0x6016` start BSS | manager → CAP | ✅ live | SSID, RSN/WPA IE, channel; **never a passphrase** |
-| `0x6017` live security change | manager → CAP | ✅ live | re-join + `own_cfg_hash` rebuild; no identity restart (F76) |
+| `0x6017` live security change | manager → CAP | ✅ live | re-join + `own_cfg_hash` rebuild after a full local VAP/hostapd teardown, so the burst cannot leave 5 GHz BSSes down; verified 8/8 without a service restart (F82) |
 | `0x600c` destroy VAP | manager → CAP | ✅ live | stop hostapd, delete netdev, release vapid |
 | `0x2018` assoc/Auth report | CAP → manager | ✅ live | `0x3e` raw frame + `0x0a` channel + `0x3f` rssi; action frames on the virtual bench |
 | `0x201b` EAPOL from STA | CAP → manager | ✅ live | per-BSS ext-auth socket |
@@ -39,7 +39,7 @@ Legend:
 | `0x201f` keys | manager → CAP | ✅ live | GTK/IGTK/BIGTK, PTK + `SET_STATION` authorize |
 | `0x200e` / `0x2015` / `0x6027` stats | both | ✅ live | signal, counters, poll |
 | `0x402b` datachan rekey | manager → CAP | 🟡 protocol only | never observed on the reference manager |
-| datachan c2 (`a2=1`, `a2=2`) | both | ✅ `a2=2` live on the RB1100 (F72) · 🟡 `a2=1` lab | the radio-less CHR never runs the manager's own key install |
+| datachan c2 (`a2=1`, `a2=2`) | both | ✅ **live** | `a2=2` on the RB1100 (F72); `a2=1` on the Xiaomi 5 GHz with a station `authorized: yes` and ping 0% after the per-VAP variant fix (F81). The 2.4 GHz radio is refused by the manager (`a2=0`) because of its radio class |
 
 ## `configuration` settings
 
@@ -77,7 +77,7 @@ Legend:
 | `management-protection` change on a live VAP | ✅ **live** | `0x6017` re-join + `own_cfg_hash`, no identity restart (F76). A new security object still needs its passphrase at creation |
 | `group-key-update` | ➖ manager-owned | the CAP writes `wpa_group_rekey=0`; the manager owns rekeying, so there is no CAP-side knob |
 | `wpa3` / SAE (`authentication-types=wpa3-psk`) | ✅ **live, single-identity and multi-identity** | manager `auth-type=wpa3-psk mfp=yes`, CAP `wpa_key_mgmt=SAE ieee80211w=2 sae_pwe=2`, `0x201c` len=209 → `0x201b` → `0x201f`, station `authorized: yes`, ping 0% (F48/F76) |
-| `owe` | 🟡 **lab only** | the lab matrix is 14/14; live, the station associates but the **Association Response lacks the AP's Diffie-Hellman Parameter** (hostapd's local AssocResp wins over the manager's DH-bearing `0x6019`) and the manager deauthenticates. Fix path: defer/merge the AssocResp in `external_rsn_auth` mode (F80) |
+| `owe` | ✅ **live (CAP-local OWE)** | the manager still provisions the SSID/security/channel/VLAN, but RouterOS 7.25.1 never sends a DH-bearing `0x6019` and deauthenticates a relayed OWE assoc. A pure-OWE VAP is therefore completed by the CAP's hostapd (`wpa_key_mgmt=OWE`, `ieee80211w=2`, no `external_rsn_auth`); a station performs the OWE DH, the 4-way and pings 3/3 0% (F80). The manager's registration table does not show that client |
 | `wpa2-eap` / 802.1X / RADIUS | ✅ **live** | `sec-eap` (wpa2-eap, peap, ccmp) + FreeRADIUS 3.2.8 on 10.0.0.3 (`captest`); CAP writes `wpa_key_mgmt=WPA-EAP`, `ieee80211w=1`, `external_rsn_auth=1` (patch `9999a` allows AKM 1/5); station `authorized: yes`, RADIUS logs the user, ping 3/3 0% loss (F53). The earlier `invalid Message-Authenticator` failure was a duplicate/stale RADIUS entry, since fixed |
 | `wpa-psk-sha256` | ➖ not exercised | RouterOS 7.25.1 has no SHA256-only security value to select; the CAP parses AKM 6 but the path is not exercised |
 | `wps` | ➖ not exposed | CAPsMAN v2 does not provision WPS to the CAP |
@@ -89,7 +89,7 @@ Legend:
 |---|---|---|
 | `traffic-processing=on-cap` | ✅ **live, ping 0% loss** (master BSS, or a per-SSID CAP identity — F63/F74) | the supported mode: the manager is the authenticator, the CAP forwards. The agent creates `br-vlan<N>` on demand; the image ships the `br-vlan*` zone |
 | `vlan-id` | ✅ live | per-VAP `bridge=` to `br-vlan<N>` |
-| `traffic-processing=on-capsman` (`a2=1`) | 🟡 lab | plaintext datachan framing works; no live traffic test |
+| `traffic-processing=on-capsman` (`a2=1`) | ✅ **live on the Xiaomi 5 GHz** (F81) | manager sends `a2=1`; the CAP arms the plain datachan on UDP 5248 and a station gets `authorized: yes` + ping 3/3 0% through the manager (`datachan plain` frames both ways). The 2.4 GHz radio gets `a2=0` (the manager refuses on-capsman for that radio class); `--datachan --datapath-bridge` is required |
 | `traffic-processing=on-capsman-secure` (`a2=2`) | ✅ **live on the RB1100** (F72) | manager sends `a2=2` + 32-byte key + cookie; CAP installs it, listens on UDP 5248, station `authorized: yes` + ping 0% with encrypted datachan frames. The radio-less CHR still never runs the manager key install |
 | multi-passphrase / PPSK | ➖ not available | RouterOS 7.25.1 exposes only a `multi-passphrase-group` boolean (no passphrase-group object), so there is nothing to provision; per-station keys are manager-side anyway |
 | `bridge`, `interface`, `interface-list` | ➖ not provisioned | the CAP derives the bridge from `vlan-id`; no such TLV is sent |
@@ -132,5 +132,8 @@ scripts/station-test.sh <ssid> <psk> 192.168.30.50/24 25
 
 `0x2018` (Auth + AssocReq) → `0x201c` (M1) → `0x201b` (M2) → `0x201f` (keys) →
 `authorized: yes` → ping is the acceptance line for a PSK-family profile;
-SAE/OWE additionally require `external_rsn_sae=1` in the generated hostapd
+SAE additionally requires `external_rsn_sae=1` in the generated hostapd
 config (the agent writes it when the installed `wpad` advertises the option).
+A **pure-OWE** VAP is the exception: it is completed by the CAP's hostapd
+(F80), so the agent omits `external_rsn_auth`/`external_rsn_sae` and the
+`ext_auth_socket` for it (`CAPAGENT_LOCAL_OWE=0` restores the relay).

@@ -321,11 +321,30 @@ static void case_owe(void)
     assert(rp.wpa == 2);
     assert(strcmp(rp.key_mgmt, "OWE") == 0);
     assert(rp.ieee80211w == 1 && rp.group_mgmt_cmac);
-    assert(rp.sae_pwe == 0 && rp.external_auth && rp.want_rsnxe);
+    /* Pure OWE is completed by this hostapd by default (RouterOS 7.25.1
+     * has no manager-side OWE DH); the manager still provisions the VAP. */
+    assert(rp.sae_pwe == 0 && !rp.external_auth && rp.local_owe &&
+           rp.want_rsnxe);
     expect_line(conf, "wpa_key_mgmt=OWE");
     expect_line(conf, "ieee80211w=1");
     expect_line(conf, "group_mgmt_cipher=AES-128-CMAC");
     expect_absent(conf, "sae_pwe");
+    expect_absent(conf, "external_rsn_auth");
+}
+
+/* CAPAGENT_LOCAL_OWE=0 restores the old manager-relay decision. */
+static void case_owe_relay(void)
+{
+    struct rsn_info ri;
+    struct rsn_policy rp;
+    char conf[256];
+
+    setenv("CAPAGENT_LOCAL_OWE", "0", 1);
+    conf_of(ie_owe, sizeof(ie_owe), 1, &ri, &rp, conf, sizeof(conf));
+    unsetenv("CAPAGENT_LOCAL_OWE");
+    assert(strcmp(rp.key_mgmt, "OWE") == 0);
+    assert(rp.external_auth && !rp.local_owe);
+    expect_line(conf, "external_rsn_auth=1");
 }
 
 /* WPA-PSK-SHA256 is its own AKM keyword and must not become plain WPA-PSK. */
@@ -517,6 +536,7 @@ int main(void)
     case_psk_sae();
     case_sae_only();
     case_owe();
+    case_owe_relay();
     case_psk256();
     case_eap();
     case_ft();

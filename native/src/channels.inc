@@ -285,6 +285,28 @@ static void bss_seed(int r, int phy)
     closedir(d);
 }
 
+/* Is this exact address already assigned to an interface on the real phy?
+ * mac80211 accepts arbitrary locally administered addresses on these drivers
+ * (the manager's four 2.4 GHz fake-radio MACs all have byte0 0x02 and share
+ * one "index" yet coexist), so uniqueness is per address, not per index.
+ * The index ledger only decides where to remap a conflicting address. */
+static int bss_mac_taken(int phy, const uint8_t mac[6])
+{
+    DIR *d = opendir("/sys/class/net");
+    if (!d) return 0;
+    struct dirent *de;
+    int taken = 0;
+    while ((de = readdir(d)) != NULL) {
+        uint8_t m[6];
+        if (de->d_name[0] == '.') continue;
+        if (iface_phy_index(de->d_name) != real_phy(phy)) continue;
+        if (read_sysfs_mac(de->d_name, m) != 0) continue;
+        if (!memcmp(m, mac, 6)) { taken = 1; break; }
+    }
+    closedir(d);
+    return taken;
+}
+
 /* Pick an address for a new VAP.  want = the manager's 0x08. */
 static void vap_bssid_alloc(int phy, const uint8_t want[6], uint8_t out[6])
 {
@@ -301,14 +323,17 @@ static void vap_bssid_alloc(int phy, const uint8_t want[6], uint8_t out[6])
         nl = 8;
     }
     /* Keep the manager's address when it is a locally administered unicast
-     * address and its driver BSS index is free.  The driver keys the BSS
-     * index on byte 0 only; bytes 1..5 need not match the phy's published
-     * 2A:...:83-style plan (solo's fake radio MACs are 2A:...:90, and the
-     * manager validates the BSSID it assigned).  Index 0 is the radio base
-     * (not locally administered); it is never taken from the manager. */
+     * address that no other interface on the same real phy already uses.
+     * The driver keys its BSS slot on byte 0, but several exact addresses
+     * with the same slot coexist (the four 2.4 GHz fake radios all use byte0
+     * 0x02), so the ledger must not reject a slave whose manager BSSID shares
+     * its parent radio's byte0 (e.g. 2A:...:90 -> 2A:...:91).  The manager
+     * validates the BSSID it assigned, and remapping it breaks the 4-way.
+     * Index 0 is the radio base (not locally administered) and is never
+     * taken from the manager. */
     if (want[0] & 0x02) {
         int idx = bss_idx_of(base, want);
-        if (idx > 0 && !(g_bss_used[r] & (1u << idx))) {
+        if (idx > 0 && !bss_mac_taken(phy, want)) {
             g_bss_used[r] |= (uint8_t)(1u << idx);
             return;
         }

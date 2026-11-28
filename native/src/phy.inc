@@ -254,9 +254,9 @@ static void vap_phy_bss(FILE *f, const char *kw, const struct own_entry *e,
     rsn_conf_write(rsn, sizeof(rsn), &rp);
     fputs(rsn, f);
     if (rp.wpa) {
-        if (hostapd_has_opt("external_rsn_sae"))
+        if (hostapd_has_opt("external_rsn_sae") && !rp.local_owe)
             fprintf(f, "external_rsn_sae=1\n");
-        if (c->ext_auth_dir)
+        if (c->ext_auth_dir && !rp.local_owe)
             fprintf(f, "ext_auth_socket=%s/ext-auth-%s\n", c->ext_auth_dir,
                     e->ifname);
     }

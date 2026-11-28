@@ -1,6 +1,6 @@
 # MikroTik CAPsMAN v2 client for OpenWrt
 
-**v0.6.4** — see [`docs/RELEASE-0.6.4.md`](docs/RELEASE-0.6.4.md) and the
+**v0.6.5** — see [`docs/RELEASE-0.6.5.md`](docs/RELEASE-0.6.5.md) and the
 [release index](docs/RELEASES.md). Canonical documentation index:
 [`docs/README.md`](docs/README.md).
 
@@ -48,7 +48,7 @@ OpenWrt 24.10, MediaTek MT7603E + MT7612E), managed by an
 >   advertises all eight fake radios in one TLS session (`IDENTITY=OpenWrt-CAPSOLO`,
 >   `MACS=…`, `PHYS=0,0,0,0,1,1,1,1`), so the manager shows a single
 >   `cap=OpenWrt-CAPSOLO` with 8 radios. After a **cold reboot** all eight
->   station tests are `authorized: yes`, 3/3, 0% (v0.6.4). The eight-identity
+>   station tests are `authorized: yes`, 3/3, 0% (v0.6.5). The eight-identity
 >   fallback (`/etc/cap/identities.conf`, one CAP entry per SSID) still works.
 >   The plain single-identity default (`MACS=auto`) still broadcasts all eight
 >   SSIDs but only the master BSS per radio authenticates (F58–F60); use solo
@@ -57,9 +57,10 @@ OpenWrt 24.10, MediaTek MT7603E + MT7612E), managed by an
 >   `/etc/udhcpc.user.d/99-cap-dhcp138` hook decodes the option into
 >   `/tmp/cap-manager`; with `10.0.0.1` in that file the agent uses it. Baking
 >   the address into `/etc/cap/capagent.conf` is no longer required.
-> * **Live security changes work without an identity restart.** The manager
->   signals them with `0x6017`; capagent re-joins and `own_cfg_hash` rebuilds
->   hostapd when a repeated `0x6016` really changed. PMF-required is live.
+> * **Live security changes work without any restart.** The manager signals
+>   them with `0x6017`; capagent tears down the local VAPs/hostapds, re-joins
+>   and rebuilds cleanly, so all eight SSIDs survive a passphrase change
+>   (F82). PMF-required is live.
 > * **802.11k and 802.11v are live on the virtual bench.** 11k: `rrm-capa=0x70`,
 >   Beacon report token 1, relayed as `0x2018 action len=235` (F69/F71).
 >   802.11v/BTM: request `0x2019 action len=49`, response `0x2018 action
@@ -68,8 +69,14 @@ OpenWrt 24.10, MediaTek MT7603E + MT7612E), managed by an
 >   0%). The literal `channel.band=6ghz-ax` is vendor-blocked: a band-id sweep
 >   0x05–0x1f and a no-EHT/no-UHR hwsim build still give `5955/be` +
 >   `no available channels` (F79). `6ghz-ax` is therefore **not** claimed.
-> * **OWE is lab-only.** A live attempt makes the manager deauthenticate the
->   station; only the lab matrix is green, so it is not treated as a live path.
+> * **OWE is live.** RouterOS 7.25.1 never sends a DH-bearing `0x6019`, so a
+>   pure-OWE VAP is completed by the CAP's own hostapd while the manager still
+>   provisions SSID/security/channel/VLAN. A station does the OWE DH, the
+>   4-way and pings 0% (F80); `CAPAGENT_LOCAL_OWE=0` restores the relay.
+> * **`on-capsman` (`a2=1`) is live on the 5 GHz radio.** The `a2` variant is
+>   per VAP; a station on the Xiaomi 5 GHz VAP is `authorized: yes` and pings
+>   0% through the manager (F81). The 2.4 GHz radio is refused by the manager
+>   (`a2=0`).
 > * There is **no configuration tree** in CAPsMAN v2: the manager keeps the
 >   passphrase and is the authenticator, so it never sends the PSK to the CAP.
 >
@@ -124,7 +131,7 @@ The control plane is always the same. Only the data path changes.
 | Mode | Manager datapath | Client data | PSK on CAP | State |
 |---|---|---|---|---|
 | **Local forwarding** | `traffic-processing=on-cap` (default) | kernel bridge/VLAN on the AP | yes — static, or pulled at boot | **Working** (PSK local or boot-pull) |
-| **Split-MAC, plain** | `traffic-processing=on-capsman` | every client frame in the c2 datachan (`0x500b` `a2=1`), plaintext | no — manager authenticates | Lab: 26 plaintext frames; not a live traffic test |
+| **Split-MAC, plain** | `traffic-processing=on-capsman` | every client frame in the c2 datachan (`0x500b` `a2=1`), plaintext | no — manager authenticates | ✅ live on the Xiaomi 5 GHz with `DATACHAN`+`DATAPATH_BRIDGE`: station `authorized: yes`, ping 0%, `datachan plain` both ways (F81); 2.4 GHz returns `a2=0` |
 | **Split-MAC, secure** | `traffic-processing=on-capsman-secure` | same datachan (`a2=2`) with AES-256-CCM | no — manager authenticates | Codec/keepalive proven; `a2=2` live on the RB1100 (F72); radio-less CHR key gate open |
 
 Notes:
@@ -175,7 +182,7 @@ control plane; only the data path differs.
 
 ## Status
 
-Last updated 2026-11-28 against `main` (v0.6.4). "Live" means the reference Xiaomi
+Last updated 2026-11-28 against `main` (v0.6.5). "Live" means the reference Xiaomi
 Mi Router 4A + RB1100AHx4 / RouterOS 7.25.1; "lab" means CHR 7.25.1 + hwsim.
 
 | Capability | State |
@@ -195,7 +202,7 @@ Mi Router 4A + RB1100AHx4 / RouterOS 7.25.1; "lab" means CHR 7.25.1 + hwsim.
 | Group/PTK keys (`0x201f` → nl80211), GTK/IGTK/BIGTK class pairing | ✅ live + lab |
 | Datachan create (`0x500b` `a2=1`) | ✅ live |
 | Datachan keepalive (UDP 5248) | ✅ live |
-| Datachan plaintext (`a2=1`) frames | 🟡 26 plaintext frames observed; no live station traffic test |
+| Datachan plaintext (`a2=1`) frames | ✅ live on the Xiaomi 5 GHz (F81: `a2=1`, UDP 5248, station `authorized: yes` + ping 0%) |
 | Datachan secure (`a2=2`, AES-256-CCM) | ✅ live on the RB1100 (F72: `a2=2`, UDP 5248, station `authorized: yes` + ping 0%); the radio-less CHR lab still never runs the manager's own key install |
 | Datachan rekey (`0x402b`) | 🟡 protocol proven; slot install not merged |
 | Association + manager registration row (`0x2018`) | ✅ live |
@@ -203,7 +210,7 @@ Mi Router 4A + RB1100AHx4 / RouterOS 7.25.1; "lab" means CHR 7.25.1 + hwsim.
 | Raw Auth/AssocReq relay for 4-interface radios (no monitor VIF) | ✅ live with the patched `wpad` (`0x2018` Auth + AssocReq → M1) |
 | PSK-free WPA2-PSK | ✅ **live**: `authorized: yes`, PTK via `0x201f`, ping 3/3 |
 | PSK-free WPA2-EAP / open | ✅ WPA2-EAP **live** (F53: FreeRADIUS PEAP/MSCHAPv2, `authorized: yes`, ping 3/3 0%); open/lab matrix also 9/9 |
-| PSK-free SAE / OWE | ✅ SAE **live**; 🟡 OWE lab only (live attempt: manager deauthenticates) |
+| PSK-free SAE / OWE | ✅ SAE **live**; ✅ OWE **live** via CAP-local OWE (F80: OWE DH + 4-way + ping 0%; the manager still provisions the VAP) |
 | 802.11k beacon report relay | ✅ live on a virtual station (F69/F71: `rrm-capa=0x70`, token 1, `0x2018 action len=235`); Intel 3168 firmware still drops the RM IE |
 | 802.11v BTM request/response | ✅ live on the virtual bench (F67: `0x2019 action len=49`, `0x2018 action len=29`) |
 | Ownership: netifd wins, ubus→uci→file→refuse, MLD never adopted | ✅ live + 27-check selftest |
@@ -479,7 +486,7 @@ wifi-scripts package recipe, the patch-series check and the recorded hashes,
 see [`docs/BUILD.md`](docs/BUILD.md). The build is reproducible: two clean
 clones of the same commit produce the same binary.
 
-The version is printed by `capagent --version` (`0.6.4`) and stored in
+The version is printed by `capagent --version` (`0.6.5`) and stored in
 `VERSION`. Output: `dist/capagent-mipsel` / `dist/capagent-aarch64` (static,
 stripped). `dist/` is a local, gitignored build directory; published binaries
 live under

@@ -16,6 +16,7 @@
 #include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 /* Parsed element 48 (RSN IE).  `valid` means an RSN IE was found; the
@@ -97,6 +98,7 @@ struct rsn_policy {
     int group_mgmt_cmac; /* emit group_mgmt_cipher=AES-128-CMAC */
     int sae_pwe;         /* 0 = no line, 2 = sae_pwe=2 */
     int external_auth;   /* SAE/OWE present and the CAP owns 802.11 Auth */
+    int local_owe;       /* OWE handled by this hostapd (no manager relay) */
     int want_rsnxe;      /* relay element 244 (RSNXE) too */
 };
 
@@ -130,7 +132,17 @@ static void rsn_policy_from_ie(const struct rsn_info *ri, int sae_override,
     /* FT-EAP carries 802.1X inside the FT exchange, so the manager owns the
      * Auth there too.  FT-PSK keeps hostapd's open-system Auth (which we
      * mirror to the manager as 0x2018) exactly like plain PSK. */
-    p->external_auth = have_sae || have_eap || (have_ft && ri->akm_ft_eap);
+    /* CAPAGENT_LOCAL_OWE: a pure-OWE VAP can be completed by the CAP's own
+     * hostapd (it derives the OWE PMK from the station's DH element and runs
+     * the 4-way).  The manager then never sees the association, which is what
+     * RouterOS 7.25.1 needs: it has no manager-side OWE DH and would answer
+     * the relayed 0x2018 assocreq with a deauth. */
+    const char *lo = getenv("CAPAGENT_LOCAL_OWE");
+    int local_ok = !lo || (strcmp(lo, "0") && strcmp(lo, "no"));
+    p->local_owe = local_ok && ri->akm_owe && !ri->akm_sae &&
+                   !ri->akm_eap && !ri->akm_psk && !ri->akm_psk256;
+    p->external_auth = (have_sae && !p->local_owe) || have_eap ||
+                       (have_ft && ri->akm_ft_eap);
     p->want_rsnxe = have_sae;
     p->ft = have_ft;
     if (!have_psk && !have_sae && !have_eap && !have_ft) return;
@@ -191,14 +203,15 @@ static size_t rsn_conf_write(char *out, size_t n, const struct rsn_policy *p)
                      "ieee80211w=%d\n"
                      "%s"
                      "%s"
-                     "external_rsn_auth=1\n",
+                     "%s",
                      (p->ft && p->mdid[0]) ? p->key_mgmt :
                          (p->key_mgmt_base[0] ? p->key_mgmt_base
                                              : p->key_mgmt),
                      p->ieee80211w,
                      p->group_mgmt_cmac ?
                          "group_mgmt_cipher=AES-128-CMAC\n" : "",
-                     p->sae_pwe ? "sae_pwe=2\n" : "");
+                     p->sae_pwe ? "sae_pwe=2\n" : "",
+                     p->local_owe ? "" : "external_rsn_auth=1\n");
     }
     if (r < 0) return 0;
     if (p->wpa && p->ft && p->mdid[0]) {

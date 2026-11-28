@@ -201,8 +201,10 @@ The allocator keeps the manager's fake-radio BSSIDs (locally administered,
 free driver BSS index) instead of remapping them to the phy's `:83` plan —
 remapping made the manager reject the 5 GHz 4-way.
 
-Caveat for a **live security change** in solo mode: the manager sends
-`0x6017`, the CAP re-joins and the eight starts arrive in one burst; the 5 GHz
-start race can leave some BSSes down until the service is restarted
-(`/etc/init.d/capagent restart`). A cold boot is the verified path. The
-multi-identity topology does not have this caveat (15 s stagger per identity).
+A **live security change** in solo mode is handled without a restart: the
+manager sends `0x6017`, the CAP tears down every local VAP and stops the
+per-radio hostapds, then re-joins so the manager rebuilds the eight VAPs from a
+clean journal. Verified with a passphrase change: `0x6017: tearing down local
+VAPs before re-join` → `ssids=8`, and the 2.4/5 GHz stations ping 0% with the
+new key. The multi-identity topology gets the same teardown through its own
+capagent instance.

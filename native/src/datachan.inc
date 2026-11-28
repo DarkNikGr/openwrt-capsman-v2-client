@@ -387,9 +387,10 @@ static void dc_service(struct dc_ctx *d)
         /* (rid,wid) identify the VAP that owns the key.  Do not rewrite it
            from the first frame: every VAP shares the datachan. */
         struct vap *v = vap_get(rid, wid);
+        int variant = (v && v->dc_variant) ? v->dc_variant : d->variant;
         plen = (size_t)r - DC_PFX_LEN - DC_HDR_LEN;
         ct = buf + DC_PFX_LEN + DC_HDR_LEN;
-        if (d->variant == 1) {          /* 0xa2=1: bare Ethernet, no tag */
+        if (variant == 1) {             /* 0xa2=1: bare Ethernet, no tag */
             int ok = v ? dc_replay_ok(v, seq)
                        : dc_replay_window(&d->rx_max, &d->rx_bitmap,
                                           &d->rx_started, seq);
@@ -487,7 +488,8 @@ static int dc_send_frame_vap(struct dc_ctx *d, int rid, int wid,
     pkt[1] = 0x00;                  /* unfragmented, not keepalive */
     dc_hdr_write(cdh, (uint8_t)rid, (uint8_t)wid, 0, keyidx, ++v->tx_seq);
     memcpy(pkt + DC_PFX_LEN, cdh, sizeof(cdh));
-    if (d->variant == 1) {          /* 0xa2=1: no tag, no crypto */
+    int variant = (v->dc_variant) ? v->dc_variant : d->variant;
+    if (variant == 1) {             /* 0xa2=1: no tag, no crypto */
         memcpy(pkt + DC_PFX_LEN + DC_HDR_LEN, frame, flen);
         return sendto(d->fd, pkt, DC_PFX_LEN + DC_HDR_LEN + flen, 0,
                       (struct sockaddr *)&d->peer, d->peer_len) < 0 ? -1 : 0;
@@ -539,6 +541,12 @@ static void dc_handle_create(struct dc_ctx *d, const struct cfg *c,
         a2 = v[0];
         d->variant = a2;
         d->secure = (a2 != 1);
+        /* The a2 variant is per VAP: the manager sends one 0x500b for every
+         * VAP, and the on-cap VAPs carry a2=0.  Keeping only the last value
+         * in dc_ctx made a 5 GHz a2=1 datachan parse its frames as AES-CCM
+         * after a later a2=0 create. */
+        struct vap *av = vap_get(vrid, vwid);
+        if (av) av->dc_variant = a2;
         printf("0x500b datachan variant a2=%d (%s)\n", a2,
                a2 == 2 ? "AES-CCM" : a2 == 1 ? "plain" : "none");
     }
