@@ -90,7 +90,7 @@ Image sha256 `58ab0c2ecd2cf17257c670a91bebd5f158f0cf276a1b3c47e9fb28cc8cdd5dd9` 
 
 ## Still open
 
-* `on-capsman` on the 2.4 GHz radio (manager returns `a2=0`; 5 GHz is live).
+* `on-capsman` on the 2.4 GHz radio: the manager returns `a2=0` even when the CAP advertises `max-vlans=8` and a different hw-type, so the 2.4-only band class is a manager policy (F84); 5 GHz is live.
 * Slave-VAP authentication in the plain single-identity topology.
 * `6ghz-ax` as a configuration value (vendor-blocked; `6ghz-be` works).
 * Real 6 GHz/MLO hardware, soak/concurrency beyond the reference devices.
