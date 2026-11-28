@@ -1,6 +1,8 @@
 # MikroTik CAPsMAN v2 client for OpenWrt
 
-**v0.6.4** — see [`docs/RELEASE-0.6.4.md`](docs/RELEASE-0.6.4.md).
+**v0.6.4** — see [`docs/RELEASE-0.6.4.md`](docs/RELEASE-0.6.4.md) and the
+[release index](docs/RELEASES.md). Canonical documentation index:
+[`docs/README.md`](docs/README.md).
 
 Turn a non-MikroTik OpenWrt AP into a **CAP of the official RouterOS
 CAPsMAN v2 manager**. The CAP side is native C: no extra service on the
@@ -23,8 +25,8 @@ OpenWrt 24.10, MediaTek MT7603E + MT7612E), managed by an
 > | Proof | Evidence |
 > |---|---|
 > | Manager provisions every VAP | `0x500b` + `0x6016` for 8 VAPs, `0xd00b` accepted |
-> | **8/8 SSIDs** | `ssids=8`, 2 × `AP-ENABLED` radios with 4 `bss=` each |
-> | **All 8 SSIDs authenticate** | multi-identity: 4 identities per phy, each SSID a master (F74), `authorized: yes`, ping 0% on all eight |
+> | **8/8 SSIDs** | `ssids=8`; eight fake radios in solo mode, or 2 radios × 4 `bss=` in single-identity mode |
+> | **All 8 SSIDs authenticate** | solo: one `cap=OpenWrt-CAPSOLO` with 8 radios, or multi-identity: 4 identities per phy, each SSID a master (F74); `authorized: yes`, ping 0% on all eight, also after a cold reboot |
 > | **No PSK on the CAP** | `external_rsn_auth=1`, no `wpa_passphrase`/`wpa_psk_file` |
 > | **Manager is the authenticator** | EAPOL `0x201c` (M1) → `0x201b` (M2) → `0x201f` PTK |
 > | **Station authorized** | `authorized: yes`, `authenticated: yes`, -38 dBm |
@@ -36,28 +38,38 @@ OpenWrt 24.10, MediaTek MT7603E + MT7612E), managed by an
 > secondaries are handed to hostapd; hostapd relays the raw Auth/AssocReq and
 > the EAPOL exchange, and never holds a key.
 >
-> The patched `wpad` (patches `999`/`9997`/`9998`/`9999`/`9999a`–`9999g`) is
+> The patched `wpad` (patches `999`/`9997`/`9998`/`9999`/`9999a`–`9999j`) is
 > built by [`scripts/build-wpad-9999a.sh`](scripts/build-wpad-9999a.sh); the
 > zero-touch image by [`scripts/build-image.sh`](scripts/build-image.sh).
 >
 > ### What is still open (not blocking the above)
 >
-> * **A station on a virtual (slave) VAP never reaches the 4-way** on this
->   manager (F58–F60); only a master BSS authenticates. Multi-identity (one
->   CAP identity per SSID, `/etc/cap/identities.conf`) makes every SSID a
->   master and is proven 8/8 — see
->   [`docs/MULTI-IDENTITY.md`](docs/MULTI-IDENTITY.md). The single-identity
->   default still broadcasts all 8 SSIDs but only the masters authenticate.
-> * **`MANAGER=auto` does not discover this manager.** OpenWrt's `udhcpc` does
->   not export RouterOS DHCP option 138 to the agent, so the manager address is
->   baked into `/etc/cap/capagent.conf` at image build time
->   (`scripts/build-image.sh MANAGER=10.0.0.1`).
-> * **802.11k** is live on a virtual station (beacon report relayed as
->   `0x2018`); the bench Intel 3168 still drops the RM IE. **802.11v/BTM** has
->   no deterministic manager trigger (F71/F67).
-> * **6 GHz** was proven end to end on a virtual `mac80211_hwsim` radio
->   (SAE, 20/80 MHz, 0% ping) — the reference Xiaomi has no 6 GHz hardware and
->   the Deco BE65 stays read-only. See `docs/6GHZ-HWSIM.md`.
+> * **One CAP / eight radios ("solo") is the proven topology.** One capagent
+>   advertises all eight fake radios in one TLS session (`IDENTITY=OpenWrt-CAPSOLO`,
+>   `MACS=…`, `PHYS=0,0,0,0,1,1,1,1`), so the manager shows a single
+>   `cap=OpenWrt-CAPSOLO` with 8 radios. After a **cold reboot** all eight
+>   station tests are `authorized: yes`, 3/3, 0% (v0.6.4). The eight-identity
+>   fallback (`/etc/cap/identities.conf`, one CAP entry per SSID) still works.
+>   The plain single-identity default (`MACS=auto`) still broadcasts all eight
+>   SSIDs but only the master BSS per radio authenticates (F58–F60); use solo
+>   or multi-identity when every SSID must authenticate.
+> * **`MANAGER=auto` works through DHCP option 138.** The image's
+>   `/etc/udhcpc.user.d/99-cap-dhcp138` hook decodes the option into
+>   `/tmp/cap-manager`; with `10.0.0.1` in that file the agent uses it. Baking
+>   the address into `/etc/cap/capagent.conf` is no longer required.
+> * **Live security changes work without an identity restart.** The manager
+>   signals them with `0x6017`; capagent re-joins and `own_cfg_hash` rebuilds
+>   hostapd when a repeated `0x6016` really changed. PMF-required is live.
+> * **802.11k and 802.11v are live on the virtual bench.** 11k: `rrm-capa=0x70`,
+>   Beacon report token 1, relayed as `0x2018 action len=235` (F69/F71).
+>   802.11v/BTM: request `0x2019 action len=49`, response `0x2018 action
+>   len=29` (F67). The bench Intel 3168 still drops the RM IE.
+> * **6 GHz works on `mac80211_hwsim` with `6ghz-be`** (SAE, 20/80 MHz, ping
+>   0%). The literal `channel.band=6ghz-ax` is vendor-blocked: a band-id sweep
+>   0x05–0x1f and a no-EHT/no-UHR hwsim build still give `5955/be` +
+>   `no available channels` (F79). `6ghz-ax` is therefore **not** claimed.
+> * **OWE is lab-only.** A live attempt makes the manager deauthenticate the
+>   station; only the lab matrix is green, so it is not treated as a live path.
 > * There is **no configuration tree** in CAPsMAN v2: the manager keeps the
 >   passphrase and is the authenticator, so it never sends the PSK to the CAP.
 >
@@ -112,8 +124,8 @@ The control plane is always the same. Only the data path changes.
 | Mode | Manager datapath | Client data | PSK on CAP | State |
 |---|---|---|---|---|
 | **Local forwarding** | `traffic-processing=on-cap` (default) | kernel bridge/VLAN on the AP | yes — static, or pulled at boot | **Working** (PSK local or boot-pull) |
-| **Split-MAC, plain** | `traffic-processing=on-capsman` | every client frame in the c2 datachan (`0x500b` `a2=1`), plaintext | no — manager authenticates | Protocol proven; client variant branch open |
-| **Split-MAC, secure** | `traffic-processing=on-capsman-secure` | same datachan (`a2=2`) with AES-256-CCM | no — manager authenticates | Codec/keepalive proven; rekey protocol proven; manager key gate open |
+| **Split-MAC, plain** | `traffic-processing=on-capsman` | every client frame in the c2 datachan (`0x500b` `a2=1`), plaintext | no — manager authenticates | Lab: 26 plaintext frames; not a live traffic test |
+| **Split-MAC, secure** | `traffic-processing=on-capsman-secure` | same datachan (`a2=2`) with AES-256-CCM | no — manager authenticates | Codec/keepalive proven; `a2=2` live on the RB1100 (F72); radio-less CHR key gate open |
 
 Notes:
 
@@ -137,8 +149,9 @@ control plane; only the data path differs.
 1. **Join** — `0x4029` with identity/board/serial/MACs and NEWPHY
    capabilities. The manager replies `0xc029` (and may issue a certificate).
 2. **Data-channel capability** — NEWPHY `0x84` byte 0 bit 6 must be set.
-   For the secure variant, the join version vector `0xa7` must also advertise
-   the capability the manager whitelists (`01 00 07` works).
+   For the secure variant the join also advertises `0xa7 = 01 00 07`; a
+   37-value sweep showed `0xa7` alone does not make the manager select
+   `a2=2` (F70), and the reference RB1100 later selected it on its own (F72).
 3. **VAP create** — `0x500b` carries the MAC, VLAN (`0x7d`) and, when a
    datachan is configured, `a2`, the 32-byte key (`0xa8`), key index (`0xa9`),
    UDP port (`0xa6`) and keepalive cookie (`0xaa`). The CAP answers `0xd00b`
@@ -162,7 +175,7 @@ control plane; only the data path differs.
 
 ## Status
 
-Last updated 2026-11-26 against `main`. "Live" means the reference Xiaomi
+Last updated 2026-11-28 against `main` (v0.6.4). "Live" means the reference Xiaomi
 Mi Router 4A + RB1100AHx4 / RouterOS 7.25.1; "lab" means CHR 7.25.1 + hwsim.
 
 | Capability | State |
@@ -174,6 +187,7 @@ Mi Router 4A + RB1100AHx4 / RouterOS 7.25.1; "lab" means CHR 7.25.1 + hwsim.
 | VAP create (`0x500b` → `0xd00b`) with a real ifindex | ✅ live 8/8 |
 | VAP destroy (`0x600c`): hostapd stop, netdev delete, vapid release, orphan reaping | ✅ live 3 cycles × 8 VAPs, 0 failures |
 | Manager-only VAP creation (zero `wifi-iface`) | ✅ live 8/8 |
+| One CAP with eight radios (solo) | ✅ live after a cold reboot: one `cap=OpenWrt-CAPSOLO`, 8 radios, 8 SSIDs, all eight `authorized: yes`, 3/3, 0% |
 | One hostapd per radio with `bss=` (`external_rsn_auth=1`, **no PSK**) | ✅ live: 2 processes, `hostapd up with 4 BSS(es)` each |
 | RSN IE override (`external_rsn_ie`) — beacon == manager M3 | ✅ lab byte-for-byte; live station connects with no IE mismatch |
 | Per-BSS start on both radios (`SET_INTERFACE -EALREADY`, `noscan`, regulatory) | ✅ live 8/8 `AP-ENABLED`; `9999d` tolerates `-EALREADY` |
@@ -181,15 +195,17 @@ Mi Router 4A + RB1100AHx4 / RouterOS 7.25.1; "lab" means CHR 7.25.1 + hwsim.
 | Group/PTK keys (`0x201f` → nl80211), GTK/IGTK/BIGTK class pairing | ✅ live + lab |
 | Datachan create (`0x500b` `a2=1`) | ✅ live |
 | Datachan keepalive (UDP 5248) | ✅ live |
-| Datachan plaintext (`a2=1`) frames | ✅ live 26 frames |
-| Datachan secure (`a2=2`, AES-256-CCM) | 🟡 code + KAT; never live (manager-side key gate; not needed for the TLS EAPOL leg) |
+| Datachan plaintext (`a2=1`) frames | 🟡 26 plaintext frames observed; no live station traffic test |
+| Datachan secure (`a2=2`, AES-256-CCM) | ✅ live on the RB1100 (F72: `a2=2`, UDP 5248, station `authorized: yes` + ping 0%); the radio-less CHR lab still never runs the manager's own key install |
 | Datachan rekey (`0x402b`) | 🟡 protocol proven; slot install not merged |
 | Association + manager registration row (`0x2018`) | ✅ live |
 | EAPOL relay (`0x201b`/`0x201c`) + `0x201f` PTK install | ✅ live (M1→M2→M3); per-BSS extmux relay |
 | Raw Auth/AssocReq relay for 4-interface radios (no monitor VIF) | ✅ live with the patched `wpad` (`0x2018` Auth + AssocReq → M1) |
 | PSK-free WPA2-PSK | ✅ **live**: `authorized: yes`, PTK via `0x201f`, ping 3/3 |
-| PSK-free WPA2-EAP / open | ✅ lab: 9/9 cells each × 3 datapaths × 3 PMF |
-| PSK-free SAE / OWE | ✅ lab (SAE pass, OWE 14/14) with `9999a`-class patches |
+| PSK-free WPA2-EAP / open | ✅ WPA2-EAP **live** (F53: FreeRADIUS PEAP/MSCHAPv2, `authorized: yes`, ping 3/3 0%); open/lab matrix also 9/9 |
+| PSK-free SAE / OWE | ✅ SAE **live**; 🟡 OWE lab only (live attempt: manager deauthenticates) |
+| 802.11k beacon report relay | ✅ live on a virtual station (F69/F71: `rrm-capa=0x70`, token 1, `0x2018 action len=235`); Intel 3168 firmware still drops the RM IE |
+| 802.11v BTM request/response | ✅ live on the virtual bench (F67: `0x2019 action len=49`, `0x2018 action len=29`) |
 | Ownership: netifd wins, ubus→uci→file→refuse, MLD never adopted | ✅ live + 27-check selftest |
 | Recovery: new-session deauth, frame deadline, silence reconnect, fail-closed TLS | ✅ lab |
 | Status/traffic (`0x200e`/`0x2015`) | ✅ |
@@ -208,8 +224,10 @@ The manager chooses the variant from the **VAP datapath**, not from NEWPHY:
 * `on-capsman` → `a2=1`, plaintext Ethernet after the c2 header;
 * `on-capsman-secure` → `a2=2`, AES-256-CCM with a 16-byte tag.
 
-The secure variant additionally requires the join `0xa7` capability. If the CAP
-is not eligible, the manager creates no datachan at all instead of silently
+The secure variant also advertises the join `0xa7` capability. A capability
+sweep showed that `0xa7` alone is not the manager's selector (F70); the
+reference RB1100 later selected `a2=2` on its own (F72). If the CAP is not
+eligible, the manager creates no datachan at all instead of silently
 downgrading. The c2 key is random, generated by the manager, and carried in
 cleartext in `0x500b`; it is not derived from TLS or the CAP certificate.
 
@@ -217,23 +235,25 @@ cleartext in `0x500b`; it is not derived from TLS or the CAP certificate.
 
 The acceptance gates are closed: the manager provisions the BSSes, a station
 completes the 4-way with no key on the CAP, traffic flows, and a factory-reset
-image re-provisions itself. What is left is one protocol variant:
+image re-provisions itself. The one protocol variant that is still not
+reproducible in every environment is:
 
-* **The secure c2 datachan** is still gated on the manager side. In the
-  radio-less CHR lab the official manager never runs/succeeds its own datachan
-  key install (`Cap::sendEcho` → `CNl::addChanKey`): it sends no `0x402b` key
-  challenge and its c2 datachan cannot encrypt or decrypt. Consequently no
-  `0x201c`, no 4-way over the datachan and no `0x201f` PTK follow **on that
-  path**. The TLS EAPOL leg (`0x201b`/`0x201c`) does work on the real RB1100,
-  which is why the manager-driven 4-way is proven without the datachan.
+* **The secure c2 datachan.** The CAP half is implemented, and the reference
+  RB1100 has been observed selecting `a2=2` and carrying client traffic as
+  encrypted datachan frames (F72). In the radio-less CHR lab, however, the
+  official manager never runs/succeeds its own datachan key install
+  (`Cap::sendEcho` → `CNl::addChanKey`): it sends no `0x402b` key challenge and
+  its c2 datachan cannot encrypt or decrypt. Consequently no `0x201c`, no
+  4-way over the datachan and no `0x201f` PTK follow **on that path**. The TLS
+  EAPOL leg (`0x201b`/`0x201c`) works on both and is what production uses.
 
 What is still under investigation is the manager's local association/key path on
-a radio-less controller: whether the same limit applies to a radio-bearing
-manager, whether a controller-only RB needs a manager-side precondition, and
-whether a supported manager configuration (or a manager-side fix) makes the
-datachan key leg run. This is tracked as the single gate before the secure
-datachan can be called end-to-end on real hardware. It is not a CAP formatting
-problem; the CAP half is implemented and exercised against the stock manager.
+a radio-less controller: whether a controller-only RB needs a manager-side
+precondition, and whether a supported manager configuration (or a manager-side
+fix) makes the datachan key leg run there. This is tracked as the single lab
+gate before the secure datachan can be called end-to-end without a radio. It
+is not a CAP formatting problem; the CAP half is implemented and exercised
+against the stock manager.
 
 ### PSK and the boot-pull fallback
 
@@ -271,19 +291,25 @@ Closed by the current state (kept here so old reports are not misread):
   the policy is legacy, so a stale journal cannot start hostapd on a netifd BSS.
 * ~~Factory reset unproven~~ — the zero-touch image is flashed and re-provisions
   8/8 by itself.
+* ~~`service restart` came back 6/8 (F45)~~ — the journal rebuild/reconcile
+  fixes it; a restart now converges to 8/8, and boot/factory reset are always
+  8/8.
 
 Still open, in priority order:
 
-1. **`service restart` robustness (F45).** procd's stop path also stops the
-   hostapd children, which deletes the hostapd-owned secondary netdevs, so the
-   next start can come back with 6/8 until a reboot. Boot and factory reset are
-   always 8/8.
-2. **Secure datachan (`a2=2`).** Codec and KATs are done; the manager-side key
-   install never succeeds on a radio-less CHR and is unproven on a radio-bearing
-   manager. The TLS EAPOL leg used in production does not need it.
+1. **Slave VAPs in the single-identity topology (F58–F60).** Only the master
+   BSS per radio authenticates; use solo or multi-identity when every SSID must
+   authenticate.
+2. **Secure datachan (`a2=2`).** Codec and KATs are done, and the reference
+   RB1100 has now been observed sending `a2=2` with a working encrypted
+   datachan (F72). The manager-side key install still never succeeds on a
+   radio-less CHR, so the CHR lab remains unable to exercise it.
 3. **Soak / concurrency.** SAE, OWE and PMF across several VAPs at once, GTK
    rekey under load, and a hardware matrix beyond the two reference devices.
-4. **6 GHz / MLO.** ath12k per-link plumbing (Deco BE65) is not implemented; the
+   OWE has no live success yet (the manager deauthenticates it).
+4. **6 GHz / MLO.** The 6 GHz SAE datapath is proven on a virtual radio with
+   `6ghz-be` (20/80 MHz); the literal `6ghz-ax` band value is vendor-blocked
+   (F79), and ath12k per-link MLO plumbing (Deco BE65) is not implemented. The
    Deco is used read-only in this project.
 5. **Boot-time PSK pull** for local forwarding — validated prototype only; the
    supported path is `traffic-processing=on-cap` with the manager as
@@ -339,18 +365,18 @@ mac80211-hwsim setup; no production RB or Xiaomi configuration was changed.
 | 5 GHz BSS | MT76x02 BSS index, `noscan`, regulatory, `-EALREADY` tolerated | W54, `9999d` | ✅ live `AP-ENABLED` |
 | Group keys | `0x201f` GTK/IGTK → nl80211 | T3, T9, T14 | ✅ |
 | Datachan framing | `10`, control byte, cdh, payload; keepalive and sequence | T1, T8, S8 | ✅ |
-| Datachan plain/secure | `a2=1` plain, `a2=2` AES-CCM; `a7` gate | T11, S2, S8 | ✅ protocol |
+| Datachan plain/secure | `a2=1` plain, `a2=2` AES-CCM; `a7` advertised, not the selector | T11, S2, S8, F70/F72 | ✅ protocol |
 | Rekey | `0x402b` 41 B, slot 0/1, empty `0xc02b`, 1 s purge | T8 | 🟡 protocol proven |
 | Association | `0x2018` Auth + AssocReq creates Peer + row | T6, T13 | ✅ live |
 | EAPOL relay | `0x201b`/`0x201c`, per-BSS extmux relay | T3, T4, T14, W8 | ✅ live RB1100 |
 | Key install / authorize | PTK via `0x201f`, `SET_STATION AUTHORIZED` | T3, T14 | ✅ **live** (`authorized: yes`, ping) |
-| Hostapd patch | `external_rsn_auth` + `external_rsn_ie` | T10, T12, W21 | ✅ patch in `docs/patches/` |
+| Hostapd patch | `external_rsn_auth` + `external_rsn_ie` | T10, T12, W21 | ✅ patch series in `patches/` |
 | RSN IE equality | manager's 28-byte IE replayed byte-for-byte | W21, live station | ✅ live, no IE mismatch |
 | Zero-touch image | capagent + patched `wpad` + self-enrolment, verified by unsquashfs | F42/F43/F46 | ✅ **flashed**, 8/8 after factory reset |
 | Statistics | corrected `0x2015`, `0x200e`, `0x2013` | T7, T15 | ✅ sender |
 | PSK carriers | not serialized by CAPsMAN v2 | S5, S9 | — by design |
 | Boot-pull | REST pull of config/passphrase at boot | S9 | 🟡 prototype |
-| Secure datachan e2e | manager key install does not run on the radio-less CHR | T9, T10 | 🟡 open |
+| Secure datachan e2e | `a2=2` live on the RB1100 (F72); manager key install still absent on the radio-less CHR | T9, T10, F72 | ✅ live; CHR lab 🟡 |
 
 ## Install on the CAP
 
@@ -448,12 +474,12 @@ mbedTLS (`make package/libs/mbedtls/compile` in the SDK); if it does not, pass
 `MBEDTLS_INC=`/`MBEDTLS_LIB=` explicitly. `make -C native check` runs the
 AES-CCM known-answer tests under `qemu-mipsel`.
 
-For the exact SDK/toolchain paths used for the 0.4.0 build, the hostapd and
+For the exact SDK/toolchain paths used for the original 0.4.0 build, the hostapd and
 wifi-scripts package recipe, the patch-series check and the recorded hashes,
 see [`docs/BUILD.md`](docs/BUILD.md). The build is reproducible: two clean
 clones of the same commit produce the same binary.
 
-The version is printed by `capagent --version` (`0.4.0`) and stored in
+The version is printed by `capagent --version` (`0.6.4`) and stored in
 `VERSION`. Output: `dist/capagent-mipsel` / `dist/capagent-aarch64` (static,
 stripped). `dist/` is a local, gitignored build directory; published binaries
 live under
@@ -583,13 +609,19 @@ the stale-ifindex self-test (`--selftest-pmap`, `scripts/test-pmap-refresh.sh`).
 ```
 cap-client/
 ├── docs/
-│   ├── CAPSMAN-COVERAGE.md  # which manager settings are proven and which are not
-│   ├── MANAGER-ONLY.md       # what is proven, what is open, reproduce zero-config
+│   ├── README.md             # index of canonical docs
+│   ├── RELEASES.md           # release-note index
+│   ├── CAPSMAN-COVERAGE.md   # which manager settings are proven and which are not
+│   ├── MANAGER-ONLY.md       # zero-local-config reproduction
+│   ├── MULTI-IDENTITY.md     # one identity per SSID, and the one-CAP solo mode
+│   ├── 6GHZ-HWSIM.md         # 6 GHz on a virtual radio (6ghz-be; 6ghz-ax blocked)
+│   ├── 11K-HWSIM.md          # 11k/11v on a virtual station
 │   ├── OPEN-PROBLEMS.md      # tracked blockers + verified facts
 │   ├── ARCHITECTURE.md       # datapath modes and split-MAC chain
 │   ├── FINDINGS.md           # control protocol / TLV reference
 │   ├── REGRESSION-GATE.md    # acceptance modes, pass rules, baselines
-│   ├── W27-INTEGRATION.md    # W8/W6/W14 integration notes
+│   ├── RELEASE-*.md          # per-release notes (history)
+│   ├── history/              # superseded work reports (not current)
 │   └── patches/              # hostapd 9997-external-rsn-ie.patch
 ├── native/
 │   ├── capagent.c            # entry unit (constants + module includes)
@@ -597,6 +629,7 @@ cap-client/
 │   ├── Makefile
 │   ├── enroll.py             # certificate enrollment helper
 │   └── deploy/               # OpenWrt init script, preflight, example conf, tools
+├── patches/                  # full hostapd patch series (999 ... 9999j)
 ├── scripts/
 │   ├── build-mipsel.sh
 │   ├── build-aarch64.sh

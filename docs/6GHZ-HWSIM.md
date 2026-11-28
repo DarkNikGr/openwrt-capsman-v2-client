@@ -83,7 +83,8 @@ picks the host Wi-Fi card (phy11 here).
 Two manager details matter:
 
 * **6 GHz requires WPA3.** With `wpa2-psk` the CAP's hostapd refuses to start
-  (`Invalid AKM suite for 6 GHz`). Use `wpa3-psk`/SAE (or OWE).
+  (`Invalid AKM suite for 6 GHz`). Use `wpa3-psk`/SAE; OWE is lab-only and a
+  live attempt is deauthenticated by the manager.
 * **Band name.** The manager labels a 6 GHz-capable CAP's channels `be`
   (`cap print`/`radio print` show `5955/be`), and `6ghz-ax` gets
   `no available channels`; `6ghz-be` is the working configuration value even
@@ -182,5 +183,9 @@ EXT-AUTH: station 02:00:00:00:01:00 authorized by external authenticator
   or 6 GHz power-mode behaviour.
 * The `0x84` bit 9 and the `6ghz-be` band name are reverse-engineered from this
   manager version (7.25.1); a different RouterOS may use other values.
-* Only 20 MHz was used. The CAP writes a 20 MHz 6 GHz BSS; wider channels need
-  the HE centre-index fields (not implemented yet).
+* The datapath was verified at 20 MHz and 80 MHz (center 5985). 160 MHz is
+  advertised but not exercised, and 320 MHz is not generated. MLO is not
+  implemented.
+* The literal `channel.band=6ghz-ax` is **not** a working configuration value
+  on this RouterOS/hwsim combination (F79); do not read the station's
+  `band=6ghz-ax` registration back as proof that `6ghz-ax` provisioning works.

@@ -103,7 +103,7 @@ configured without PMF) needs no such hook. The relay itself is independent of
 MFP.
 
 
-## 802.11v BTM (v0.6.3)
+## 802.11v BTM (added in v0.6.3)
 
 The manager's steering group alone does not trigger anything while the
 simulated station sits at -27 dBm. The agent has a lab hook that overrides the

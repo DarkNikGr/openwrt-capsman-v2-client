@@ -75,20 +75,22 @@ L2 forwarder and the only RSN authenticator. Two wire variants exist:
 | Manager datapath | `0x500b a2` | Payload | Notes |
 |---|---|---|---|
 | `on-capsman` | `1` | plaintext Ethernet | less crypto, traffic visible on the tunnel |
-| `on-capsman-secure` | `2` | AES-256-CCM + 16-byte tag | requires join `0xa7` capability |
+| `on-capsman-secure` | `2` | AES-256-CCM + 16-byte tag | advertises join `0xa7 = 01 00 07`; `a7` alone is not the manager's selector (F70), and the RB1100 selected `a2=2` later (F72) |
 
-The client currently implements the **secure** codec (AES-CCM with a single
-active TX key and replay watermark; the per-VAP key table is in place but
-multi-VAP TX selection is still open). Rekey slot handling is proven on the
-wire but not merged into the client yet. The plain variant is documented and
-needs a mode branch before it can be selected. The manager never downgrades a
-secure configuration to plain: it either creates the matching datachan or
-none.
+The client implements both codecs (AES-CCM with a single active TX key and a
+replay watermark; the per-VAP key table is in place but multi-VAP TX selection
+is still open). The secure variant is live on the reference RB1100 (F72); the
+plain `a2=1` variant has been exercised in the lab (26 frames) but not as a
+live traffic test. Rekey slot handling is proven on the wire but not merged
+into the client yet. The manager never downgrades a secure configuration to
+plain: it either creates the matching datachan or none.
 
 ## Split-MAC chain, step by step
 
 1. **Admission.** CAP joins with `0x4029`; NEWPHY advertises `0x84` bit 6
-   (datachan support). Secure mode additionally needs `0xa7 = 01 00 07`.
+   (datachan support). Secure mode also advertises `0xa7 = 01 00 07`; a
+   capability sweep showed that byte alone does not make the manager choose
+   `a2=2` (F70), but the reference manager later did (F72).
 2. **VAP + datachan.** Manager sends `0x500b` with the MAC, VLAN, `a2`, key,
    key index, UDP port and keepalive cookie. CAP replies `0xd00b` with the
    channel set and a unique vapid, and brings up the datachan.
@@ -128,22 +130,28 @@ STA            hostapd            capagent                 manager
 
 ## Where the current gate is
 
-The CAP half is implemented and exercised. The open item is on the manager:
+The CAP half is implemented and exercised. The one remaining gate is a lab
+topology, not the production path:
 
+* On the reference RB1100 the manager has been observed selecting `a2=2` and
+  carrying client traffic as encrypted datachan frames (F72), so the secure
+  datachan is live there.
 * In a radio-less CHR lab, the manager appends `a8/a9` to `0x500b` but never
   runs/succeeds its own `CNl::addChanKey` install (via `Cap::sendEcho`).
 * It therefore sends no `0x402b` key challenge, cannot decrypt/encrypt the c2
-  datachan, and never reaches `0x201c` → 4-way → `0x201f` PTK.
+  datachan, and never reaches `0x201c` → 4-way → `0x201f` PTK **on that path**.
 * Association is *not* the gate anymore: `0x2018` Auth + AssocReq already
-  produces a `Peer` and a registration-table row on the stock manager.
-* Whether a radio-bearing manager behaves differently, whether a
-  controller-only RB needs a manager-side precondition, or whether a supported
-  manager configuration/fix makes the key leg run is **under investigation**.
-  The CAP cannot synthesize the manager's local key install.
+  produces a `Peer` and a registration-table row on the stock manager. The TLS
+  EAPOL leg (`0x201b`/`0x201c`) is what production uses and it needs no
+  datachan.
+* Whether a controller-only RB needs a manager-side precondition, or whether a
+  supported manager configuration/fix makes the key leg run there, is the
+  open lab question. The CAP cannot synthesize the manager's local key
+  install.
 
-This is why the docs describe the secure datachan as "implemented and proven
-at the codec/control level, pending manager-side key installation", not as a
-finished end-to-end product.
+This is why the docs describe the secure datachan as "live on the reference
+manager, with the radio-less CHR key-install path still open", not as a
+finished end-to-end product on every manager topology.
 
 ## Boot-pull fallback
 
@@ -186,9 +194,10 @@ Current tree status:
   `0x201c`/`0x201b` EAPOL relay, `0x201f` key install, and the corrected
   `0x200e`/`0x2015` sender. Rekey is decoded/logged and acked; the slot-install
   path from T8 is still to be merged.
-* `0x2018` association reporting exists in the `-DCAPAGENT_LAB` harness; the
-  production hostapd/nl80211 wiring is still to be merged.
-* The hostapd `external_rsn_auth` patch is a separate prototype; it is not in
-  this tree yet.
+* `0x2018` association reporting is live in production through the patched
+  `wpad` (`external_rsn_auth` / `EXT_AUTH_MGMT_TX`), not only in the
+  `-DCAPAGENT_LAB` harness.
+* The hostapd `external_rsn_auth` patch ships in [`../patches/`](../patches/)
+  and is part of the zero-touch image; it is no longer a separate prototype.
 * `--apply` consumes only an optional `0xc029` `0x77` tree; stock 7.25.1 does
   not send one.

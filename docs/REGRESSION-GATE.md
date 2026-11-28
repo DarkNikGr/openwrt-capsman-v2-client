@@ -120,4 +120,6 @@ The expected post-run count is 8.
 ## Baseline
 
 `baseline/legacy.json` and `baseline/manager-only.json` are recorded runs
-against the live RB1100 + Xiaomi; `baseline/REPORT.md` explains the result.
+against the live RB1100 + Xiaomi; [`../baseline/README.md`](../baseline/README.md)
+explains the result. They are point-in-time snapshots (and one old run still
+shows FAIL), not the current v0.6.4 status.

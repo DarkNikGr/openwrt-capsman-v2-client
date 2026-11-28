@@ -2,7 +2,9 @@
 
 Everything here was run on the reference build host (Fedora, x86_64) on
 2026-11-10 against `main` @ `0e8960e`.  Absolute paths are the ones that were
-actually used; substitute your own if they differ.
+actually used; substitute your own if they differ.  The recipe and pinned
+inputs are unchanged for the current release (v0.6.4); the later `9999c`–`9999j`
+patches are listed in [`../patches/README.md`](../patches/README.md).
 
 The tree builds **three artefacts**:
 
@@ -144,10 +146,13 @@ lexicographic order:
 | `9999a-external-rsn-sae.patch` | 16 | W46: `external_rsn_sae=1`, `EXT_AUTH_MGMT_TX`, and the `EXT_AUTH_TX` trailing-CR/LF trim | 0 | 0 |
 | `9999b-external-rsn-tx-retval.patch` | 2 | W53: a positive `hostapd_wpa_auth_send_eapol()` return is success (nl80211 byte count) | 0 | 0 |
 
-Total: 59 hunks, **0 fuzz**.  `scripts/patches-check.sh` reproduces this table
-from the tarball (see §6).  The capture in §6 is the W47 four-patch series;
-W46 added `9999a-…` (SAE, mgmt TX, TX newline trim) and W53 added `9999b-…`
-(TX return-value test), both with 0 offset / 0 fuzz.
+Total: 59 hunks, **0 fuzz** for the original four/six-patch capture.  The
+current series also includes `9999c` (attach to an existing BSS), `9999d`
+(tolerate `-EALREADY`), `9999e` (external-RSN null `wpa_sm`), `9999f`/`9999j`
+(action-frame relay), `9999g`/`9999i` (RRM IE handling) and `9999h` (queue an
+early M1).  `scripts/patches-check.sh` reproduces the current table and is the
+authority for hunk/fuzz counts; see [`../patches/README.md`](../patches/README.md)
+for the per-patch description.
 
 The first patch is `999-…`, **not** `0999-…`: OpenWrt applies the whole
 `package/network/services/hostapd/patches/` directory in one `$(sort)` pass

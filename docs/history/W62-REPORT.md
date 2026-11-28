@@ -11,7 +11,7 @@
 7. Lab-only cause: hostapd logged `ctrl_iface not configured!`, so EXT_AUTH_TX had no control socket; capagent's one-shot fallback injected M1 with `nl_control_port_tx` (`ret=0`) and still got no M2.
 8. This is the W53 `EXT_AUTH_TX` contract, not the 0x2018 relay: the relay itself (Auth/AssocReq → 0x2018) worked on every assoc retry.
 9. Live was **not** run. No lock was taken, `/etc/config/wireless` was not written, nothing was rebooted, and `/usr/sbin/wpad` was not touched by W62.
-10. Evidence: `docs/w62-evidence/lab-capagent.log`, `lab-station.log`, `lab-messages.log`.
+10. Evidence: `w62-evidence/lab-capagent.log`, `lab-station.log`, `lab-messages.log`.
 11. Uncommitted W62 code: `mgmt.inc` (PSK synthetic open Auth before AssocReq), `util.inc` (`CAPAGENT_IW` override), `vap.inc` (honour `CAPAGENT_HOSTAPD` in `hostapd_has_opt`, scan the log tail for AP-ENABLED).
 12. `phy.inc` changes in the worktree are W61's; W62 did not edit that file.
 13. Remaining lab gap is the hostapd control-socket bind; live should exercise the already-deployed `wpad` `EXT_AUTH_TX` path instead.
@@ -53,7 +53,7 @@ capagent --manager 127.0.0.1 --port 25246 --phys 2 \
 
 ### Evidence: hostapd relay → capagent → 0x2018
 
-`docs/w62-evidence/lab-capagent.log`:
+`w62-evidence/lab-capagent.log`:
 
 ```text
 EXTMUX: extmux: ASSOCREQ port=0x0000 len=154
@@ -83,7 +83,7 @@ allocates the Peer; an AssocReq for an unknown MAC is dropped.
 
 ### Station / 4-way
 
-`docs/w62-evidence/lab-station.log`:
+`w62-evidence/lab-station.log`:
 
 ```text
 wlan1: SME: Authentication response: peer=e2:d6:88:5e:6b:21 auth_type=0 auth_transaction=2 status_code=0

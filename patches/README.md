@@ -17,6 +17,11 @@ Apply order is lexicographic, after the stock OpenWrt patches:
 | `9999c-hostapd-use-existing-bss.patch` | W63: pass `use_existing` for every AP BSS, so a BSS netdev created by the CAP is attached instead of deleted and re-created (that moved the ifindex under the CAP and caused the restart loop) | yes |
 | `9999d-hostapd-set-mode-ealready.patch` | W64: `SET_INTERFACE` returning `-EALREADY` ("Match already configured") is success — a CAP that brings the BSS up as AP before hostapd starts made the whole radio fail to initialise | yes |
 | `9999e-external-rsn-null-wpa-sm.patch` | W65: `wpa_auth_sm_event(sta->wpa_sm, WPA_AUTH)` crashes when the RSN authenticator is external (no local `wpa_sm`); it SIGSEGV'd hostapd right after `authentication OK`, so no AssocResp was ever sent | yes |
+| `9999f-external-rsn-action.patch` | relay a station's Radio Measurement (category 5) action frame through `ext_auth_notify_assocreq` as `0x2018`, so a Beacon Report reaches the manager | for 11k |
+| `9999g-hostapd-rrm-ie-without-capab.patch` | accept the station's explicit RM Enabled Capabilities IE even when wpa_supplicant does not set the Radio Measurement capability bit | for 11k |
+| `9999h-external-rsn-queue-early-eapol.patch` | queue the newest EAPOL frame per station and flush it from `ext_auth_notify_assoc()`, because on 6 GHz the manager can send M1 before hostapd has associated the station | for 6 GHz/SAE |
+| `9999i-hostapd-short-rrm-ie.patch` | keep a short RRM Enabled Capabilities IE and preserve it through the external-RSN early return in `__check_assoc_ies`, so `req_beacon` sees the station's beacon-report bits | for 11k |
+| `9999j-external-rsn-wnm-action.patch` | relay the station's WNM (category 10) action frame, e.g. the BTM Response, as `0x2018` | for 802.11v |
 
 ## Build
 
@@ -41,9 +46,9 @@ Verify the series before building:
 
 It replays the 61 stock OpenWrt patches **merged with** this series, sorted by
 basename in C order — the same single pass OpenWrt performs — and exits
-non-zero on any rejected hunk or fuzz.  Current result: 6 patches, 59 hunks,
-0 fuzz (`999` 0, `9997` 0, `9998` +4, `9999` +1..+17, `9999a` 0,
-`9999b` 0).
+non-zero on any rejected hunk or fuzz.  The series is now 11 patches (the
+original four-patch capture was 6 patches, 59 hunks, 0 fuzz); run the script
+for the current hunk/fuzz count.
 
 `999-` (not `0999-`) is deliberate: the name must sort after the last stock
 patch, `804-…`.  A `0999-` name sorts before `110-…` and the package build

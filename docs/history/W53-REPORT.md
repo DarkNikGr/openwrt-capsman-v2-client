@@ -180,5 +180,5 @@ To finish the acceptance, with an undisturbed CAP (one bounded run):
 | `patches/9999b-external-rsn-tx-retval.patch` | TX return-value success test |
 | `native/tests/test_extmux.c` | host regression gate (3 cases) |
 | `native/Makefile` | `extmux-test` target |
-| `docs/W53-EXT-AUTH-TX.md` | contract, root cause, fix |
+| `docs/history/W53-EXT-AUTH-TX.md` | contract, root cause, fix |
 | `patches/README.md`, `docs/BUILD.md`, `docs/OPEN-PROBLEMS.md` | series table, counts, F13 |

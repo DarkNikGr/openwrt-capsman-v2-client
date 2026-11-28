@@ -1,6 +1,6 @@
 > **Status:** historical track record — the behaviour it describes is
-> merged into `main`. Canonical docs: [MANAGER-ONLY](MANAGER-ONLY.md),
-> [ARCHITECTURE](ARCHITECTURE.md), [OPEN-PROBLEMS](OPEN-PROBLEMS.md).
+> merged into `main`. Canonical docs: [MANAGER-ONLY](../MANAGER-ONLY.md),
+> [ARCHITECTURE](../ARCHITECTURE.md), [OPEN-PROBLEMS](../OPEN-PROBLEMS.md).
 
 # W50 — integration record
 

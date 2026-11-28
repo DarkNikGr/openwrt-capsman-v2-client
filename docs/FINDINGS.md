@@ -236,11 +236,14 @@ NEWPHY:
 | `on-capsman` | `01` | bare Ethernet frame (plaintext) |
 | `on-capsman-secure` | `02` | AES-256-CCM ciphertext + 16-byte tag |
 
-Secure mode is additionally gated by the join version vector `0xa7`. The
-manager copies the first matching capability into `cap+0x450/+0x454`; the
-whitelist is `{0x01, 0x00}`, so `0xa7 = 01 00 07` advertises support. If secure
-is configured but the CAP is not eligible, the manager creates **no datachan**
-rather than downgrading to plain.
+Secure mode was originally believed to be gated by the join version vector
+`0xa7`. The manager copies the first matching capability into
+`cap+0x450/+0x454`; the whitelist is `{0x01, 0x00}`, so `0xa7 = 01 00 07`
+advertises support. A 37-value sweep showed that `0xa7` alone does **not**
+make the manager select `a2=2` (F70), and the reference RB1100 later selected
+`a2=2` on its own (F72). So treat `0xa7` as an advertised capability, not the
+switch. If secure is configured but the CAP is not eligible, the manager
+creates **no datachan** rather than downgrading to plain.
 
 ### Create fields
 
@@ -311,14 +314,16 @@ replay watermark. The cookie and UDP port are untouched by a rekey.
 
 ### Manager-side association/key gate
 
-The association half now works on the stock manager: `0x2018` Auth + AssocReq
-creates the `Peer` and the registration-table row. The key half is still open
-on a radio-less manager. On a radio-less CHR, the manager appends `a8/a9` to
-`0x500b` but never runs its own `Cap::sendEcho` → `CNl::addChanKey` install,
-never sends a `0x402b` challenge, and cannot decrypt/encrypt the datachan.
-Keepalives still work, so the datachan looks "up" while the traffic key is
-absent. This is the remaining hard gate; see the architecture notes. It is a
-manager-side precondition, not a CAP framing issue.
+The association half works on the stock manager: `0x2018` Auth + AssocReq
+creates the `Peer` and the registration-table row. The key half is live on the
+reference RB1100: the manager selected `a2=2` and the encrypted datachan carried
+traffic end to end (F72). The one place it still does not run is a **radio-less
+CHR** manager, which appends `a8/a9` to `0x500b` but never runs its own
+`Cap::sendEcho` → `CNl::addChanKey` install, never sends a `0x402b` challenge,
+and cannot decrypt/encrypt the datachan. Keepalives still work there, so the
+datachan looks "up" while the traffic key is absent. That is a manager-side
+precondition in the CHR topology, not a CAP framing issue; the TLS EAPOL leg
+used in production does not need it.
 
 ## Status / traffic
 
