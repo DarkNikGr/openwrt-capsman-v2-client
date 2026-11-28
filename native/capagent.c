@@ -179,7 +179,7 @@ struct cfg {
     uint8_t e70[4];
     int lock_to_manager;
     int dont_verify;
-    int slaves_static;
+
     int nradios;
     char ifnames[MAX_RADIOS][32];
     uint8_t macs[MAX_RADIOS][6];

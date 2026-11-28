@@ -656,7 +656,6 @@ static void usage(const char *p)
         "  --no-enroll                  never generate a CSR (fail if no cert)\n"
         "  --cert-cn CN                 fixed enrolment CN (default: identity-rand)\n"
         "  --slaves-datapath NAME       accepted for WinBox parity\n"
-        "  --slaves-static              accepted for WinBox parity\n"
         "  --macs MAC[,MAC]|auto        radio MACs (default: from phy sysfs)\n"
         "  --crypto-selftest            run AES-CCM known-answer tests and exit\n"
         "  --datachan                   receive the CAPsMAN datachan on UDP\n"
@@ -727,7 +726,7 @@ int main(int argc, char **argv)
     parse_macs(&c, "auto");
 
     enum { OPT_DISC = 1000, OPT_LOCK, OPT_CN, OPT_CA, OPT_NOVERIFY,
-           OPT_SDP, OPT_SSTATIC, OPT_IDENTITY, OPT_SERIAL, OPT_A1, OPT_E70,
+           OPT_SDP, OPT_IDENTITY, OPT_SERIAL, OPT_A1, OPT_E70,
            OPT_SELFTEST, OPT_DATACHAN, OPT_DC_LISTEN, OPT_DC_KEY,
            OPT_DC_COOKIE, OPT_DC_ID, OPT_DC_PEER, OPT_APPLY, OPT_NOACK,
            OPT_EAPOL_LEG, OPT_LAB_AP, OPT_LAB_SSID, OPT_LAB_CHAN, OPT_INJECT,
@@ -754,7 +753,6 @@ int main(int argc, char **argv)
         {"no-enroll", no_argument, 0, OPT_NOENROLL},
         {"cert-cn", required_argument, 0, OPT_CERTCN},
         {"slaves-datapath", required_argument, 0, OPT_SDP},
-        {"slaves-static", no_argument, 0, OPT_SSTATIC},
         {"identity", required_argument, 0, OPT_IDENTITY},
         {"serial", required_argument, 0, OPT_SERIAL},
         {"a1", required_argument, 0, OPT_A1},
@@ -819,7 +817,6 @@ int main(int argc, char **argv)
         case OPT_NOENROLL: c.no_enroll = 1; break;
         case OPT_CERTCN: c.cert_cn = optarg; break;
         case OPT_SDP: c.slaves_datapath = optarg; break;
-        case OPT_SSTATIC: c.slaves_static = 1; break;
         case OPT_IDENTITY: c.identity = optarg; break;
         case OPT_SERIAL: c.serial = optarg; break;
         case OPT_A1: parse_hex(optarg, c.a1, 4); break;

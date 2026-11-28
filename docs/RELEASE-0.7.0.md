@@ -49,8 +49,8 @@ and drops the station before the 4-way.
      not ACKed. The 4-way, key install and authorization are unchanged; a
      wrong PSK still fails.
 
-The CAP needs no new code beyond v0.6.9's `CAPAGENT_PER_VAP=auto` (one hostapd
-per 5/6 GHz VAP).
+The CAP needs no new knob: it automatically starts one hostapd per 5/6 GHz
+VAP and keeps the single multi-BSS hostapd on 2.4 GHz.
 
 ## Live evidence (Xiaomi Mi Router 4A + RB1100AHx4 / RouterOS 7.25.1)
 
@@ -61,7 +61,7 @@ Manager: exactly two dynamic rules, no static 5G interfaces:
 1 radio-mac=28:D1:27:1B:2D:83 master=cfg5 slaves=cfg5-guest,cfg5-iot,cfg5-hidden-sec
 ```
 
-CAP: 8 SSIDs, `SLAVES_STATIC=no`, `PER_VAP=auto`, patched `mt76x02-lib.ko`,
+CAP: 8 SSIDs, automatic one-hostapd-per-VAP, patched `mt76x02-lib.ko`,
 patched wpad (`9999k`):
 
 | BSSID | port | 4-way | `0x201f` | authorized |
@@ -82,8 +82,7 @@ vif 2a:...:85 is outside base prefix 28:...:83: clearing RX drop-not-to-me
 ```
 
 All three dynamic 5G slaves complete the 4-way and are authorized; the state
-survives a cold reboot. The static `2E/22/26:...:83` layout remains a fallback
-on a stock driver (`SLAVES_STATIC=yes`).
+survives a cold reboot.
 
 ## 6 GHz
 
@@ -101,13 +100,10 @@ The release image contains:
 * `wpad-mbedtls` with `9999k`,
 * `/lib/modules/6.6.73/mt76x02-lib.ko` (patched; stock `mt76.ko`/
   `mt76x2*.ko` retained),
-* `/etc/cap/capagent.conf` with `KEEP_SEC=yes`, `SLAVES_STATIC=no`,
-  `PER_VAP=auto`.
+* `/etc/cap/capagent.conf` with `KEEP_SEC=yes`.
 
-For an existing device, install the patched module and wpad, set
-`SLAVES_STATIC=no`, replace any static 5G interfaces with a normal dynamic
-provisioning rule, and reboot. The static `...:83` fallback is documented in
-`patches/mt76/README.md`.
+For an existing device, install the patched module and wpad, replace any
+static 5G interfaces with a normal dynamic provisioning rule, and reboot.
 
 ## Verified on / image
 
@@ -120,9 +116,9 @@ ssids=8  capagent=1  hostapd=7
 capagent 0.7.0
 ```
 
-The release image contains `SLAVES_STATIC=no`, `PER_VAP=auto`,
-`KEEP_SEC=yes`, the patched module at `/lib/modules/6.6.73/mt76x02-lib.ko`
-and the patched wpad.
+The release image contains `KEEP_SEC=yes`, automatic one-hostapd-per-VAP,
+the patched module at `/lib/modules/6.6.73/mt76x02-lib.ko` and the patched
+wpad.
 
 * image: `ecaa2dfdd8d99ca2e3d0755549691ccc863651bd263873953e3ff8c94d4a2af8`
   (7,537,762 B)

@@ -88,7 +88,6 @@ reboot
 ```
 
 Then use a normal provisioning rule with `master-configuration` +
-`slave-configurations`; the CAP config must have `SLAVES_STATIC=no`,
-`PER_VAP=auto` and `KEEP_SEC=yes`. The manager derives `2A:...:85/86/87` and
-all four 5 GHz BSSes authenticate. Static virtuals (`SLAVES_STATIC=yes`,
-`2E/22/26:...:83`) remain a fallback for a stock driver.
+`slave-configurations`; the CAP config must have `KEEP_SEC=yes`. The manager
+derives `2A:...:85/86/87`, the CAP starts one hostapd per VAP automatically,
+and all four 5 GHz BSSes authenticate.

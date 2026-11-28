@@ -42,7 +42,6 @@ common_args() {
 	[ "${LOCK_TO_CAPS_MAN:-no}" = yes ] && printf '%s\n' --lock-to-caps-man
 	[ -n "${SLAVES_DATAPATH:-}" ] &&
 		printf '%s\n' --slaves-datapath "${SLAVES_DATAPATH}"
-	[ "${SLAVES_STATIC:-no}" = yes ] && printf '%s\n' --slaves-static
 	[ "${APPLY:-no}" = yes ] && printf '%s\n' --apply
 	[ "${DATACHAN:-no}" = yes ] && printf '%s\n' --datachan
 	[ -n "${SERIAL:-}" ] && printf '%s\n' --serial "${SERIAL}"
@@ -106,14 +105,6 @@ start_instance() {
 	[ -n "$envtag" ] && envs="CAPAGENT_RUN_TAG=$envtag"
 	[ "${LOCAL_OWE:-}" = no ] && envs="$envs CAPAGENT_LOCAL_OWE=0"
 	[ "${KEEP_SEC:-no}" = yes ] && envs="$envs CAPAGENT_KEEP_SEC=1"
-	# One hostapd per 5/6 GHz BSS.  auto (default) picks it per phy when
-	# the manager provisions a >= 4900 MHz row; yes/no force the mode.
-	# CAPAGENT_5G_PER_VAP=yes is the historical alias.
-	if [ -n "${PER_VAP:-}" ]; then
-		envs="$envs CAPAGENT_PER_VAP=$PER_VAP"
-	elif [ "${CAPAGENT_5G_PER_VAP:-no}" = yes ]; then
-		envs="$envs CAPAGENT_PER_VAP=yes"
-	fi
 	[ -n "$envs" ] && procd_set_param env $envs
 	# Infinite respawn: 3600/5 with retry=0 means "no crash-loop limit".
 	procd_set_param respawn 3600 5 0

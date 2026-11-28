@@ -102,8 +102,8 @@ Legend:
 | Setting | Status | Evidence / why |
 |---|---|---|
 | `action=create-dynamic-enabled` | ✅ live | 8 VAPs from two rules, or 8 masters from eight fake-radio rules (multi-identity/solo) |
-| `master-configuration` + `slave-configurations` | ✅ **live** | 1 master + 3 virtuals per radio, all four authenticate on both bands. 2.4 GHz uses the manager's derived BSSIDs; 5 GHz uses the dynamic `2A:...:85/86/87` with `patches/mt76/0001` (sequential slots + RX drop fix) and `patches/9999k` (hostapd no-ACK tolerance), plus one hostapd per VAP (F92). Static `2E/22/26:...:83` remains the stock-driver fallback. Solo/multi-identity: 8 masters |
-| `radio-mac` | ✅ live | matched against NEWPHY; on 5 GHz the real radio carries a dynamic master+3 manager virtuals (F92); the static base-suffix MAC set (`2E/22/26:...:83`) is the fallback, and a fake-radio layout needs a distinct first byte per radio (F74) |
+| `master-configuration` + `slave-configurations` | ✅ **live** | 1 master + 3 virtuals per radio, all four authenticate on both bands. 2.4 GHz uses the manager's derived BSSIDs; 5 GHz uses the dynamic `2A:...:85/86/87` with `patches/mt76/0001` (sequential slots + RX drop fix) and `patches/9999k` (hostapd no-ACK tolerance), plus one hostapd per VAP (F92). Solo/multi-identity: 8 masters |
+| `radio-mac` | ✅ live | matched against NEWPHY; on 5 GHz the real radio carries a dynamic master+3 manager virtuals (F92); a fake-radio layout needs a distinct first byte per radio (F74) |
 | `require-peer-certificate=no` | ✅ live | zero-touch enrolment (`0x76` → `0x77`/`0x78`) |
 | `enabled=yes`, `generated-ca-certificate` | ✅ live | the CAP pins the CA when `--ca-cert` is present |
 | Manager discovery via DHCP option 138 | ✅ live | `/etc/udhcpc.user.d/99-cap-dhcp138` decodes it into `/tmp/cap-manager`; `10.0.0.1` there and `MANAGER=auto` works |

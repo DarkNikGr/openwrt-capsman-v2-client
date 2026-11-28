@@ -8,8 +8,8 @@ MikroTik manager, the original repo or the host kernel modules.
 > manager path this document was waiting on: a **provisioning rule**
 > (`action=create-dynamic-enabled`, one `master-configuration` + three
 > `slave-configurations`) on **one 6 GHz radio** makes the manager derive
-> `cap-wifiN` + `cap-wifiN-virtual1/2/3` (`MDB` / `DB`), and CAP v0.6.9
-> (`CAPAGENT_PER_VAP=auto`) brings up **four BSS `AP-ENABLED` at 5955 MHz,
+> `cap-wifiN` + `cap-wifiN-virtual1/2/3` (`MDB` / `DB`), and the CAP
+> automatically brings up **four BSS `AP-ENABLED` at 5955 MHz,
 > 6ghz-ax, 160 MHz**, one hostapd per VAP. SAE/PMF stations on the master and
 > all three slaves reach `authorized: yes`, ping 0 %, at 20/40/80/160 MHz.
 > This is dynamic provisioning, **not** static `/interface wifi` rows. It does
@@ -52,7 +52,7 @@ Proven on a virtual radio:
   three slave configurations produces `cap-wifiN` + `cap-wifiN-virtual1/2/3`
   (`MDB` / `DB`); no static `/interface wifi` row is created (AG54).
 * **Four SSIDs on one 6 GHz radio at 160 MHz**, four `AP-ENABLED` BSS, one
-  hostapd per VAP (`CAPAGENT_PER_VAP=auto`) (AG54; AG44).
+  hostapd per VAP (AG54; AG44).
 * SAE + PMF station on the master **and** each slave: `authorized: yes`,
   `MFP: yes`, freq 5955, ping 0 %; 20/40/80/160 MHz all PASS (AG54).
 * Manager-mediated SAE in the same session: the CAP relays `0x2018`
@@ -74,8 +74,8 @@ Not proven / not implemented:
 * **MLO / EHT multi-link is not implemented**; no MLD is established
   (`6GHZ-HWSIM.md:175-176`, `CAPSMAN-COVERAGE.md:115`).
 * Stock hostapd multi-BSS (`interface=` + 3 × `bss=`) still fails on 6 GHz;
-  the supported layout is one single-BSS hostapd per VAP, which
-  `CAPAGENT_PER_VAP=auto` selects. That is a hostapd/driver limitation, not a
+  the supported layout is one single-BSS hostapd per VAP, which the CAP
+  selects automatically. That is a hostapd/driver limitation, not a
   manager/provisioning one.
 * Real RF, AFC / standard-power 6 GHz, and regulatory power modes cannot be
   proven with hwsim (`6GHZ-HWSIM.md:177-183`).
@@ -407,7 +407,7 @@ descriptors, per-link EAPOL/keys, manager MLD config.
    firmware; `capagent-aarch64` v0.6.9 runs unchanged. mt7996 exposes
    `MT7996_MAX_INTERFACES=19` per band, so one 6 GHz radio + three virtuals
    (four BSS) is well inside the driver limit. Use `6ghz-ax` HE at
-   20/40/80/160 and `CAPAGENT_PER_VAP=auto`; 6 GHz + dynamic provisioning is
+   20/40/80/160; 6 GHz + dynamic provisioning is
    already proven at protocol level (AG54). Verify `iw phy` shows the 6 GHz
    band and 5955 MHz with `IR` under the lab country before provisioning.
 2. **Cheapest real 6 GHz HE CAP:** **AsiaRF AW7916-NPD** (~$40) + mini

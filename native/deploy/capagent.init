@@ -37,7 +37,6 @@ start_service() {
 	[ -n "${CAPS_MAN_CERT_CN:-}" ] && set -- "$@" --caps-man-certificate-common-names "${CAPS_MAN_CERT_CN}"
 	[ "${LOCK_TO_CAPS_MAN:-no}" = yes ] && set -- "$@" --lock-to-caps-man
 	[ -n "${SLAVES_DATAPATH:-}" ] && set -- "$@" --slaves-datapath "${SLAVES_DATAPATH}"
-	[ "${SLAVES_STATIC:-no}" = yes ] && set -- "$@" --slaves-static
 	[ "${APPLY:-no}" = yes ] && set -- "$@" --apply
 	[ "${DATACHAN:-no}" = yes ] && set -- "$@" --datachan
 	[ -n "${IDENTITY:-}" ] && set -- "$@" --identity "${IDENTITY}"

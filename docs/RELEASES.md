@@ -1,10 +1,11 @@
 # Release notes index
 
-Current release: **v0.7.0**. The version is stored in
+Current release: **v0.7.1**. The version is stored in
 [`../VERSION`](../VERSION) and printed by `capagent --version`.
 
 | Release | Headline |
 |---|---|
+| [`0.7.1`](RELEASE-0.7.1.md) | fallback cleanup: no static/`PER_VAP` knobs; per-VAP is automatic |
 | [`0.7.0`](RELEASE-0.7.0.md) | dynamic 5 GHz provisioning, no static/fake (F92); patched mt76x02 + hostapd no-ACK |
 | [`0.6.9`](RELEASE-0.6.9.md) | real 5 GHz radio + 3 slaves, no fake radios (F90); 6 GHz 1 radio + 3 virtuals (F91) |
 | [`0.6.8`](RELEASE-0.6.8.md) | 6 GHz 320 MHz EHT encoding (F89 fixed) |
@@ -27,8 +28,8 @@ Current release: **v0.7.0**. The version is stored in
 | [`0.5.0`](RELEASE-0.5.0.md) | PSK-free CAP completes the 4-way; zero-touch image flashed |
 | [`0.4.0`](RELEASE-0.4.0.md) | initial manager-only image and certificate enrolment |
 
-The v0.7.0 image sha256 is
-`ecaa2dfdd8d99ca2e3d0755549691ccc863651bd263873953e3ff8c94d4a2af8`
+The v0.7.1 image sha256 is
+`5feb77b57c4dd97954855f5c1bd7e70853a39f2297c532cbce168486ff035baf`
 (7,537,762 B). The reference Xiaomi now runs **two real radios, eight SSIDs,
 no fake, no static**: two normal dynamic provisioning rules (2.4 master+3
 slaves, 5 GHz master+3 virtuals `2A:...:85/86/87`), all eight station tests

@@ -1,9 +1,10 @@
 # v0.6.9 — real 5 GHz radio + 3 slaves, no fake radios (F90)
 
-> **Superseded by v0.7.0 (F92).** The normal path is now RouterOS dynamic
-> provisioning on the real 5 GHz radio (`2A:...:85/86/87`) with the patched
-> `mt76x02-lib.ko` and the `9999k` hostapd tolerance. The static
-> `2E/22/26:...:83` layout described here remains the stock-driver fallback.
+> **Historical — superseded by v0.7.0 (F92).** The normal path is now RouterOS
+> dynamic provisioning on the real 5 GHz radio (`2A:...:85/86/87`) with the
+> patched `mt76x02-lib.ko` and the `9999k` hostapd tolerance. The
+> `SLAVES_STATIC` and `PER_VAP` options mentioned in this note were removed in
+> v0.7.0; the CAP selects the per-VAP layout automatically.
 
 The headline: the reference Xiaomi now runs **two real radios and eight SSIDs**
 with **no fake radio and no fake base MAC**. The 2.4 GHz radio keeps its

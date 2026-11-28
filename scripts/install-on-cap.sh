@@ -47,7 +47,7 @@ grep -q '^DATACHAN=' "${CONF}" || echo "DATACHAN=yes" >> "${CONF}"
 # The packaged init script must pass --apply / --datachan.
 if [ -f "${INIT}" ]; then
     if grep -q 'APPLY.*--apply' "${INIT}"; then :; else
-        sed -i '/SLAVES_STATIC.*--slaves-static/a\	[ "${APPLY:-no}" = yes ] && set -- "$@" --apply' "${INIT}" || true
+        sed -i '/SLAVES_DATAPATH.*--slaves-datapath/a\	[ "${APPLY:-no}" = yes ] && set -- "$@" --apply' "${INIT}" || true
     fi
     if grep -q 'DATACHAN.*--datachan' "${INIT}"; then :; else
         sed -i '/APPLY.*--apply/a\	[ "${DATACHAN:-no}" = yes ] && set -- "$@" --datachan' "${INIT}" || true

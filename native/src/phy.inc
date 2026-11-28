@@ -18,7 +18,7 @@
  * journaled 5/6 GHz row, spaced and ack-gated exactly like solo.  2.4 GHz
  * keeps the shared multi-BSS config below.
  *
- * Knob: CAPAGENT_PER_VAP=auto|yes|no (CAPAGENT_5G_PER_VAP is an alias).
+ * 5/6 GHz always uses one hostapd per BSS; 2.4 GHz keeps the shared config.
  *   auto (default)  per-VAP for a phy with any journaled row >= 4900 MHz
  *                   (5 or 6 GHz); shared multi-BSS for 2.4-only phys.
  *   yes             force per-VAP for every phy (2.4 included; test only).
@@ -105,44 +105,15 @@ static int vap_proc_is_hostapd(pid_t pid)
 
 /* pid_is_zombie() lives in ownership.inc (shared with own_pid_alive). */
 
-/* Knob parser: -1 auto, 0 shared multi-BSS, 1 one hostapd per BSS.
- * CAPAGENT_PER_VAP wins; CAPAGENT_5G_PER_VAP is the historical alias the
- * ag37 prototype used, so an existing /etc/cap/capagent.conf keeps working.
- * Unknown values fall back to auto and say so once (a typo must not silently
- * disable the 6 GHz workaround). */
-static int vap_pervap_env(void)
-{
-    const char *v = getenv("CAPAGENT_PER_VAP");
-    static int warned;
-    if (!v || !*v) v = getenv("CAPAGENT_5G_PER_VAP");
-    if (!v || !*v) return -1;
-    if (!strcasecmp(v, "auto")) return -1;
-    if (!strcasecmp(v, "yes") || !strcasecmp(v, "on") ||
-        !strcasecmp(v, "true") || !strcmp(v, "1"))
-        return 1;
-    if (!strcasecmp(v, "no") || !strcasecmp(v, "off") ||
-        !strcasecmp(v, "false") || !strcmp(v, "0"))
-        return 0;
-    if (!warned) {
-        printf("vap: unknown CAPAGENT_PER_VAP='%s', using auto\n", v);
-        fflush(stdout);
-        warned = 1;
-    }
-    return -1;
-}
-
-/* One hostapd process per BSS on this phy.  Auto-detection is journal-based,
- * not driver-based: any row on the phy that the manager provisioned for
- * 5/6 GHz selects per-VAP, so mt76x02 5 GHz, 6 GHz (mt7915/mt7996/wifi6/7
- * and hwsim) all get the layout that works, while a 2.4-only phy keeps the
- * single multi-BSS hostapd.  The row's own 0x6016 0x0a descriptor is used
- * (a secondary's 0x500b may carry a placeholder 2412 MHz); e->freq is the
- * fallback for a body without 0x0a. */
+/* One hostapd process per BSS on any phy that carries 5/6 GHz rows.
+ * Auto-detection is journal-based, not driver-based: any row on the phy that
+ * the manager provisioned for 5/6 GHz selects per-VAP, so mt76x02 5 GHz,
+ * 6 GHz (mt7915/mt7996/wifi6/7 and hwsim) all get the layout that works,
+ * while a 2.4-only phy keeps the single multi-BSS hostapd.  The row's own
+ * 0x6016 0x0a descriptor is used (a secondary's 0x500b may carry a
+ * placeholder 2412 MHz); e->freq is used when the body has no 0x0a. */
 static int vap_pervap_wanted(int phy)
 {
-    int force = vap_pervap_env();
-
-    if (force >= 0) return force;
     for (int i = 0; i < OWN_MAX; i++) {
         struct own_entry *e = &g_own[i];
         if (!vap_phy_row_cfg(e, phy)) continue;
@@ -1101,11 +1072,10 @@ static int vap_phy_apply(int phy, const struct cfg *c)
     }
     if (!n || master < 0) return -1;
 
-    /* One hostapd per BSS on an mt76x02 5 GHz phy (or CAPAGENT_5G_PER_VAP=1):
-     * the shared `bss=` config cannot bring up its secondaries, while a
-     * one-BSS process per VAP is exactly the mode the 8-radio/solo runs
-     * proved.  Each row has its own config/pid/log and is started, kept and
-     * stopped independently. */
+    /* One hostapd per BSS on a 5/6 GHz phy: the shared `bss=` config cannot
+     * bring up its secondaries, while a one-BSS process per VAP is the layout
+     * that works on mt76x02 and 6 GHz.  Each row has its own config/pid/log
+     * and is started, kept and stopped independently. */
     if (vap_pervap_wanted(phy))
         return vap_phy_apply_per_vap(phy, c);
 

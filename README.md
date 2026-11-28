@@ -1,6 +1,6 @@
 # MikroTik CAPsMAN v2 client for OpenWrt
 
-**v0.7.0** — see [`docs/RELEASE-0.7.0.md`](docs/RELEASE-0.7.0.md) and the
+**v0.7.1** — see [`docs/RELEASE-0.7.1.md`](docs/RELEASE-0.7.1.md) and the
 [release index](docs/RELEASES.md). Canonical documentation index:
 [`docs/README.md`](docs/README.md).
 
@@ -26,7 +26,7 @@ OpenWrt 24.10, MediaTek MT7603E + MT7612E), managed by an
 > |---|---|
 > | Manager provisions every VAP | `0x500b` + `0x6016` for 8 VAPs, `0xd00b` accepted |
 > | **8/8 SSIDs** | `ssids=8` on **2 real radios, no fake, no static**: 2.4 GHz dynamic master+3 slaves, 5 GHz dynamic master+3 virtuals (`2A:...:85/86/87`) |
-> | **All 8 SSIDs authenticate** | 2.4 GHz 4/4 + 5 GHz 4/4 (`authorized: yes` on the master and all slaves), also after a cold reboot; `CAPAGENT_PER_VAP=auto`, patched mt76x02 + `9999k` hostapd no-ACK tolerance (F92) |
+> | **All 8 SSIDs authenticate** | 2.4 GHz 4/4 + 5 GHz 4/4 (`authorized: yes` on the master and all slaves), also after a cold reboot; automatic one-hostapd-per-VAP, patched mt76x02 + `9999k` hostapd no-ACK tolerance (F92) |
 > | **No PSK on the CAP** | `external_rsn_auth=1`, no `wpa_passphrase`/`wpa_psk_file` |
 > | **Manager is the authenticator** | EAPOL `0x201c` (M1) → `0x201b` (M2) → `0x201f` PTK |
 > | **Station authorized** | `authorized: yes`, `authenticated: yes`, -38 dBm |
@@ -34,9 +34,8 @@ OpenWrt 24.10, MediaTek MT7603E + MT7612E), managed by an
 > | **Factory reset** | `sysupgrade -n` → boot → self-enrolment → 8/8, no manual step |
 >
 > How it works, in one line: 2.4 GHz uses one hostapd per radio with `bss=`
-> sections; 5/6 GHz uses one hostapd **per VAP** (`CAPAGENT_PER_VAP=auto`)
-> because mt76x02 and the 6 GHz hostapd stack do not deliver auth to a
-> multi-BSS secondary. hostapd relays the raw Auth/AssocReq and the EAPOL
+> sections; 5/6 GHz automatically uses one hostapd **per VAP** because mt76x02
+> and the 6 GHz hostapd stack do not deliver auth to a multi-BSS secondary. hostapd relays the raw Auth/AssocReq and the EAPOL
 > exchange, and never holds a key. The v0.7.0 image also ships the patched
 > `mt76x02-lib.ko` (sequential BSS slots + RX drop fix) and the `9999k`
 > hostapd no-ACK tolerance, so the manager's **dynamic** 5 GHz slaves work.
@@ -53,10 +52,9 @@ OpenWrt 24.10, MediaTek MT7603E + MT7612E), managed by an
 >   is a master + 3 manager slaves; 5 GHz is a dynamic master + 3 manager
 >   virtuals (`2A:...:85/86/87`). The manager sees exactly two radios and
 >   eight VAPs; all eight authenticate after a cold reboot (v0.7.0, F92).
->   The fixed mt76x02 module ships in the image; without it, set
->   `SLAVES_STATIC=yes` and use the static `2E/22/26:...:83` fallback. The
->   older one-CAP/eight-radio **solo** mode and the eight-identity fallback
->   (`/etc/cap/identities.conf`) still work, but are no longer required.
+>   The fixed mt76x02 module and the `9999k` hostapd tolerance ship in the
+>   image. The older one-CAP/eight-radio **solo** mode and the eight-identity
+>   layout (`/etc/cap/identities.conf`) still work, but are no longer required.
 > * **`MANAGER=auto` works through DHCP option 138.** The image's
 >   `/etc/udhcpc.user.d/99-cap-dhcp138` hook decodes the option into
 >   `/tmp/cap-manager`; with `10.0.0.1` in that file the agent uses it. Baking
@@ -192,7 +190,7 @@ control plane; only the data path differs.
 
 ## Status
 
-Last updated 2026-11-28 against `main` (v0.7.0). "Live" means the reference Xiaomi
+Last updated 2026-11-28 against `main` (v0.7.1). "Live" means the reference Xiaomi
 Mi Router 4A + RB1100AHx4 / RouterOS 7.25.1; "lab" means CHR 7.25.1 + hwsim.
 
 | Capability | State |
@@ -498,7 +496,7 @@ wifi-scripts package recipe, the patch-series check and the recorded hashes,
 see [`docs/BUILD.md`](docs/BUILD.md). The build is reproducible: two clean
 clones of the same commit produce the same binary.
 
-The version is printed by `capagent --version` (`0.7.0`) and stored in
+The version is printed by `capagent --version` (`0.7.1`) and stored in
 `VERSION`. Output: `dist/capagent-mipsel` / `dist/capagent-aarch64` (static,
 stripped). `dist/` is a local, gitignored build directory; published binaries
 live under
@@ -521,7 +519,7 @@ IDENTITY=OpenWrt-CAP3
 
 The packaged init script also honours `CAP_ADDR`, `DISCOVERY_INTERFACES`,
 `CA_CERT`, `CAPS_MAN_CERT_CN`, `LOCK_TO_CAPS_MAN`, `SLAVES_DATAPATH`,
-`SLAVES_STATIC`, `MACS`, `SERIAL`, `A1`, `E70`, `A7`.
+`MACS`, `SERIAL`, `A1`, `E70`, `A7`.
 
 `APPLY=yes` only acts when the manager sends an optional `0x77` configuration
 tree; stock RouterOS 7.25.1 does not. The SSID/RSN in `0x6016` is received and
