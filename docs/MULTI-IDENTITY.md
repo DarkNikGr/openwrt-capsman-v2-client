@@ -200,3 +200,9 @@ radios, eight SSIDs and all eight station tests `authorized: yes`, 3/3, 0%.
 The allocator keeps the manager's fake-radio BSSIDs (locally administered,
 free driver BSS index) instead of remapping them to the phy's `:83` plan —
 remapping made the manager reject the 5 GHz 4-way.
+
+Caveat for a **live security change** in solo mode: the manager sends
+`0x6017`, the CAP re-joins and the eight starts arrive in one burst; the 5 GHz
+start race can leave some BSSes down until the service is restarted
+(`/etc/init.d/capagent restart`). A cold boot is the verified path. The
+multi-identity topology does not have this caveat (15 s stagger per identity).
