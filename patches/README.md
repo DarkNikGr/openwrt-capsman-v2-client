@@ -22,6 +22,7 @@ Apply order is lexicographic, after the stock OpenWrt patches:
 | `9999h-external-rsn-queue-early-eapol.patch` | queue the newest EAPOL frame per station and flush it from `ext_auth_notify_assoc()`, because on 6 GHz the manager can send M1 before hostapd has associated the station | for 6 GHz/SAE |
 | `9999i-hostapd-short-rrm-ie.patch` | keep a short RRM Enabled Capabilities IE and preserve it through the external-RSN early return in `__check_assoc_ies`, so `req_beacon` sees the station's beacon-report bits | for 11k |
 | `9999j-external-rsn-wnm-action.patch` | relay the station's WNM (category 10) action frame, e.g. the BTM Response, as `0x2018` | for 802.11v |
+| `9999k-hostapd-external-rsn-noack-tolerance.patch` | in external-RSN mode, accept an AP Auth/Assoc response whose TX status is not ACKed (the station did receive it and associates); required for non-primary BSS slots driven by RouterOS dynamic provisioning on mt76x02 | for dynamic 5G/6G slaves |
 
 ## Build
 

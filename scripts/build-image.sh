@@ -23,6 +23,9 @@
 #
 # Usage: scripts/build-image.sh [WORKDIR]     (default: /tmp/zt-image)
 # Env:   VERSION=24.10.0  PROFILE=xiaomi_mi-router-4a-gigabit
+#        MANAGER=10.0.0.1 (optional)
+#        MT76X02_KO=/path/to/patched/mt76x02-lib.ko (optional; enables
+#        RouterOS dynamic 5 GHz slaves; see patches/mt76/README.md)
 set -eu
 
 WORK=${1:-/tmp/zt-image}
@@ -101,18 +104,39 @@ if [ ! -f "$IB/Makefile" ]; then
 	rm -f "$WORK/ib.tar.zst"
 fi
 
-# 4b. Bake a manager address if one is given.  MANAGER=auto (the shipped
-# default) relies on DHCP option 138, which OpenWrt's udhcpc does not export to
-# the agent, so a site either bakes its manager here or edits
-# /etc/cap/capagent.conf once.
+# 4b. Optional files overlay: a baked manager address and/or the patched
+# mt76x02 module.  MANAGER=auto (the shipped default) relies on DHCP option
+# 138, which OpenWrt's udhcpc does not export to the agent, so a site either
+# bakes its manager here or edits /etc/cap/capagent.conf once.
+F=$WORK/files
+rm -rf "$F"
 FILES_OPT=""
 if [ -n "${MANAGER:-}" ]; then
-	F=$WORK/files
-	rm -rf "$F"; mkdir -p "$F/etc/cap"
+	mkdir -p "$F/etc/cap"
 	sed "s|^MANAGER=.*|MANAGER=$MANAGER|" \
 		"$REPO/openwrt/capagent/files/capagent.conf" > "$F/etc/cap/capagent.conf"
 	FILES_OPT="FILES=$F"
 	say "baking MANAGER=$MANAGER into /etc/cap/capagent.conf"
+fi
+
+# 4c. Optional patched mt76x02-lib.ko.  The stock mt76x02 picks the AP BSS
+# slot from BSSID byte 0 and drops RX frames whose RA is not the radio base,
+# so RouterOS dynamic 5 GHz slaves (2A:...:85/86/87) cannot authenticate.
+# The patch in patches/mt76/ assigns sequential slots and clears the RX
+# drop-not-to-me bit for out-of-prefix AP vifs.  Build it with the image's
+# kernel (see patches/mt76/README.md) and pass it here.
+if [ -n "${MT76X02_KO:-}" ]; then
+	[ -f "$MT76X02_KO" ] ||
+		{ say "MT76X02_KO not found: $MT76X02_KO"; exit 1; }
+	KPATCH=$(sed -n 's/^KERNEL_PATCHVER:=//p' \
+		"$IB/target/linux/ramips/Makefile" | head -1)
+	KREL=$(sed -n "s/^LINUX_VERSION-$KPATCH = \.\(.*\)/$KPATCH.\1/p" \
+		"$IB/include/kernel-$KPATCH" | head -1)
+	[ -n "$KREL" ] || { say "cannot determine the image kernel version"; exit 1; }
+	mkdir -p "$F/lib/modules/$KREL"
+	cp "$MT76X02_KO" "$F/lib/modules/$KREL/mt76x02-lib.ko"
+	FILES_OPT="FILES=$F"
+	say "overlaying patched mt76x02-lib.ko for kernel $KREL"
 fi
 
 mkdir -p "$IB/packages"

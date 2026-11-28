@@ -1,0 +1,105 @@
+--- a/mt76x02_util.c	2025-01-14 14:45:25.000000000 +0200
++++ b/mt76x02_util.c	2026-11-28 15:32:13.308362888 +0200
+@@ -201,6 +201,27 @@
+ }
+ EXPORT_SYMBOL_GPL(mt76x02_init_device);
+ 
++/*
++ * Set when an AP vif is created whose address is outside the radio's base
++ * prefix.  The MAC only compares the received address against the single
++ * MT_MAC_ADDR/MT_MAC_BSSID base (with the MBSS index byte partially masked),
++ * so such a BSSID can transmit but never receive.  Clearing RX_FILTR_CFG bit 2
++ * ("drop not to me", called PROMISC in mt76) makes the MAC deliver frames for
++ * any BSSID and lets mac80211 demux by the real BSSID again.
++ */
++static bool mt76x02_rx_accept_all;
++static bool mt76x02_accept_any_bssid = true;
++
++module_param_named(accept_any_bssid, mt76x02_accept_any_bssid, bool, 0644);
++MODULE_PARM_DESC(accept_any_bssid,
++	"Deliver RX frames addressed to any BSSID when an AP vif is outside the radio base prefix (default: on)");
++
++/* Same address set as mt76x02_config_mac_addr_list(): byte 0 varies, 1..5 fixed. */
++static bool mt76x02_addr_in_base_prefix(struct mt76x02_dev *dev, const u8 *addr)
++{
++	return !memcmp(addr + 1, dev->mphy.macaddr + 1, ETH_ALEN - 1);
++}
++
+ void mt76x02_configure_filter(struct ieee80211_hw *hw,
+ 			      unsigned int changed_flags,
+ 			      unsigned int *total_flags, u64 multicast)
+@@ -218,6 +239,9 @@
+ 
+ 	dev->mt76.rxfilter &= ~MT_RX_FILTR_CFG_OTHER_BSS;
+ 
++	if (mt76x02_rx_accept_all)
++		dev->mt76.rxfilter &= ~MT_RX_FILTR_CFG_PROMISC;
++
+ 	MT76_FILTER(FCSFAIL, MT_RX_FILTR_CFG_CRC_ERR);
+ 	MT76_FILTER(PLCPFAIL, MT_RX_FILTR_CFG_PHY_ERR);
+ 	MT76_FILTER(CONTROL, MT_RX_FILTR_CFG_ACK |
+@@ -306,8 +330,16 @@
+ 	     memcmp(vif->addr + 1, dev->mphy.macaddr + 1, ETH_ALEN - 1)))
+ 		mt76x02_mac_setaddr(dev, vif->addr);
+ 
+-	if (vif->addr[0] & BIT(1))
+-		idx = 1 + (((dev->mphy.macaddr[0] ^ vif->addr[0]) >> 2) & 7);
++	/*
++	 * Do not derive the hardware BSS slot from BSSID byte 0.  That rule
++	 * only covers the eight byte0 values published by
++	 * mt76x02_config_mac_addr_list() and makes every virtual AP that shares
++	 * byte 0 collide on one slot (the second one fails with -EBUSY).
++	 * Assign the first free slot instead, like mt7603 does.  All per-BSS
++	 * state (APC_BSSID, beacon slot, MT_VIF_WCID, WCID BSS_IDX) is keyed on
++	 * mvif->idx, and the RX BSS index is not read by this driver.
++	 */
++	idx = __ffs64(~dev->mt76.vif_mask);
+ 
+ 	/*
+ 	 * Client mode typically only has one configurable BSSID register,
+@@ -326,12 +358,27 @@
+ 		idx += 8;
+ 
+ 	/* vif is already set or idx is 8 for AP/Mesh/... */
+-	if (dev->mt76.vif_mask & BIT_ULL(idx) ||
++	if (dev->mt76.vif_mask & BIT_ULL(idx) || idx > 15 ||
+ 	    (vif->type != NL80211_IFTYPE_STATION && idx > 7))
+ 		return -EBUSY;
+ 
+ 	dev->mt76.vif_mask |= BIT_ULL(idx);
+ 
++	dev_info(dev->mt76.dev, "vif %pM type %d -> hw BSS slot %u (base %pM)\n",
++		 vif->addr, vif->type, idx, dev->mphy.macaddr);
++
++	if (vif->type != NL80211_IFTYPE_STATION &&
++	    !mt76x02_addr_in_base_prefix(dev, vif->addr)) {
++		dev_info(dev->mt76.dev,
++			 "vif %pM is outside base prefix %pM: clearing RX drop-not-to-me\n",
++			 vif->addr, dev->mphy.macaddr);
++		if (mt76x02_accept_any_bssid) {
++			mt76x02_rx_accept_all = true;
++			dev->mt76.rxfilter &= ~MT_RX_FILTR_CFG_PROMISC;
++			mt76_wr(dev, MT_RX_FILTR_CFG, dev->mt76.rxfilter);
++		}
++	}
++
+ 	mt76x02_vif_init(dev, vif, idx);
+ 	return 0;
+ }
+--- a/mt76x02_regs.h	2025-01-14 14:45:25.000000000 +0200
++++ b/mt76x02_regs.h	2026-11-28 15:32:02.947267478 +0200
+@@ -514,7 +514,14 @@
+ #define MT_RX_FILTR_CFG_CRC_ERR		BIT(0)
+ #define MT_RX_FILTR_CFG_PHY_ERR		BIT(1)
+ #define MT_RX_FILTR_CFG_PROMISC		BIT(2)
++/*
++ * BIT(2) is the "drop not to me" bit (rt2800: RX_FILTER_CFG_DROP_NOT_TO_ME),
++ * not a promiscuous-accept bit: set = drop frames whose RA is not this
++ * radio's address.  BIT(3) is DROP_NOT_MY_BSSID (mt76 calls it OTHER_BSS).
++ */
++#define MT_RX_FILTR_CFG_DROP_NOT_TO_ME	MT_RX_FILTR_CFG_PROMISC
+ #define MT_RX_FILTR_CFG_OTHER_BSS	BIT(3)
++
+ #define MT_RX_FILTR_CFG_VER_ERR		BIT(4)
+ #define MT_RX_FILTR_CFG_MCAST		BIT(5)
+ #define MT_RX_FILTR_CFG_BCAST		BIT(6)

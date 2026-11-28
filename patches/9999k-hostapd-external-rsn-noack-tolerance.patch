@@ -1,0 +1,52 @@
+--- a/src/ap/ieee802_11.c
++++ b/src/ap/ieee802_11.c
+@@ -6578,6 +6578,30 @@
+ 	status_code = le_to_host16(mgmt->u.auth.status_code);
+ 
+ 	if (!ok) {
++#ifdef CONFIG_EXTERNAL_RSN_AUTH
++		/*
++		 * No-ACK tolerance for the external RSN authenticator path.
++		 *
++		 * On mac80211 APs the TX status of a management response sent
++		 * from a non-primary BSS (the derived slave BSSIDs used by
++		 * dynamic provisioning) may never be reported back as ACKed,
++		 * even though the station did receive the frame and continues
++		 * to association.  The driver callbacks only give a boolean, so
++		 * a missing/invalid TX status is indistinguishable from a real
++		 * failure here.  Treat the response as sent so the station
++		 * state machine can proceed; this relaxes only the TX-status
++		 * check, not RSN/key handling.
++		 */
++		if (hapd->conf->external_rsn_auth) {
++			hostapd_logger(hapd, mgmt->da, HOSTAPD_MODULE_IEEE80211,
++				       HOSTAPD_LEVEL_WARNING,
++				       "authentication response not acknowledged; accepting for external RSN");
++			ok = 1;
++		}
++#endif /* CONFIG_EXTERNAL_RSN_AUTH */
++	}
++
++	if (!ok) {
+ 		hostapd_logger(hapd, mgmt->da, HOSTAPD_MODULE_IEEE80211,
+ 			       HOSTAPD_LEVEL_NOTICE,
+ 			       "did not acknowledge authentication response");
+@@ -6760,6 +6784,18 @@
+ 		status = le_to_host16(mgmt->u.assoc_resp.status_code);
+ 
+ 	if (!ok) {
++#ifdef CONFIG_EXTERNAL_RSN_AUTH
++		/* See the matching no-ACK tolerance in handle_auth_cb(). */
++		if (hapd->conf->external_rsn_auth) {
++			hostapd_logger(hapd, mgmt->da, HOSTAPD_MODULE_IEEE80211,
++				       HOSTAPD_LEVEL_WARNING,
++				       "association response not acknowledged; accepting for external RSN");
++			ok = 1;
++		}
++#endif /* CONFIG_EXTERNAL_RSN_AUTH */
++	}
++
++	if (!ok) {
+ 		hostapd_logger(hapd, mgmt->da, HOSTAPD_MODULE_IEEE80211,
+ 			       HOSTAPD_LEVEL_DEBUG,
+ 			       "did not acknowledge association response");

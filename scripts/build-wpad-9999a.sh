@@ -70,7 +70,8 @@ for f in 999-external-rsn-auth 9997-external-rsn-ie 9998-external-rsn-eapol-rx \
          9999g-hostapd-rrm-ie-without-capab \
          9999h-external-rsn-queue-early-eapol \
          9999i-hostapd-short-rrm-ie \
-         9999j-external-rsn-wnm-action; do
+         9999j-external-rsn-wnm-action \
+         9999k-hostapd-external-rsn-noack-tolerance; do
 	cp "$REPO/patches/$f.patch" \
 	   "$SDK/package/network/services/hostapd/patches/$f.patch"
 done
