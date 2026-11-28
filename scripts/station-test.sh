@@ -32,6 +32,8 @@ MDID=${MDID:-}
 SCAN_FREQ=${SCAN_FREQ:-}
 # HIDDEN=1 for a hidden SSID (adds scan_ssid=1)
 HIDDEN=${HIDDEN:-}
+# OWE_ONLY=1 forbids OWE transition mode (network block owe_only=1)
+OWE_ONLY=${OWE_ONLY:-}
 # BSSID=aa:bb:.. pin the association to one BSS (band/VAP selection)
 BSSID=${BSSID:-}
 
@@ -124,6 +126,7 @@ network={
 	${BSSID:+bssid=$BSSID}
 	${HIDDEN:+scan_ssid=1}
 	${PSK_LINE}
+	${OWE_ONLY:+owe_only=1}
 	key_mgmt=$KEY_MGMT
 	${SCAN_FREQ:+scan_freq=$SCAN_FREQ}
 	${MDID:+mobility_domain=$MDID}

@@ -77,7 +77,7 @@ Legend:
 | `management-protection` change on a live VAP | ✅ **live** | `0x6017` re-join + `own_cfg_hash`, no identity restart (F76). A new security object still needs its passphrase at creation |
 | `group-key-update` | ➖ manager-owned | the CAP writes `wpa_group_rekey=0`; the manager owns rekeying, so there is no CAP-side knob |
 | `wpa3` / SAE (`authentication-types=wpa3-psk`) | ✅ **live, single-identity and multi-identity** | manager `auth-type=wpa3-psk mfp=yes`, CAP `wpa_key_mgmt=SAE ieee80211w=2 sae_pwe=2`, `0x201c` len=209 → `0x201b` → `0x201f`, station `authorized: yes`, ping 0% (F48/F76) |
-| `owe` | 🟡 **lab only** | the lab matrix is 14/14, but a **live attempt makes the manager deauthenticate** the station. Do not treat OWE as a green path |
+| `owe` | 🟡 **lab only** | the lab matrix is 14/14; live, the station associates but the **Association Response lacks the AP's Diffie-Hellman Parameter** (hostapd's local AssocResp wins over the manager's DH-bearing `0x6019`) and the manager deauthenticates. Fix path: defer/merge the AssocResp in `external_rsn_auth` mode (F80) |
 | `wpa2-eap` / 802.1X / RADIUS | ✅ **live** | `sec-eap` (wpa2-eap, peap, ccmp) + FreeRADIUS 3.2.8 on 10.0.0.3 (`captest`); CAP writes `wpa_key_mgmt=WPA-EAP`, `ieee80211w=1`, `external_rsn_auth=1` (patch `9999a` allows AKM 1/5); station `authorized: yes`, RADIUS logs the user, ping 3/3 0% loss (F53). The earlier `invalid Message-Authenticator` failure was a duplicate/stale RADIUS entry, since fixed |
 | `wpa-psk-sha256` | ➖ not exercised | RouterOS 7.25.1 has no SHA256-only security value to select; the CAP parses AKM 6 but the path is not exercised |
 | `wps` | ➖ not exposed | CAPsMAN v2 does not provision WPS to the CAP |
