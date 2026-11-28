@@ -27,12 +27,14 @@ Current release: **v0.7.0**. The version is stored in
 | [`0.5.0`](RELEASE-0.5.0.md) | PSK-free CAP completes the 4-way; zero-touch image flashed |
 | [`0.4.0`](RELEASE-0.4.0.md) | initial manager-only image and certificate enrolment |
 
-The v0.6.9 image sha256 is
-`6fdeadc76e2bf74998dffea8b5c8e004de25bb9a717a69d4f87ef208d99e036e`
+The v0.7.0 image sha256 is
+`ecaa2dfdd8d99ca2e3d0755549691ccc863651bd263873953e3ff8c94d4a2af8`
 (7,537,762 B). The reference Xiaomi now runs **two real radios, eight SSIDs,
-no fake**: 2.4 GHz master+3 manager slaves and 5 GHz static master+3 virtuals,
-all eight station tests `authorized: yes`, including after a cold reboot. The
-older one-CAP/eight-radio (`cap=OpenWrt-CAPSOLO`) layout still works.
+no fake, no static**: two normal dynamic provisioning rules (2.4 master+3
+slaves, 5 GHz master+3 virtuals `2A:...:85/86/87`), all eight station tests
+`authorized: yes`, including after a cold reboot, using the patched
+`mt76x02-lib.ko` and the `9999k` hostapd tolerance. The older
+one-CAP/eight-radio (`cap=OpenWrt-CAPSOLO`) layout still works.
 
 Per-release files are historical: a limitation written in an old note may
 have been fixed later. Use [`../README.md`](../README.md),

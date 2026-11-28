@@ -269,12 +269,13 @@ Resolved and merged into `main` since this log started:
 * **Zero-touch boot and factory reset** — flashed with `sysupgrade -n`, the
   image enrols itself and re-provisions 8/8 (F43/F46).
 
-Still open at v0.6.9 (details in the ranked list above):
+Still open at v0.7.0 (details in the ranked list above):
 
 * secure datachan on a radio-less CHR (live on the RB1100, F72);
 * `on-capsman-secure` (`a2=2`) on the 2.4 GHz radio: not exercised; plain
   `a2=1` is live on both radios (F88);
-* MLO/EHT multi-link; 6 GHz 160 works on hwsim and 320 is encoded, but real
-  6 GHz RF/AFC needs a 6E/7 board (the Xiaomi has no 6 GHz radio);
+* MLO/EHT multi-link; 6 GHz 1-radio+3-virtuals provisioning works on hwsim at
+  160 MHz (SAE/PMF), and 320 is encoded, but real 6 GHz RF/AFC needs a 6E/7
+  board (the Xiaomi has no 6 GHz radio);
 * soak/concurrency and hardware breadth;
 * boot-time PSK pull for local forwarding (prototype only).

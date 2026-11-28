@@ -109,6 +109,27 @@ For an existing device, install the patched module and wpad, set
 provisioning rule, and reboot. The static `...:83` fallback is documented in
 `patches/mt76/README.md`.
 
+## Verified on / image
+
+Xiaomi Mi Router 4A Gigabit (ramips/mt7621, OpenWrt 24.10), RB1100AHx4 /
+RouterOS 7.25.1, `capagent 0.7.0`, patched `mt76x02-lib.ko`, patched wpad
+(`9999k`):
+
+```
+ssids=8  capagent=1  hostapd=7
+capagent 0.7.0
+```
+
+The release image contains `SLAVES_STATIC=no`, `PER_VAP=auto`,
+`KEEP_SEC=yes`, the patched module at `/lib/modules/6.6.73/mt76x02-lib.ko`
+and the patched wpad.
+
+* image: `ecaa2dfdd8d99ca2e3d0755549691ccc863651bd263873953e3ff8c94d4a2af8`
+  (7,537,762 B)
+* `capagent-mipsel`: `904fb41e9254aa4b0c41e8fea1f002a1510c78796df79e2cc63a1a6c5d03dbfb`
+* `capagent-aarch64`: `7fb6be2816c38ac14cef800141c3cf91af60df569031778e31b431b40d8f8bb3`
+* `mt76x02-lib.ko`: `8f3aa3a8b9c3b94593cb9842da378f783ccc87eba4f5ff610b340b6f4c814e70`
+
 ## Not in this release
 
 * A driver-only fix for the non-primary-BSS TX-status gate: it still needs the
