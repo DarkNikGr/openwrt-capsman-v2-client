@@ -66,10 +66,10 @@ OpenWrt 24.10, MediaTek MT7603E + MT7612E), managed by an
 >   Beacon report token 1, relayed as `0x2018 action len=235` (F69/F71).
 >   802.11v/BTM: request `0x2019 action len=49`, response `0x2018 action
 >   len=29` (F67). The bench Intel 3168 still drops the RM IE.
-> * **6 GHz works on hwsim as one radio + 3 static virtuals** at 5955 MHz /
->   160 MHz (`6ghz-ax`, SAE+PMF), one hostapd per VAP, all four BSSes
->   `AP-ENABLED` and a station `authorized: yes` on the master and each
->   virtual (F91). The manager matches the descriptor band byte, not the
+> * **6 GHz works on hwsim as one radio + 3 dynamic provisioning virtuals**
+>   at 5955 MHz / 160 MHz (`6ghz-ax`, SAE+PMF), no static interfaces, one
+>   hostapd per VAP; all four BSSes `AP-ENABLED`, a station `authorized: yes`
+>   on the master and each virtual, and 20/40/80/160 all pass (F91, AG54). The manager matches the descriptor band byte, not the
 >   NEWPHY label: `0x04` gives `5955/ax`, `0x06` gives `6ghz-be` for EHT
 >   (F85); 160 MHz is descriptor width 5, not 4. 320 MHz EHT is encoded
 >   (`op_class=137`, `eht_oper_chwidth=9`, F89) and manager-accepted. The

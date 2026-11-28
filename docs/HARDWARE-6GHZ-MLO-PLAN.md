@@ -1,8 +1,20 @@
 # 6 GHz / WiFi 6E–7 and MLO CAP bring-up plan
 
-Repository: `deco-luci/cap-client` @ v0.6.6. Research date: 2026-11-28. The plan
+Repository: `deco-luci/cap-client` @ v0.6.9. Research date: 2026-11-28. The plan
 is read-only; it was produced on a copy and did not touch the live Xiaomi, the
 MikroTik manager, the original repo or the host kernel modules.
+
+> **v0.6.9 addendum (AG54, 2026-11-28).** The hwsim gate now proves the full
+> manager path this document was waiting on: a **provisioning rule**
+> (`action=create-dynamic-enabled`, one `master-configuration` + three
+> `slave-configurations`) on **one 6 GHz radio** makes the manager derive
+> `cap-wifiN` + `cap-wifiN-virtual1/2/3` (`MDB` / `DB`), and CAP v0.6.9
+> (`CAPAGENT_PER_VAP=auto`) brings up **four BSS `AP-ENABLED` at 5955 MHz,
+> 6ghz-ax, 160 MHz**, one hostapd per VAP. SAE/PMF stations on the master and
+> all three slaves reach `authorized: yes`, ping 0 %, at 20/40/80/160 MHz.
+> This is dynamic provisioning, **not** static `/interface wifi` rows. It does
+> not change the hardware ranking below: it removes the protocol risk for the
+> real 6 GHz path and leaves driver/radio support as the only gate.
 
 This note answers one question: **what does it take to move the CAP from the
 mt7603e/mt76x2e reference to a real 6 GHz / WiFi 6E–7 / MLO radio on OpenWrt
@@ -10,8 +22,10 @@ mt7603e/mt76x2e reference to a real 6 GHz / WiFi 6E–7 / MLO radio on OpenWrt
 
 The short answer:
 
-* The current CAP already has a *working 6 GHz HE* path on `mac80211_hwsim`
-  with `channel.band=6ghz-be` (F78), but it has **no EHT and no MLO**.
+* The current CAP has a *working 6 GHz HE* path on `mac80211_hwsim`
+  with `channel.band=6ghz-ax` (HE, descriptor band `0x04`) and dynamic
+  provisioning, and v0.6.8 adds the **EHT 320 MHz encoding**; MLO is still
+  not implemented.
 * The cheapest *real* 6 GHz AP is an **MT7916 (AW7916-NPD)**; it is HE-only,
   LPI-only (no AFC), and enabling 6 GHz takes the card's 5 GHz band away.
 * The only credible 24.10 EHT/MLO path is **MT7996 (BPi-R4 + BE14)** on
@@ -33,9 +47,17 @@ The existing 6 GHz work is documented in [`6GHZ-HWSIM.md`](6GHZ-HWSIM.md)
 Proven on a virtual radio:
 
 * Manager builds the 6 GHz channel list from the CAP and provisions a
-  `6ghz-be` VAP at 5955 MHz (`6GHZ-HWSIM.md:143-169`).
-* SAE + PMF + the 4-way + datapath at 20 and 80 MHz, `authorized: yes`,
-  ping 0 % (`6GHZ-HWSIM.md:143-169`).
+  `6ghz-ax` VAP at 5955 MHz (`6GHZ-HWSIM.md:143-169`, F85).
+* **Dynamic provisioning on 6 GHz:** one `radio-mac` rule with a master and
+  three slave configurations produces `cap-wifiN` + `cap-wifiN-virtual1/2/3`
+  (`MDB` / `DB`); no static `/interface wifi` row is created (AG54).
+* **Four SSIDs on one 6 GHz radio at 160 MHz**, four `AP-ENABLED` BSS, one
+  hostapd per VAP (`CAPAGENT_PER_VAP=auto`) (AG54; AG44).
+* SAE + PMF station on the master **and** each slave: `authorized: yes`,
+  `MFP: yes`, freq 5955, ping 0 %; 20/40/80/160 MHz all PASS (AG54).
+* Manager-mediated SAE in the same session: the CAP relays `0x2018`
+  auth/assoc to the manager and the station is “authorized by external
+  authenticator” (AG54).
 * Beacon-protection capability bit `0x84` byte 1 bit 1 (bit 9) is required or
   the manager refuses a WiFi 7 CAP (`6GHZ-HWSIM.md:107-120`).
 * Patch `9999h` is required because the manager sends M1 before hostapd has
@@ -46,10 +68,15 @@ Not proven / not implemented:
 * `channel.band=6ghz-ax` is live on hwsim with descriptor band `0x04`
   (F85); the reference Xiaomi has no 6 GHz radio, so real RF/AFC and
   regulatory power are untested.
-* 160 MHz is advertised but not exercised; **320 MHz is not generated**
-  (`6GHZ-HWSIM.md:171-178`, `6GHZ-HWSIM.md:186-188`).
+* **320 MHz EHT is encoded** (`op_class=137`, `ieee80211be=1`,
+  `eht_oper_chwidth=9`, v0.6.8); the hostapd side is verified, real RF is
+  untested. 160 has been exercised end to end (AG54).
 * **MLO / EHT multi-link is not implemented**; no MLD is established
   (`6GHZ-HWSIM.md:175-176`, `CAPSMAN-COVERAGE.md:115`).
+* Stock hostapd multi-BSS (`interface=` + 3 × `bss=`) still fails on 6 GHz;
+  the supported layout is one single-BSS hostapd per VAP, which
+  `CAPAGENT_PER_VAP=auto` selects. That is a hostapd/driver limitation, not a
+  manager/provisioning one.
 * Real RF, AFC / standard-power 6 GHz, and regulatory power modes cannot be
   proven with hwsim (`6GHZ-HWSIM.md:177-183`).
 
@@ -57,8 +84,8 @@ Where the code stops, precisely:
 
 | Concern | Current code | File:line |
 |---|---|---|
-| 6 GHz hostapd config | `hw_mode=a`, `op_class=131..134`, `ieee80211ax=1`, `he_6ghz_reg_pwr_type=0`; **no `ieee80211be`, no `mld_ap`, no `beacon_prot`** | `native/src/vap.inc:185-210` |
-| 6 GHz channel descriptors | 20/40/80/160 only (`width` 1–4); **no 320 (`width` 6), no 80+80 (`width` 5)** | `native/src/channels.inc:31-49`, `native/src/channels.inc:104-112` |
+| 6 GHz hostapd config | `hw_mode=a`, `op_class=131..134`, `ieee80211ax=1`, `he_6ghz_reg_pwr_type=0`, `ieee80211w=2`, `beacon_prot=1`, external RSN; **no `ieee80211be`, no `mld_ap`** (v0.6.9 writes `beacon_prot=1`) | `native/src/vap.inc:185-210`, `native/src/rsn_decide.h` |
+| 6 GHz channel descriptors | 20/40/80/160 (`width` 1–4) and **320 (`width` 6, EHT, v0.6.8)**; **no 80+80 (`width` 5)** | `native/src/channels.inc:31-49`, `native/src/channels.inc:104-112` |
 | 6 GHz channel-number set `0x00b7` | derived from the same frequency list, so 6 GHz is included | `native/src/channels.inc:770-785` |
 | 6 GHz NEWPHY band | `0x4d` band `0x06`; `CAPAGENT_BAND6` sweep hook | `native/src/util.inc:500-535`, `native/src/util.inc:623-645` |
 | HE/EHT detection | parses `HE Iftypes: AP` / `EHT Iftypes: AP` from `iw phy` | `native/src/util.inc:438-441` |
@@ -209,14 +236,14 @@ exposes a 6 GHz wiphy with `HE/EHT Iftypes: AP`, not just a 6 GHz-capable chip.
 
 | Rank | Candidate | Radio / host | Bands | 6 GHz AP | EHT / MLO | 24.10 status | Cost | Verdict |
 |---|---|---|---|---|---|---|---|---|
-| **1** | **BPi-R4 + BE14** | MT7988 + MT7996 (2×2 + 3×3 + 3×3) | 2.4/5/6 | ✅ | ✅ / ✅ | device includes `kmod-mt7996-firmware` + `kmod-mt7996-233-firmware`; MLO needs 24.10.3+ and hostapd 2.12 | ~$180–250 | **Only credible EHT/MLO lab.** High effort; 6 GHz txpower/EEPROM quirks; manager MLO still unknown |
+| **1** | **BPi-R4 + BE14** | MT7988 + MT7996 (2×2 + 3×3 + 3×3) | 2.4/5/6 | ✅ | ✅ / ✅ | **supported in 24.10** as `mt7988a-bananapi-bpi-r4-wifi-mt7996a` overlay (`kmod-mt7996-firmware`); main adds the `wifi-be14` overlay + EEPROM patch | ~$180–250 | **Shortest credible real-6 GHz path.** aarch64 (`capagent-aarch64`), 19 vifs/band ⇒ 1 radio + 3 slaves fine; MLO still needs hostapd 2.12 + manager MLD |
 | **2** | **x86_64 or BPi-R4 + AW7916-NPD** | MT7916AN (2×2 + 2×3) | 2.4 + 5 **or** 6 | ✅ | ➖ / ➖ | ✅ `kmod-mt7915e` + `kmod-mt7916-firmware`; `enable_6ghz=1` | ~$50 card + host | **Cheapest real 6 GHz HE CAP.** 5 GHz is lost when 6 GHz is enabled; global param; no AFC |
 | **3** | **BPi-R4 or x86 + DR9074-6E** | QCN9074 (4×4) | 6 only | ✅ | ➖ / ➖ | ✅ `kmod-ath11k-pci` + `ath11k-firmware-qcn9074`; x86 firmware/board-2 pain | ~$120–180 card | Best 6 GHz RF, no 5 GHz fallback, no MLO; hostapd 6 GHz-only quirks |
 | **4** | **x86_64 + DR9274-6G / 8devices Noni** | QCN9274 (2×2/4×4) | 6 (or 5+6) | ✅ | ✅ / ✅ | 🟡 `kmod-ath12k` exists; OpenWrt device support DIY | ~$180–300 | MLO research only; ath12k AP MLO + firmware + hostapd 2.12 |
 | **5** | **BPi-R3 + AW7916-NPD** | MT7986 + MT7916 via M.2→mini PCIe adapter | 2.4/5 + 6 | ✅ | ➖ / ➖ | ✅ but adapter/PCIe fiddly; the R3 has no native mini PCIe | ~$120–150 | Works, but the R4 is a better host for the same card |
 | **6** | **Xiaomi AX3000T / WR30U / Redmi AX6000 / GL-MT6000** | MT7981 / MT7986 + MT7976 | 2.4/5 | ➖ | ➖ / ➖ | ✅ | $30–130 | **No 6 GHz.** Cheap 2.4/5 CAPs or hosts; not a 6 GHz answer |
 | **7** | **Netgear WAX630** | IPQ8074, 2.4 + 5L + 5H | 2.4/5/5 | ➖ | ➖ / ➖ | ✅ (`netgear_wax630` in `ipq807x.mk`) | ~$100 used | ath11k, no 6 GHz. **WAX630E (6E) is not in the 24.10 tree** |
-| **8** | **GL.iNet Flint 3 (GL-BE9300)** | IPQ5332 + QCN9274 | 2.4/5/6 | ✅ hardware | ✅ / ✅ hardware | ❌ no official OpenWrt support (TOH) | ~$210 | Do not buy for OpenWrt; the port is not merged |
+| **8** | **GL.iNet Flint 3 (GL-BE9300)** | IPQ5332 + QCN9274 | 2.4/5/6 | ✅ hardware | ✅ / ✅ hardware | ❌ still no `glinet_gl-be9300` device in `openwrt` main (checked 2026-11-28; `qualcommax/ipq53xx.mk` absent) | ~$210 | Do not buy for OpenWrt. Stock GL.iNet firmware is not a drop-in CAP (no patched external-RSN hostapd); ath12k MLO + port is DIY |
 
 Notes:
 
@@ -361,9 +388,9 @@ descriptors, per-link EAPOL/keys, manager MLD config.
 | 4 | **UCI wifi-scripts in 24.10 have no EHT/MLO.** The CAP writes its own config, so this only blocks netifd-based provisioning. | medium | CAP config writer (already the design) |
 | 5 | **MT7916 `enable_6ghz` is global and 5-or-6.** A 5+6 card cannot do both; two cards both flip. | medium | mt76 patch / per-card parameter (mt76#979) |
 | 6 | **MT7916 has no AFC.** No standard-power 6 GHz; LPI only. | medium | hardware choice (MT7996/QCN9274) |
-| 7 | **6 GHz descriptors stop at 160; 320 and 80+80 missing.** | medium | `channels.inc` + `BODY_MAX` |
+| 7 | **80+80 is missing; 320 EHT is encoded (v0.6.8) but real RF is untested.** | low (80+80) | `channels.inc` + `BODY_MAX` |
 | 8 | **`0x06` is used for both 5 GHz EHT and 6 GHz.** Tri-band EHT NEWPHY may be ambiguous. | medium | `util.inc` band model |
-| 9 | **`0x84` bit 9 is claimed but `beacon_prot=1` is never written.** | medium | `rsn_decide.h` / hostapd config |
+| 9 | ~~`0x84` bit 9 claimed but `beacon_prot=1` never written.~~ **Fixed in v0.6.9** (the generated 6 GHz config carries `beacon_prot=1`; AG54 shows `MFP: yes`). | closed | `rsn_decide.h` / hostapd config |
 | 10 | **QCN9074 x86 bring-up** needs firmware + `board-2.bin` and a 6 GHz-only hostapd path. Main has a wifi-scripts (ucode) fix for 6 GHz-only radios; 24.10 is shell-based, and the CAP bypasses netifd anyway. | medium | image/firmware; CAP config writer |
 | 11 | **No x86_64 capagent artifact.** | low | add `scripts/build-x86_64.sh` (aarch64 already exists) |
 | 12 | **`phy_hwtype()` reports `mt7915e`/`mt7996e`/`ath11k_pci`.** The manager may key band policy off it (F84). | low | test/spoof if needed |
@@ -374,18 +401,29 @@ descriptors, per-link EAPOL/keys, manager MLD config.
 
 ### Buy
 
-1. **Now, for a real 6 GHz HE CAP (recommended first purchase):**
-   **AsiaRF AW7916-NPD** (~$40) + mini PCIe→PCIe adapter (~$9) + a host.
-   The host can be a BPi-R4 (aarch64, existing `capagent-aarch64` works) or a
-   cheap x86_64 box running OpenWrt 24.10.5. Expect 2.4 + **6 GHz only**
-   (5 GHz disappears), HE, 160 MHz, LPI, no MLO. This closes the "real 6 GHz"
-   gate with the current CAP code.
-2. **Only if T6 passes, for EHT/MLO:** **BPi-R4 + BPI-R4-NIC-BE14**
-   (~$180–250 total) + an MT7925/BE200 client. This is the only documented
-   cheap 2.4+5+6 EHT/MLO OpenWrt bench.
-3. **Do not buy** Flint 3 (no official OpenWrt), WAX630E (not in 24.10),
-   Xiaomi/Redmi BE or MT7981/MT7986 routers for 6 GHz (no 6 GHz radio).
-   WAX630 is supported but is 2.4+5+5, not 6 GHz.
+1. **Shortest path to a real 6 GHz CAP with the current binary:**
+   **BPi-R4 + BPI-R4-NIC-BE14** (~$180–250) on **OpenWrt 24.10.5**
+   (aarch64). 24.10 already ships the `wifi-mt7996a` overlay and the MT7996
+   firmware; `capagent-aarch64` v0.6.9 runs unchanged. mt7996 exposes
+   `MT7996_MAX_INTERFACES=19` per band, so one 6 GHz radio + three virtuals
+   (four BSS) is well inside the driver limit. Use `6ghz-ax` HE at
+   20/40/80/160 and `CAPAGENT_PER_VAP=auto`; 6 GHz + dynamic provisioning is
+   already proven at protocol level (AG54). Verify `iw phy` shows the 6 GHz
+   band and 5955 MHz with `IR` under the lab country before provisioning.
+2. **Cheapest real 6 GHz HE CAP:** **AsiaRF AW7916-NPD** (~$40) + mini
+   PCIe→PCIe adapter (~$9) + BPi-R4 or a cheap x86_64 box on 24.10.5.
+   Expect 2.4 + **6 GHz only** (5 GHz disappears), HE, 160 MHz, LPI, no MLO;
+   mt7915 also exposes 19 interfaces, so 4 BSS is fine. This closes the
+   "real 6 GHz" gate for ~$50 + host if 5 GHz is not needed.
+3. **Only if T6 passes, for EHT/MLO:** the same **BPi-R4 + BE14** + an
+   MT7925/BE200 client, with hostapd 2.12 (or backport) and manager MLD
+   provisioning.
+4. **Do not buy** Flint 3 / GL-BE9300 (no OpenWrt device in main as of
+   2026-11-28), WAX630E (not in 24.10), Xiaomi/Redmi BE or MT7981/MT7986
+   routers for 6 GHz (no 6 GHz radio). WAX630 is supported but is 2.4+5+5,
+   not 6 GHz. QCN9074 is a valid 4×4 6 GHz-only HE card (ath11k, 16 vdevs)
+   but its firmware/`board-2.bin` bring-up and 6 GHz-only hostapd path make it
+   a longer project than BPi-R4+BE14.
 
 ### Build
 

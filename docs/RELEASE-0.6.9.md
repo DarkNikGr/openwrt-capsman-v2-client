@@ -68,10 +68,11 @@ phy0-ap3 2a:...:84  cap-iot        phy1-ap3 26:...:83  cap-hidden
 ## 6 GHz
 
 The same per-VAP transport is what makes 6 GHz work. On `mac80211_hwsim`, a
-**static 6 GHz master + 3 static virtuals** at 5955 MHz / 160 MHz
-(`6ghz-ax`, SAE + PMF) gives four `AP-ENABLED` BSSes and a station
-`authorized: yes` on the master and each virtual (F91). Stock hostapd
-multi-BSS fails on this stack; one hostapd per VAP is required.
+**normal provisioning rule** (dynamic master + 3 `slave-configurations`, no
+static interfaces) on one 6 GHz radio at 5955 MHz / 160 MHz (`6ghz-ax`,
+SAE + PMF) gives four `AP-ENABLED` BSSes and a station `authorized: yes` on
+the master and each virtual; 20/40/80/160 all pass with ping 0% (F91, AG54).
+Stock hostapd multi-BSS fails on this stack; one hostapd per VAP is required.
 
 The reference Xiaomi has **no 6 GHz radio**, so this remains a virtual-radio
 proof. Real 6 GHz RF/AFC needs a 6E/7 board; see
