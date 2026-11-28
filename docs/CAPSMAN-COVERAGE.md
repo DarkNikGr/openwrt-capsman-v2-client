@@ -49,7 +49,7 @@ Legend:
 | `hide-ssid=yes` | ✅ live | `cap-hidden` is not in scan results |
 | `security` (see below) | ✅ live | RSN IE from the manager, byte-identical |
 | `datapath` (see below) | ✅ live | VLAN per VAP |
-| `channel.frequency`, `band`, `width` (20/40/80) | ✅ live | `hw_mode`/`channel`/`ht_capab` derived. 6 GHz `6ghz-ax` is live at 20/40/80/160 on the virtual radio with descriptor band `0x04` (160 = width 5, not 4); `6ghz-be` uses `0x06` for EHT. 320 is accepted by the manager but not encoded by hostapd (F89) |
+| `channel.frequency`, `band`, `width` (20/40/80) | ✅ live | `hw_mode`/`channel`/`ht_capab` derived. 6 GHz `6ghz-ax` is live at 20/40/80/160 on the virtual radio with descriptor band `0x04` (160 = width 5, not 4); `6ghz-be` uses `0x06` for EHT. 320 MHz EHT is encoded by v0.6.8 (`op_class=137`, `eht_oper_chwidth=9`, F89) |
 | `country` | ➖ not provisioned | CAPsMAN v2 sends no regulatory country; the CAP uses `--country` |
 | `dtim-period` | ✅ live | `0x6016` TLV `0x24` (u32) written as `dtim_period=` in that BSS only |
 | `tx-power` (configuration) | 🟡 applied, driver pins it | manager sends `0x500b` TLV `0x61`; the agent calls `NL80211_CMD_SET_WIPHY` (`ret=0`). The reference mt76 driver keeps reporting 20 dBm for every value, so it is a no-op on this hardware |
@@ -102,8 +102,8 @@ Legend:
 | Setting | Status | Evidence / why |
 |---|---|---|
 | `action=create-dynamic-enabled` | ✅ live | 8 VAPs from two rules, or 8 masters from eight fake-radio rules (multi-identity/solo) |
-| `master-configuration` + `slave-configurations` | ✅ live | 1 master + 3 virtuals per radio; virtuals broadcast but do not authenticate (F58–F60). Solo/multi-identity: 8 masters, all authenticate |
-| `radio-mac` | ✅ live | matched against NEWPHY; on 5 GHz each fake radio must use a distinct first byte (F74) |
+| `master-configuration` + `slave-configurations` | ✅ **live** | 1 master + 3 virtuals per radio, all four authenticate. 2.4 GHz uses the manager's BSSIDs; 5 GHz uses **static** virtuals whose bytes 1..5 equal the real base (`2E/22/26:...:83`) plus one hostapd per VAP (F90). Dynamic 5 GHz slaves (`2A:...:85/86/87`) still do not work on mt76x02 (same byte 0 and a different base suffix). Solo/multi-identity: 8 masters |
+| `radio-mac` | ✅ live | matched against NEWPHY; on 5 GHz the real radio can host a static master+3 virtuals with a base-suffix MAC set (F90); a fake-radio layout needs a distinct first byte per radio (F74) |
 | `require-peer-certificate=no` | ✅ live | zero-touch enrolment (`0x76` → `0x77`/`0x78`) |
 | `enabled=yes`, `generated-ca-certificate` | ✅ live | the CAP pins the CA when `--ca-cert` is present |
 | Manager discovery via DHCP option 138 | ✅ live | `/etc/udhcpc.user.d/99-cap-dhcp138` decodes it into `/tmp/cap-manager`; `10.0.0.1` there and `MANAGER=auto` works |
@@ -111,7 +111,7 @@ Legend:
 | ACL / `access-list` | ✅ **live (manager-side)** | `access-list action=reject` (all) → station cannot associate (`NOT CONNECTED`); removing it → `authorized: yes`, ping 3/3 0%. The manager filters before the CAP, so no CAP change is needed |
 | 802.11k steering hints | ✅ **live on a virtual station** | `CAPAGENT_RRM=1` advertises the RM element, patch `9999f` relays the station's Beacon Report as `0x2018`, `9999i` keeps the short RM IE: `rrm-capa=0x70`, `Beacon report token 1`, `0x2018 action len=235` (F69/F71). The Intel 3168 still drops the RM IE |
 | 802.11v / BTM | ✅ **live on the virtual bench** | a steering group + `CAPAGENT_FAKE_RSSI=-80` makes the manager send a BTM Request (`0x2019 action len=49`); patch `9999j` relays the BTM Response (`0x2018 action len=29`) (F67). RouterOS 7.25.1 sends no FT MD |
-| 6 GHz | ✅ virtual radio (no 6 GHz on the Xiaomi) | `mac80211_hwsim` at 5955: `6ghz-ax` 20/40/80/**160** (width 5) gives `5955/ax`, VAP `MDB`, SAE station `authorized: yes` + ping 0%; `6ghz-be` (`0x06`) works at 160 for EHT (F85). 320 is manager-accepted but hostapd runs 20 MHz (F89). The Xiaomi has no 6 GHz hardware; real RF/AFC untested |
+| 6 GHz | ✅ virtual radio (no 6 GHz on the Xiaomi) | `mac80211_hwsim` at 5955: one radio + **3 static virtuals** at **160 MHz** (`6ghz-ax`, SAE+PMF), all four BSSes `AP-ENABLED` and a station `authorized: yes` on the master and each virtual, with one hostapd per VAP (F91). 320 MHz EHT is encoded (`op_class=137`, `ieee80211be=1`, `eht_oper_chwidth=9`) and manager-accepted; real RF is untested (F89). The Xiaomi has no 6 GHz hardware; use a 6E/7 board (`docs/HARDWARE-6GHZ-MLO-PLAN.md`) |
 | MLO / EHT multi-link | ➖ not implemented | no MLD is established; the Deco BE65 stays read-only |
 | Sniffer (`/tool sniffer` over CAPsMAN) | ➖ not exposed | no sniffer provisioning reaches the CAP |
 

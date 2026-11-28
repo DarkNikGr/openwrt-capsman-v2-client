@@ -1,10 +1,11 @@
 # Release notes index
 
-Current release: **v0.6.8**. The version is stored in
+Current release: **v0.6.9**. The version is stored in
 [`../VERSION`](../VERSION) and printed by `capagent --version`.
 
 | Release | Headline |
 |---|---|
+| [`0.6.9`](RELEASE-0.6.9.md) | real 5 GHz radio + 3 slaves, no fake radios (F90); 6 GHz 1 radio + 3 virtuals (F91) |
 | [`0.6.8`](RELEASE-0.6.8.md) | 6 GHz 320 MHz EHT encoding (F89 fixed) |
 | [`0.6.7`](RELEASE-0.6.7.md) | 6 GHz 160 MHz (`6ghz-ax` + EHT `6ghz-be`), 0x4d dedupe, `beacon_prot` |
 | [`0.6.6`](RELEASE-0.6.6.md) | `6ghz-ax` live, datachan/OWE hardening, honest `--version` |

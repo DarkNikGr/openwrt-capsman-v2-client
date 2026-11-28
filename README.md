@@ -1,6 +1,6 @@
 # MikroTik CAPsMAN v2 client for OpenWrt
 
-**v0.6.8** — see [`docs/RELEASE-0.6.8.md`](docs/RELEASE-0.6.8.md) and the
+**v0.6.9** — see [`docs/RELEASE-0.6.9.md`](docs/RELEASE-0.6.9.md) and the
 [release index](docs/RELEASES.md). Canonical documentation index:
 [`docs/README.md`](docs/README.md).
 
@@ -25,18 +25,19 @@ OpenWrt 24.10, MediaTek MT7603E + MT7612E), managed by an
 > | Proof | Evidence |
 > |---|---|
 > | Manager provisions every VAP | `0x500b` + `0x6016` for 8 VAPs, `0xd00b` accepted |
-> | **8/8 SSIDs** | `ssids=8`; eight fake radios in solo mode, or 2 radios × 4 `bss=` in single-identity mode |
-> | **All 8 SSIDs authenticate** | solo: one `cap=OpenWrt-CAPSOLO` with 8 radios, or multi-identity: 4 identities per phy, each SSID a master (F74); `authorized: yes`, ping 0% on all eight, also after a cold reboot |
+> | **8/8 SSIDs** | `ssids=8` on **2 real radios, no fake**: 2.4 GHz master+3 manager slaves, 5 GHz static master+3 virtuals (`2E/22/26:...:83`) |
+> | **All 8 SSIDs authenticate** | 2.4 GHz 4/4 + 5 GHz 4/4 (`authorized: yes` on the master and all slaves), also after a cold reboot; `CAPAGENT_PER_VAP=auto`, one hostapd per 5/6 GHz BSS (F90) |
 > | **No PSK on the CAP** | `external_rsn_auth=1`, no `wpa_passphrase`/`wpa_psk_file` |
 > | **Manager is the authenticator** | EAPOL `0x201c` (M1) → `0x201b` (M2) → `0x201f` PTK |
 > | **Station authorized** | `authorized: yes`, `authenticated: yes`, -38 dBm |
 > | **Traffic works** | `ping` 3/3, 0% loss over the manager's VLAN |
 > | **Factory reset** | `sysupgrade -n` → boot → self-enrolment → 8/8, no manual step |
 >
-> How it works, in one line: one hostapd **per radio** with `bss=` sections runs
-> as capagent's own child; the master BSS netdev belongs to the CAP, the
-> secondaries are handed to hostapd; hostapd relays the raw Auth/AssocReq and
-> the EAPOL exchange, and never holds a key.
+> How it works, in one line: 2.4 GHz uses one hostapd per radio with `bss=`
+> sections; 5/6 GHz uses one hostapd **per VAP** (`CAPAGENT_PER_VAP=auto`)
+> because mt76x02 and the 6 GHz hostapd stack do not deliver auth to a
+> multi-BSS secondary. hostapd relays the raw Auth/AssocReq and the EAPOL
+> exchange, and never holds a key.
 >
 > The patched `wpad` (patches `999`/`9997`/`9998`/`9999`/`9999a`–`9999j`) is
 > built by [`scripts/build-wpad-9999a.sh`](scripts/build-wpad-9999a.sh); the
@@ -44,15 +45,15 @@ OpenWrt 24.10, MediaTek MT7603E + MT7612E), managed by an
 >
 > ### What is still open (not blocking the above)
 >
-> * **One CAP / eight radios ("solo") is the proven topology.** One capagent
->   advertises all eight fake radios in one TLS session (`IDENTITY=OpenWrt-CAPSOLO`,
->   `MACS=…`, `PHYS=0,0,0,0,1,1,1,1`), so the manager shows a single
->   `cap=OpenWrt-CAPSOLO` with 8 radios. After a **cold reboot** all eight
->   station tests are `authorized: yes`, 3/3, 0% (v0.6.8). The eight-identity
->   fallback (`/etc/cap/identities.conf`, one CAP entry per SSID) still works.
->   The plain single-identity default (`MACS=auto`) still broadcasts all eight
->   SSIDs but only the master BSS per radio authenticates (F58–F60); use solo
->   or multi-identity when every SSID must authenticate.
+> * **The no-fake 2-radio layout is now the proven default.** 2.4 GHz is a
+>   master + 3 manager slaves; 5 GHz is a static master + 3 static virtuals
+>   whose byte 0 differs but whose bytes 1..5 equal the real radio base
+>   (`2E/22/26:D1:27:1B:2D:83`). The manager sees exactly two radios and eight
+>   VAPs; all eight authenticate after a cold reboot (v0.6.9, F90). The older
+>   one-CAP/eight-radio **solo** mode and the eight-identity fallback
+>   (`/etc/cap/identities.conf`) still work, but are no longer required.
+>   RouterOS dynamic 5 GHz slaves (`2A:...:85/86/87`) cannot authenticate on
+>   mt76x02: they share byte 0 and their suffix differs from the base.
 > * **`MANAGER=auto` works through DHCP option 138.** The image's
 >   `/etc/udhcpc.user.d/99-cap-dhcp138` hook decodes the option into
 >   `/tmp/cap-manager`; with `10.0.0.1` in that file the agent uses it. Baking
@@ -65,13 +66,15 @@ OpenWrt 24.10, MediaTek MT7603E + MT7612E), managed by an
 >   Beacon report token 1, relayed as `0x2018 action len=235` (F69/F71).
 >   802.11v/BTM: request `0x2019 action len=49`, response `0x2018 action
 >   len=29` (F67). The bench Intel 3168 still drops the RM IE.
-> * **6 GHz `6ghz-ax` is live on `mac80211_hwsim` at 20/40/80/160** (SAE,
->   ping 0%). The manager matches the descriptor band byte, not the NEWPHY
->   label: `0x04` gives `5955/ax`, `0x06` gives `6ghz-be` for EHT (F85);
->   160 MHz is descriptor width 5, not 4. A SAE station is
->   `authorized: yes` with 0% loss; `6ghz-be` 160 works on EHT hwsim. 320 is
->   manager-accepted but hostapd runs 20 MHz (F89). The reference Xiaomi has
->   no 6 GHz hardware; real RF/AFC are untested.
+> * **6 GHz works on hwsim as one radio + 3 static virtuals** at 5955 MHz /
+>   160 MHz (`6ghz-ax`, SAE+PMF), one hostapd per VAP, all four BSSes
+>   `AP-ENABLED` and a station `authorized: yes` on the master and each
+>   virtual (F91). The manager matches the descriptor band byte, not the
+>   NEWPHY label: `0x04` gives `5955/ax`, `0x06` gives `6ghz-be` for EHT
+>   (F85); 160 MHz is descriptor width 5, not 4. 320 MHz EHT is encoded
+>   (`op_class=137`, `eht_oper_chwidth=9`, F89) and manager-accepted. The
+>   reference Xiaomi has no 6 GHz radio, so real RF/AFC needs a 6E/7 board
+>   (Flint 3/ath12k; see `docs/HARDWARE-6GHZ-MLO-PLAN.md`).
 > * **OWE is live.** RouterOS 7.25.1 never sends a DH-bearing `0x6019`, so a
 >   pure-OWE VAP is completed by the CAP's own hostapd while the manager still
 >   provisions SSID/security/channel/VLAN. A station does the OWE DH, the
@@ -186,7 +189,7 @@ control plane; only the data path differs.
 
 ## Status
 
-Last updated 2026-11-28 against `main` (v0.6.8). "Live" means the reference Xiaomi
+Last updated 2026-11-28 against `main` (v0.6.9). "Live" means the reference Xiaomi
 Mi Router 4A + RB1100AHx4 / RouterOS 7.25.1; "lab" means CHR 7.25.1 + hwsim.
 
 | Capability | State |
@@ -198,8 +201,9 @@ Mi Router 4A + RB1100AHx4 / RouterOS 7.25.1; "lab" means CHR 7.25.1 + hwsim.
 | VAP create (`0x500b` → `0xd00b`) with a real ifindex | ✅ live 8/8 |
 | VAP destroy (`0x600c`): hostapd stop, netdev delete, vapid release, orphan reaping | ✅ live 3 cycles × 8 VAPs, 0 failures |
 | Manager-only VAP creation (zero `wifi-iface`) | ✅ live 8/8 |
+| Two real radios, 8 SSIDs, no fake (2.4 master+3 slaves, 5G static master+3 virtuals) | ✅ live: 8/8 `authorized: yes`, also after a cold reboot (F90) |
 | One CAP with eight radios (solo) | ✅ live after a cold reboot: one `cap=OpenWrt-CAPSOLO`, 8 radios, 8 SSIDs, all eight `authorized: yes`, 3/3, 0% |
-| One hostapd per radio with `bss=` (`external_rsn_auth=1`, **no PSK**) | ✅ live: 2 processes, `hostapd up with 4 BSS(es)` each |
+| One hostapd per radio with `bss=` on 2.4, one hostapd per VAP on 5/6 GHz (`external_rsn_auth=1`, **no PSK**) | ✅ live: 2.4 multi-BSS + 4 per-VAP 5 GHz hostapds; 8/8 `AP-ENABLED` (F90) |
 | RSN IE override (`external_rsn_ie`) — beacon == manager M3 | ✅ lab byte-for-byte; live station connects with no IE mismatch |
 | Per-BSS start on both radios (`SET_INTERFACE -EALREADY`, `noscan`, regulatory) | ✅ live 8/8 `AP-ENABLED`; `9999d` tolerates `-EALREADY` |
 | VLAN push (`0x500b` `0x7d`) | ✅ live |
@@ -491,7 +495,7 @@ wifi-scripts package recipe, the patch-series check and the recorded hashes,
 see [`docs/BUILD.md`](docs/BUILD.md). The build is reproducible: two clean
 clones of the same commit produce the same binary.
 
-The version is printed by `capagent --version` (`0.6.8`) and stored in
+The version is printed by `capagent --version` (`0.6.9`) and stored in
 `VERSION`. Output: `dist/capagent-mipsel` / `dist/capagent-aarch64` (static,
 stripped). `dist/` is a local, gitignored build directory; published binaries
 live under

@@ -8,12 +8,32 @@
  * uninterruptible state D, and the BSSes died within a second although each
  * had reached AP-ENABLED.  OpenWrt/netifd runs a single hostapd per phy with
  * `interface=` plus `bss=` sections, which is what this does.
+ *
+ * Exception: a 5/6 GHz phy cannot always bring up a secondary BSS from a
+ * shared `bss=` config.  mt76x2e rejects the manager's secondary BSSID
+ * (F73/F66); the 6 GHz stack fails in the driver with "Authentication
+ * algorithm number required"/"Failed to add BSS" (ag42/ag44).  The solo and
+ * 8-radio runs prove that one single-BSS hostapd per interface works on the
+ * same phy.  vap_phy_apply_per_vap() therefore starts one such process per
+ * journaled 5/6 GHz row, spaced and ack-gated exactly like solo.  2.4 GHz
+ * keeps the shared multi-BSS config below.
+ *
+ * Knob: CAPAGENT_PER_VAP=auto|yes|no (CAPAGENT_5G_PER_VAP is an alias).
+ *   auto (default)  per-VAP for a phy with any journaled row >= 4900 MHz
+ *                   (5 or 6 GHz); shared multi-BSS for 2.4-only phys.
+ *   yes             force per-VAP for every phy (2.4 included; test only).
+ *   no              always use the shared multi-BSS config.
  */
 
 /* A second capagent instance (a distinct CAP identity for the same wiphy, see
  * the multi-identity experiment) must not share the per-phy config/pid/log
  * paths with the first one.  CAPAGENT_RUN_TAG adds a suffix to them. */
 static int vap_netdev_setmaster(int ifindex, int master_ifindex);
+static int vap_phy_row_cfg(const struct own_entry *e, int phy);
+static int vap_phy_name_of(const char *name, int phy);
+static uint32_t vap_chan_freq(const struct own_entry *e);
+static pid_t vap_pervap_title_pid(const char *ifname);
+static void vap_pervap_stop_phy(int phy);
 
 static const char *vap_run_tag(void)
 {
@@ -85,6 +105,100 @@ static int vap_proc_is_hostapd(pid_t pid)
 
 /* pid_is_zombie() lives in ownership.inc (shared with own_pid_alive). */
 
+/* Knob parser: -1 auto, 0 shared multi-BSS, 1 one hostapd per BSS.
+ * CAPAGENT_PER_VAP wins; CAPAGENT_5G_PER_VAP is the historical alias the
+ * ag37 prototype used, so an existing /etc/cap/capagent.conf keeps working.
+ * Unknown values fall back to auto and say so once (a typo must not silently
+ * disable the 6 GHz workaround). */
+static int vap_pervap_env(void)
+{
+    const char *v = getenv("CAPAGENT_PER_VAP");
+    static int warned;
+    if (!v || !*v) v = getenv("CAPAGENT_5G_PER_VAP");
+    if (!v || !*v) return -1;
+    if (!strcasecmp(v, "auto")) return -1;
+    if (!strcasecmp(v, "yes") || !strcasecmp(v, "on") ||
+        !strcasecmp(v, "true") || !strcmp(v, "1"))
+        return 1;
+    if (!strcasecmp(v, "no") || !strcasecmp(v, "off") ||
+        !strcasecmp(v, "false") || !strcmp(v, "0"))
+        return 0;
+    if (!warned) {
+        printf("vap: unknown CAPAGENT_PER_VAP='%s', using auto\n", v);
+        fflush(stdout);
+        warned = 1;
+    }
+    return -1;
+}
+
+/* One hostapd process per BSS on this phy.  Auto-detection is journal-based,
+ * not driver-based: any row on the phy that the manager provisioned for
+ * 5/6 GHz selects per-VAP, so mt76x02 5 GHz, 6 GHz (mt7915/mt7996/wifi6/7
+ * and hwsim) all get the layout that works, while a 2.4-only phy keeps the
+ * single multi-BSS hostapd.  The row's own 0x6016 0x0a descriptor is used
+ * (a secondary's 0x500b may carry a placeholder 2412 MHz); e->freq is the
+ * fallback for a body without 0x0a. */
+static int vap_pervap_wanted(int phy)
+{
+    int force = vap_pervap_env();
+
+    if (force >= 0) return force;
+    for (int i = 0; i < OWN_MAX; i++) {
+        struct own_entry *e = &g_own[i];
+        if (!vap_phy_row_cfg(e, phy)) continue;
+        if (vap_chan_freq(e) >= 4900) return 1;
+    }
+    return 0;
+}
+
+/* Pid of the single-BSS hostapd for one interface.  The per-VAP files use
+ * the historical vap-<ifname> names: the ifname is a real netdev, so
+ * own_adopt_pidfiles()/own_cleanup_stale() handle a crash correctly (unlike
+ * the phy-wide vap-phyN.pid, whose name has no netdev). */
+static pid_t vap_pervap_pid(const char *ifname)
+{
+    char conf[128], pidf[128];
+    FILE *f;
+    long fpid = 0;
+
+    if (!ifname || !*ifname) return 0;
+    vap_paths(ifname, conf, sizeof(conf), pidf, sizeof(pidf));
+    f = fopen(pidf, "r");
+    if (f) {
+        int got = fscanf(f, "%ld", &fpid);
+        fclose(f);
+        if (got == 1 && fpid > 0) {
+            if (pid_is_zombie((pid_t)fpid)) {
+                int wst;
+                waitpid((pid_t)fpid, &wst, WNOHANG);
+            } else if (kill((pid_t)fpid, 0) == 0 || errno == EPERM) {
+                /* Verify the pid really is *this* BSS: the config path
+                 * (before hostapd rewrites argv) or the exact title
+                 * "hostapd: <ifname>" (after).  A recycled pid that belongs
+                 * to another hostapd must never be returned or killed. */
+                if (vap_proc_has_conf((pid_t)fpid, conf) ||
+                    vap_pervap_title_pid(ifname) == (pid_t)fpid)
+                    return (pid_t)fpid;
+            }
+        }
+    }
+    /* hostapd may leave the -P file empty; fall back to the exact config
+     * path in /proc (works for the pre-rewrite window and -dd runs). */
+    DIR *d = opendir("/proc");
+    if (!d) return 0;
+    struct dirent *de;
+    pid_t found = 0;
+    while ((de = readdir(d))) {
+        char *end = NULL;
+        long c = strtol(de->d_name, &end, 10);
+        if (!end || *end || c <= 0) continue;
+        if (pid_is_zombie((pid_t)c)) continue;
+        if (vap_proc_has_conf((pid_t)c, conf)) { found = (pid_t)c; break; }
+    }
+    closedir(d);
+    return found;
+}
+
 static pid_t vap_phy_pid(int phy)
 {
     char conf[128], pidf[128], logf[128];
@@ -133,6 +247,13 @@ static pid_t vap_phy_pid_for_ifname(const char *ifname)
         sscanf(ifname, "cap%d-%d%c", &phy, &w, &tail) != 2)
         return 0;
     if (phy < 0 || phy >= MAX_RADIOS) return 0;
+    /* Per-VAP mode: this ifname has its own single-BSS hostapd.  A per-VAP
+     * pid file only exists for a real netdev name, so the check is safe in
+     * shared mode too (there it simply finds nothing). */
+    {
+        pid_t pv = vap_pervap_pid(ifname);
+        if (pv > 0) return pv;
+    }
     pid_t pid = vap_phy_pid(phy);
     if (pid <= 0) return 0;
     char p[64], b[64];
@@ -146,8 +267,129 @@ static pid_t vap_phy_pid_for_ifname(const char *ifname)
     return !strncmp(b, "hostapd", 7) ? pid : 0;
 }
 
+/* Exact /proc title lookup for a single-BSS hostapd after it rewrote argv
+ * ("hostapd: <ifname>").  This is stricter than vap_find_hostapd()'s
+ * substring scan on purpose: with a shared multi-BSS hostapd the title names
+ * only the primary interface, and a substring match could kill the whole
+ * radio from a per-row stop path. */
+static pid_t vap_pervap_title_pid(const char *ifname)
+{
+    DIR *d = opendir("/proc");
+    if (!d) return 0;
+    struct dirent *de;
+    pid_t found = 0;
+    size_t nl = strlen(ifname);
+    while ((de = readdir(d))) {
+        char *end = NULL;
+        long c = strtol(de->d_name, &end, 10);
+        char p[64], buf[512];
+        const char *t = NULL;
+        ssize_t n;
+        int fd;
+        if (!end || *end || c <= 0 || pid_is_zombie((pid_t)c)) continue;
+        if (!vap_proc_is_hostapd((pid_t)c)) continue;
+        snprintf(p, sizeof(p), "/proc/%ld/cmdline", c);
+        fd = open(p, O_RDONLY);
+        if (fd < 0) continue;
+        n = read(fd, buf, sizeof(buf) - 1);
+        close(fd);
+        if (n <= 0) continue;
+        buf[n] = 0;
+        if (!strncmp(buf, "hostapd: ", 9)) t = buf + 9;
+        else if (!strncmp(buf, "wpad: ", 6)) t = buf + 6;
+        if (t && strlen(t) >= nl && !strncmp(t, ifname, nl) &&
+            (t[nl] == 0 || t[nl] == ' ')) {
+            found = (pid_t)c;
+            break;
+        }
+    }
+    closedir(d);
+    return found;
+}
+
+/* Stop one per-VAP hostapd and remove its pid file.  Resolve the pid exactly
+ * as the start path does (pid file, then our config path in /proc, then the
+ * exact process title), so a pidfile that was already unlinked or emptied
+ * cannot hide a live process on the netdev.  Without this the next start
+ * inherited a stale daemon on the same vif and failed with "Could not
+ * configure driver mode". */
+static void vap_pervap_stop_ifname(const char *ifname)
+{
+    char conf[128], pidf[128];
+    pid_t pid, hp;
+
+    if (!ifname || !*ifname || !own_name_ok(ifname)) return;
+    vap_paths(ifname, conf, sizeof(conf), pidf, sizeof(pidf));
+    pid = vap_pervap_pid(ifname);
+    if (pid > 0) {
+        printf("vap: stopping per-VAP hostapd %s pid=%d\n", ifname, (int)pid);
+        fflush(stdout);
+        own_stop_pid((int)pid);
+    }
+    /* The daemon may have rewritten its title and lost the -P file; the
+     * exact title scan finds it too. */
+    hp = vap_pervap_title_pid(ifname);
+    if (hp > 0 && hp != pid) {
+        printf("vap: stopping untracked per-VAP hostapd %s pid=%d\n",
+               ifname, (int)hp);
+        fflush(stdout);
+        own_stop_pid((int)hp);
+    }
+    unlink(pidf);
+}
+
+/* Every per-VAP hostapd of one real phy: the journal rows, every netdev the
+ * phy currently exposes under a capagent name, and any vap-*.pid left by an
+ * older journal/slot.  Called before a phy rebuild, a width change and a
+ * mode switch, so no stale process can own the radio or a vif. */
+static void vap_pervap_stop_phy(int phy)
+{
+    char dirp[128];
+
+    for (int i = 0; i < OWN_MAX; i++) {
+        struct own_entry *e = &g_own[i];
+        if (!e->used || !e->ifname[0] || (e->port >> 8) != phy) continue;
+        vap_pervap_stop_ifname(e->ifname);
+    }
+    snprintf(dirp, sizeof(dirp), "/sys/class/ieee80211/phy%d/device/net",
+             real_phy(phy));
+    DIR *d = opendir(dirp);
+    if (d) {
+        struct dirent *de;
+        while ((de = readdir(d))) {
+            if (de->d_name[0] == '.') continue;
+            if (!vap_phy_name_of(de->d_name, phy)) continue;
+            vap_pervap_stop_ifname(de->d_name);
+        }
+        closedir(d);
+    }
+    d = opendir("/var/run");
+    if (d) {
+        struct dirent *de;
+        while ((de = readdir(d))) {
+            size_t l = strlen(de->d_name);
+            char nm[OWN_NAME_MAX];
+            if (l < 9 || strncmp(de->d_name, "vap-", 4) ||
+                strcmp(de->d_name + l - 4, ".pid"))
+                continue;
+            if (l - 4 >= sizeof(nm)) continue;
+            memcpy(nm, de->d_name + 4, l - 4 - 4);
+            nm[l - 4 - 4] = 0;
+            if (!vap_phy_name_of(nm, phy)) continue;
+            vap_pervap_stop_ifname(nm);
+        }
+        closedir(d);
+    }
+    own_reap_children();
+}
+
 static void vap_phy_stop(int phy)
 {
+    /* Per-VAP mode: one hostapd per journaled BSS.  Stop every one (and any
+     * stale one) before a teardown/rejoin; an incremental vap_phy_apply()
+     * never reaches here.  In shared mode this also cleans a phy that is
+     * switching back from per-VAP. */
+    vap_pervap_stop_phy(phy);
     pid_t pid = vap_phy_pid(phy);
     if (pid > 0) {
         printf("vap: stopping phy%d hostapd pid=%d\n", phy, (int)pid);
@@ -172,15 +414,61 @@ static void vap_phy_stop(int phy)
     }
 }
 
-/* Write the per-BSS options from a journal row. */
+/* Logger options are global: hostapd only honours them before the first
+ * interface=/bss= section. */
+static void vap_phy_logger(FILE *f)
+{
+    if (getenv("CAPAGENT_HOSTAPD_DEBUG"))
+        /* stdout to a file is block-buffered, so a long-running hostapd
+         * leaves its last lines unwritten and every diagnostic read from
+         * /tmp/vap-phyN.log is truncated.  Syslog is flushed per message, so
+         * the debug build logs there too and `logread` is the real trace. */
+        fprintf(f, "logger_syslog=0\nlogger_syslog_level=1\n"
+                   "logger_stdout=-1\nlogger_stdout_level=0\n");
+}
+
+/* The channel context a BSS must use.  The manager repeats the chosen
+ * channel descriptor in the 0x6016 body's 0x0a element (0x0b freq, 0x0c
+ * width, 0x10 band).  A secondary VAP's 0x500b request often carries a
+ * placeholder (2412 MHz on a 6 GHz profile), so the start body is
+ * authoritative when it has a frequency; e->freq is only the fallback. */
+static uint32_t vap_chan_freq(const struct own_entry *e)
+{
+    const uint8_t *chv = NULL;
+    uint16_t cl = 0, p = 0;
+    if (find_el(e->start, e->start_len, 0x0a, &chv, &cl)) {
+        while (p + 4 <= cl) {
+            uint16_t t = rd16(chv + p), l = rd16(chv + p + 2);
+            p += 4;
+            if (p + l > cl) break;
+            if (t == 0x0b && l == 4) {
+                uint32_t f = rd32(chv + p);
+                if (f) return f;
+            }
+            p += l;
+        }
+    }
+    return e->freq;
+}
+
+/* Write the per-BSS options from a journal row.  per_vap=1 writes a
+ * single-interface config (one hostapd process per BSS): no bridge= because
+ * several hostapd processes on one real phy cannot open a bridged AP vif
+ * while a sibling AP is already up; those BSSes are bridged after start.
+ * chan_src supplies the channel context (freq + 0x0a width/band): the
+ * per-VAP writer passes the master row for every BSS, so all processes start
+ * on the radio's real channel instead of a sibling's placeholder 0x500b. */
 static void vap_phy_bss(FILE *f, const char *kw, const struct own_entry *e,
-                        const struct cfg *c, int is_first)
+                        const struct cfg *c, int is_first, int per_vap,
+                        const struct own_entry *chan_src)
 {
     const uint8_t *ssid = NULL, *ie = NULL, *chv = NULL;
     uint16_t sl = 0, il = 0, cl = 0;
+    const struct own_entry *ch = chan_src ? chan_src : e;
+    uint32_t chan_freq = vap_chan_freq(ch);
     find_el(e->start, e->start_len, 0x03, &ssid, &sl);
     find_el(e->start, e->start_len, 0x04, &ie, &il);
-    find_el(e->start, e->start_len, 0x0a, &chv, &cl);
+    find_el(ch->start, ch->start_len, 0x0a, &chv, &cl);
     const uint8_t *dtv = NULL;
     uint16_t dtl = 0;
     find_el(e->start, e->start_len, 0x24, &dtv, &dtl);
@@ -195,7 +483,7 @@ static void vap_phy_bss(FILE *f, const char *kw, const struct own_entry *e,
      * claim is only a join gate.  hostapd requires PMF, and the option
      * name is beacon_prot in the 2.10+ sample config; probe the binary so
      * an older/patched hostapd cannot make the whole phy config invalid. */
-    if (e->freq >= 5925 && rp.wpa && rp.ieee80211w &&
+    if (chan_freq >= 5925 && rp.wpa && rp.ieee80211w &&
         hostapd_has_opt("beacon_prot"))
         rp.beacon_prot = 1;
     if (rp.ft) {
@@ -214,14 +502,23 @@ static void vap_phy_bss(FILE *f, const char *kw, const struct own_entry *e,
     /* CAPsMAN assigns each VAP its BSSID and drops management frames whose
      * addr1/addr3 is not it (FINDINGS T13).  The driver derives its own
      * addresses for secondary BSSes, so hand hostapd the manager's address
-     * explicitly; it applies it when it creates the interface. */
+     * explicitly; it applies it when it creates the interface.  This is the
+     * ONLY bssid= line: the old code wrote mgr_bssid here and e->bssid later,
+     * and the later line silently overrode the manager's slave BSSID. */
     {
         struct vap *vp = vap_get(e->port >> 8, e->port & 0xff);
+        const uint8_t *bss = e->bssid;
         if (vp && (vp->mgr_bssid[0] | vp->mgr_bssid[1] | vp->mgr_bssid[2] |
                    vp->mgr_bssid[3] | vp->mgr_bssid[4] | vp->mgr_bssid[5]))
-            fprintf(f, "bssid=%02x:%02x:%02x:%02x:%02x:%02x\n",
-                    vp->mgr_bssid[0], vp->mgr_bssid[1], vp->mgr_bssid[2],
-                    vp->mgr_bssid[3], vp->mgr_bssid[4], vp->mgr_bssid[5]);
+            bss = vp->mgr_bssid;
+        fprintf(f, "bssid=%02x:%02x:%02x:%02x:%02x:%02x\n",
+                bss[0], bss[1], bss[2], bss[3], bss[4], bss[5]);
+        if (vp && bss == vp->mgr_bssid && memcmp(vp->mgr_bssid, e->bssid, 6))
+            printf("vap: %s: hostapd BSSID = manager's "
+                   "%02x:%02x:%02x:%02x:%02x:%02x (was %02x:%02x:%02x:%02x:%02x:%02x)\n",
+                   e->ifname, bss[0], bss[1], bss[2], bss[3], bss[4], bss[5],
+                   e->bssid[0], e->bssid[1], e->bssid[2], e->bssid[3],
+                   e->bssid[4], e->bssid[5]);
     }
     /* ctrl_interface must be repeated in EVERY section: hostapd only creates
      * /var/run/hostapd/<ifname> for the BSSes that carry it, and without that
@@ -233,8 +530,8 @@ static void vap_phy_bss(FILE *f, const char *kw, const struct own_entry *e,
                 c->ext_ctrl_dir ? c->ext_ctrl_dir : c->ext_auth_dir);
     if (is_first) {
         fprintf(f, "driver=nl80211\nauth_algs=1\n");
-        vap_write_channel(f, e->freq, vap_mgr_width(chv, cl),
-                          e->freq >= 5925 && phy_has_eht(e->port >> 8) &&
+        vap_write_channel(f, chan_freq, vap_mgr_width(chv, cl),
+                          chan_freq >= 5925 && phy_has_eht(ch->port >> 8) &&
                           hostapd_has_eht());
     }
     /* dtim-period is per VAP (0x6016 TLV 0x24, a u32). */
@@ -248,16 +545,13 @@ static void vap_phy_bss(FILE *f, const char *kw, const struct own_entry *e,
      * manager does not send RRM caps in 0x6016, so this is opt-in. */
     if (getenv("CAPAGENT_RRM"))
         fprintf(f, "rrm_neighbor_report=1\nrrm_beacon_report=1\n");
-    fprintf(f, "bssid=%02x:%02x:%02x:%02x:%02x:%02x\n",
-            e->bssid[0], e->bssid[1], e->bssid[2], e->bssid[3],
-            e->bssid[4], e->bssid[5]);
     /* With one hostapd per phy the kernel can bridge the interface while
      * hostapd brings it up.  When several capagent instances share the phy
      * (multi-identity, CAPAGENT_RUN_TAG) or several logical radios share one
      * real phy (solo), opening a bridged AP vif on a phy that already has a
      * running AP returns EBUSY on the 5 GHz driver, so those BSSes bridge
      * after hostapd is up. */
-    if (bridge[0] && !*ap_tag() && !getenv("CAPAGENT_NO_BRIDGE") &&
+    if (bridge[0] && !per_vap && !*ap_tag() && !getenv("CAPAGENT_NO_BRIDGE") &&
         !real_phy_shared(e->port >> 8, c->nradios))
         fprintf(f, "bridge=%s\n", bridge);
 
@@ -388,6 +682,370 @@ static void vap_phy_dump_rows(int phy, int n, int master)
     fflush(stdout);
 }
 
+/* ---- one hostapd process per VAP ------------------------------------- */
+
+/* The address the manager assigned to this VAP (0x08), not the driver-derived
+ * one: the manager drops frames whose addr1/addr3 differs, and the PTK is
+ * derived over this BSSID. */
+static void vap_pervap_addr(const struct own_entry *e, uint8_t out[6])
+{
+    struct vap *vp = vap_get(e->port >> 8, e->port & 0xff);
+    memcpy(out, e->bssid, 6);
+    if (vp && (vp->mgr_bssid[0] | vp->mgr_bssid[1] | vp->mgr_bssid[2] |
+               vp->mgr_bssid[3] | vp->mgr_bssid[4] | vp->mgr_bssid[5]))
+        memcpy(out, vp->mgr_bssid, 6);
+}
+
+/* Create (or adopt) the netdev and give it the manager's BSSID, down, before
+ * hostapd attaches.  hostapd uses an existing interface for its primary BSS
+ * (use_existing is unconditional for the first BSS even without patch
+ * 9999c), so the mt76x02 BSS index is the one the manager's MAC selected at
+ * NEW_INTERFACE time instead of one hostapd derives later. */
+static int vap_pervap_prepare(int phy, struct own_entry *e)
+{
+    uint8_t want[6], cur[6];
+    int idx;
+
+    vap_pervap_addr(e, want);
+    idx = if_nametoindex(e->ifname);
+    if (idx <= 0)
+        idx = vap_netdev_create(phy, e->ifname, want);
+    if (idx <= 0) return 0;
+    if (read_sysfs_mac(e->ifname, cur) != 0 || memcmp(cur, want, 6) != 0) {
+        set_if_flags(e->ifname, 0);
+        if (set_if_mac(e->ifname, want) != 0)
+            printf("vap: %s: cannot set BSSID %02x:%02x:%02x:%02x:%02x:%02x\n",
+                   e->ifname, want[0], want[1], want[2], want[3], want[4],
+                   want[5]);
+    }
+    set_if_flags(e->ifname, 0);
+    memcpy(e->bssid, want, 6);
+    e->ifindex = idx;
+    e->handed_over = 0;
+    g_own_dirty = 1;
+    return idx;
+}
+
+static pid_t vap_pervap_fork(const char *conf, const char *pidf,
+                             const char *logf)
+{
+    pid_t pid = fork();
+    if (pid != 0) return pid;
+    int fd = open(logf, O_CREAT | O_WRONLY | O_TRUNC, 0600);
+    if (fd >= 0) { dup2(fd, 1); dup2(fd, 2); close(fd); }
+    if (getenv("CAPAGENT_HOSTAPD_DEBUG"))
+        execl(hostapd_exe_path(), "hostapd", "-dd", "-P", pidf, conf,
+              (char *)NULL);
+    else
+        execl(hostapd_exe_path(), "hostapd", "-P", pidf, conf, (char *)NULL);
+    _exit(127);
+}
+
+static const char *vap_pervap_spacing_env(void)
+{
+    const char *s = getenv("CAPAGENT_PER_VAP_SPACING_MS");
+    return (s && *s) ? s : "4000";
+}
+
+/* Fingerprint of the channel context (0x0a element + effective freq).  Every
+ * per-VAP process on a phy must follow the master's channel; when the
+ * manager changes width/band/channel there, all of them must restart even
+ * though only the master's start body changed. */
+static uint32_t vap_chan_ctx_hash(const struct own_entry *chan)
+{
+    const uint8_t *chv = NULL;
+    uint16_t cl = 0;
+    uint32_t h = 2166136261u, f = vap_chan_freq(chan);
+    if (find_el(chan->start, chan->start_len, 0x0a, &chv, &cl))
+        for (uint16_t i = 0; i < cl; i++) {
+            h ^= chv[i];
+            h *= 16777619u;
+        }
+    for (int i = 0; i < 4; i++) {
+        h ^= (f >> (8 * i)) & 0xff;
+        h *= 16777619u;
+    }
+    return h ? h : 1u;
+}
+
+/* applied_cfg_hash stores the row's own config hash folded with the master
+ * channel context, so a width/band change on the master restarts siblings. */
+static uint32_t vap_pervap_cfg_hash(const struct own_entry *e,
+                                    const struct own_entry *chan)
+{
+    uint32_t h = own_cfg_hash(e->start, e->start_len);
+    uint32_t c = vap_chan_ctx_hash(chan);
+    h ^= c;
+    h *= 16777619u;
+    return h ? h : 1u;
+}
+
+static int vap_pervap_in_rows(const char *name, struct own_entry **rows, int n)
+{
+    for (int i = 0; i < n; i++)
+        if (!strcmp(rows[i]->ifname, name)) return 1;
+    return 0;
+}
+
+/* Stop per-VAP daemons of this phy that are not part of the current row set:
+ * a renumbered manager slot or a profile that moved to a new ifname leaves a
+ * hostapd on the old vif, and it keeps the radio/vif slot busy ("Could not
+ * configure driver mode" for the replacement). */
+static void vap_pervap_prune_phy(int phy, struct own_entry **rows, int n)
+{
+    char dirp[128];
+
+    for (int i = 0; i < OWN_MAX; i++) {
+        struct own_entry *e = &g_own[i];
+        if (!e->used || !e->ifname[0] || (e->port >> 8) != phy) continue;
+        if (vap_pervap_in_rows(e->ifname, rows, n)) continue;
+        vap_pervap_stop_ifname(e->ifname);
+    }
+    snprintf(dirp, sizeof(dirp), "/sys/class/ieee80211/phy%d/device/net",
+             real_phy(phy));
+    DIR *d = opendir(dirp);
+    if (d) {
+        struct dirent *de;
+        while ((de = readdir(d))) {
+            if (de->d_name[0] == '.') continue;
+            if (!vap_phy_name_of(de->d_name, phy)) continue;
+            if (vap_pervap_in_rows(de->d_name, rows, n)) continue;
+            vap_pervap_stop_ifname(de->d_name);
+        }
+        closedir(d);
+    }
+    d = opendir("/var/run");
+    if (d) {
+        struct dirent *de;
+        while ((de = readdir(d))) {
+            size_t l = strlen(de->d_name);
+            char nm[OWN_NAME_MAX];
+            if (l < 9 || strncmp(de->d_name, "vap-", 4) ||
+                strcmp(de->d_name + l - 4, ".pid"))
+                continue;
+            if (l - 8 >= sizeof(nm)) continue;
+            memcpy(nm, de->d_name + 4, l - 8);
+            nm[l - 8] = 0;
+            if (!vap_phy_name_of(nm, phy)) continue;
+            if (vap_pervap_in_rows(nm, rows, n)) continue;
+            vap_pervap_stop_ifname(nm);
+        }
+        closedir(d);
+    }
+}
+
+static int vap_phy_apply_per_vap(int phy, const struct cfg *c)
+{
+    struct own_entry *rows[OWN_MAX];
+    struct own_entry *chan;
+    int n = 0, master = -1, ok = 0, failed = 0, anylive = 0;
+    int rp = real_phy(phy);
+    static uint64_t last_start_ms[16];
+
+    for (int i = 0; i < OWN_MAX; i++) {
+        struct own_entry *e = &g_own[i];
+        if (!vap_phy_row_cfg(e, phy)) continue;
+        rows[n++] = e;
+        if (master < 0 || (e->port & 0xff) < (g_own[master].port & 0xff))
+            master = i;
+        if (vap_pervap_pid(e->ifname) > 0) anylive = 1;
+    }
+    if (!n || master < 0) return -1;
+    /* The master row is the radio's channel context for every process:
+     * its 0x6016 0x0a descriptor is the real freq/width; a sibling's 0x500b
+     * frequency can be a placeholder (2412 for a 6 GHz profile). */
+    chan = &g_own[master];
+
+    own_reap_children();
+    /* Remove daemons that are not part of the current row set.  Leftover
+     * netdevs can only be dropped when nothing is alive; deleting a vif
+     * under a live hostapd kills the whole radio. */
+    vap_pervap_prune_phy(phy, rows, n);
+    if (!anylive)
+        vap_phy_stop(phy);          /* also clears a shared-mode daemon */
+    vap_phy_drop_leftovers(phy);
+
+    /* Keep healthy daemons, stop only a row whose configuration or whose
+     * master channel context changed. */
+    int keep[OWN_MAX] = {0};
+    for (int k = 0; k < n; k++) {
+        struct own_entry *e = rows[k];
+        pid_t live = vap_pervap_pid(e->ifname);
+        if (live <= 0) continue;
+        if (e->applied_len == e->start_len &&
+            e->applied_hash == own_body_hash(e->start, e->start_len) &&
+            e->applied_cfg_hash == vap_pervap_cfg_hash(e, chan)) {
+            keep[k] = 1;
+            e->pid = (int)live;
+            e->ifindex = if_nametoindex(e->ifname);
+            if (e->ifindex > 0) {
+                own_mirror(e);
+                cap_vap_refresh(phy, e->port & 0xff, e->ifindex, e->ifname,
+                                e->bssid, c);
+            }
+            continue;
+        }
+        printf("vap: phy%d: %s profile changed, restarting its hostapd\n",
+               phy, e->ifname);
+        fflush(stdout);
+        vap_pervap_stop_ifname(e->ifname);
+    }
+
+    long spacing = strtol(vap_pervap_spacing_env(), NULL, 10);
+    if (spacing < 0) spacing = 0;
+    if (spacing > 60000) spacing = 60000;
+    int r0 = (rp >= 0 && rp < 16) ? rp : 0;
+
+    int picked[OWN_MAX] = {0};
+    for (int done = 0; done < n; done++) {
+        int pick = -1;
+        for (int k = 0; k < n; k++) {
+            if (picked[k]) continue;
+            if (pick < 0 ||
+                (rows[k]->port & 0xff) < (rows[pick]->port & 0xff))
+                pick = k;
+        }
+        if (pick < 0) break;
+        picked[pick] = 1;
+        struct own_entry *e = rows[pick];
+        if (keep[pick]) {
+            ok++;
+            continue;
+        }
+        if (last_start_ms[r0]) {
+            uint64_t now = own_now_ms();
+            if (now < last_start_ms[r0] + (uint64_t)spacing) {
+                uint64_t wait = last_start_ms[r0] + (uint64_t)spacing - now;
+                printf("vap: phy%d: per-VAP spacing %llums before %s\n", phy,
+                       (unsigned long long)wait, e->ifname);
+                fflush(stdout);
+                usleep((useconds_t)wait * 1000);
+            }
+        }
+        if (vap_pervap_prepare(phy, e) <= 0) {
+            printf("vap: phy%d: %s could not be prepared\n", phy, e->ifname);
+            fflush(stdout);
+            failed++;
+            continue;
+        }
+        char conf[128], pidf[128], logf[128];
+        vap_paths(e->ifname, conf, sizeof(conf), pidf, sizeof(pidf));
+        snprintf(logf, sizeof(logf), "/tmp/vap-%s.log", e->ifname);
+        FILE *f = fopen(conf, "w");
+        if (!f) { failed++; continue; }
+        vap_phy_logger(f);
+        vap_phy_bss(f, "interface", e, c, 1, 1, chan);
+        fclose(f);
+        unlink(pidf);
+        last_start_ms[r0] = own_now_ms();
+        pid_t pid = vap_pervap_fork(conf, pidf, logf);
+        if (pid < 0) { failed++; continue; }
+        int st = 0, reaped = 0;
+        for (int i = 0; i < 40; i++) {
+            pid_t r = waitpid(pid, &st, WNOHANG);
+            if (r == pid) { reaped = 1; break; }
+            if (r < 0) break;
+            usleep(100000);
+        }
+        if (reaped && (!WIFEXITED(st) || WEXITSTATUS(st) != 0)) {
+            printf("vap: phy%d: %s hostapd failed to start (status=%d), see "
+                   "%s\n", phy, e->ifname,
+                   WIFEXITED(st) ? WEXITSTATUS(st) : -1, logf);
+            fflush(stdout);
+            failed++;
+            continue;
+        }
+        int ready = vap_wait_ap_enabled(logf, 15000);
+        pid_t hp = vap_pervap_pid(e->ifname);
+        if (hp <= 0) {
+            int wst = 0;
+            if (waitpid(pid, &wst, WNOHANG) == 0) hp = pid;
+        }
+        if (ready <= 0) {
+            printf("vap: phy%d: %s hostapd not ready (%d), see %s\n", phy,
+                   e->ifname, ready, logf);
+            fflush(stdout);
+            if (hp > 0) own_stop_pid((int)hp);
+            else if (pid > 0) own_stop_pid((int)pid);
+            e->applied_len = 0;
+            failed++;
+            continue;
+        }
+        FILE *pf = fopen(pidf, "w");
+        if (pf) { fprintf(pf, "%d\n", (int)hp); fclose(pf); }
+        e->pid = (int)hp;
+        e->fail_count = 0;
+        e->retry_at = 0;
+        e->start_given_up = 0;
+        e->ifindex = if_nametoindex(e->ifname);
+        e->applied_len = e->start_len;
+        e->applied_hash = own_body_hash(e->start, e->start_len);
+        e->applied_cfg_hash = vap_pervap_cfg_hash(e, chan);
+        if (e->ifindex > 0) own_mirror(e);
+        cap_vap_refresh(phy, e->port & 0xff, e->ifindex, e->ifname, e->bssid,
+                        c);
+        ok++;
+        printf("vap: phy%d: %s AP-ENABLED pid=%d\n", phy, e->ifname, (int)hp);
+        fflush(stdout);
+    }
+
+    /* The manager's tx power is a radio setting; apply it once, through any
+     * live BSS of the phy. */
+    if (phy >= 0 && phy < MAX_RADIOS) {
+        int dbm = g_phy_txpower[phy];
+        if (dbm > 40) dbm = 0;
+        for (int k = 0; k < n; k++) {
+            if (rows[k]->pid > 0 && rows[k]->ifindex > 0) {
+                int tr = nl_set_txpower(rows[k]->ifindex, dbm);
+                if (dbm > 0)
+                    printf("vap: phy%d tx-power %d dBm (nl80211 ret=%d)\n",
+                           phy, dbm, tr);
+                break;
+            }
+        }
+    }
+    /* bridge= was deliberately omitted from every single-BSS config: a
+     * bridged AP vif is EBUSY when a sibling AP is already up on mt76x2e.
+     * Join the VLAN bridge only after the BSS is AP-ENABLED, and only when
+     * the kernel does not already report it as a port of that bridge (the
+     * 1 Hz reconcile calls this path repeatedly; an unconditional SETLINK
+     * printed an error every tick on an already-enslaved vif). */
+    for (int k = 0; k < n; k++) {
+        struct own_entry *e = rows[k];
+        char bridge[32] = "", mp[96], lnk[128];
+        if (!e->vlan || e->applied_len != e->start_len) continue;
+        /* Same bridge name the shared writer would use (vap_bridge_if_present
+         * honours a pre-existing br-vlanN/bond). */
+        vap_bridge_if_present(e->ifname, e->vlan, bridge, sizeof(bridge));
+        if (!bridge[0]) continue;
+        int bidx = if_nametoindex(bridge);
+        int idx = if_nametoindex(e->ifname);
+        if (bidx <= 0 || idx <= 0) continue;
+        snprintf(mp, sizeof(mp), "/sys/class/net/%s/master", e->ifname);
+        ssize_t ln = readlink(mp, lnk, sizeof(lnk) - 1);
+        if (ln > 0) {
+            const char *bn;
+            lnk[ln] = 0;
+            bn = strrchr(lnk, '/');
+            bn = bn ? bn + 1 : lnk;
+            if (!strcmp(bn, bridge)) continue;
+        }
+        int mr = vap_netdev_setmaster(idx, bidx);
+        printf("vap: phy%d %s -> %s (rc=%d)\n", phy, e->ifname, bridge, mr);
+        fflush(stdout);
+    }
+    g_own_dirty = 1;
+    own_save();
+    printf("vap: phy%d per-VAP hostapd: %d/%d up (%d failed)\n", phy, ok, n,
+           failed);
+    fflush(stdout);
+    if (failed) return -1;
+    return g_own[master].pid > 0 ? g_own[master].pid
+                                 : (ok ? (int)vap_pervap_pid(
+                                             g_own[master].ifname)
+                                       : -1);
+}
+
 /* (Re)start the single hostapd for this phy with every journaled VAP. */
 static int vap_phy_apply(int phy, const struct cfg *c)
 {
@@ -442,6 +1100,14 @@ static int vap_phy_apply(int phy, const struct cfg *c)
         vap_phy_dump_rows(phy, n, master);
     }
     if (!n || master < 0) return -1;
+
+    /* One hostapd per BSS on an mt76x02 5 GHz phy (or CAPAGENT_5G_PER_VAP=1):
+     * the shared `bss=` config cannot bring up its secondaries, while a
+     * one-BSS process per VAP is exactly the mode the 8-radio/solo runs
+     * proved.  Each row has its own config/pid/log and is started, kept and
+     * stopped independently. */
+    if (vap_pervap_wanted(phy))
+        return vap_phy_apply_per_vap(phy, c);
 
     /* Idempotent: a live hostapd that already carries exactly these rows must
      * not be restarted.  Every caller (reconcile, retry, auto-heal) used to
@@ -610,16 +1276,7 @@ static int vap_phy_apply(int phy, const struct cfg *c)
 
     FILE *f = fopen(conf, "w");
     if (!f) return -1;
-    /* Logger options are global: hostapd only honours them before the first
-     * interface=/bss= section.  Appended at the end they were parsed as
-     * per-BSS keys, so -dd stayed at INFO and every failure was invisible. */
-    if (getenv("CAPAGENT_HOSTAPD_DEBUG"))
-        /* stdout to a file is block-buffered, so a long-running hostapd
-         * leaves its last lines unwritten and every diagnostic read from
-         * /tmp/vap-phyN.log is truncated.  Syslog is flushed per message, so
-         * the debug build logs there too and `logread` is the real trace. */
-        fprintf(f, "logger_syslog=0\nlogger_syslog_level=1\n"
-                   "logger_stdout=-1\nlogger_stdout_level=0\n");
+    vap_phy_logger(f);
     int first = 1;
     for (int i = 0; i < OWN_MAX; i++) {
         struct own_entry *e = &g_own[i];
@@ -630,7 +1287,7 @@ static int vap_phy_apply(int phy, const struct cfg *c)
         if (vap_dbg_phy())
             printf("dbg-phy: phy%d write %s=%s\n", phy,
                    first ? "interface" : "bss", e->ifname);
-        vap_phy_bss(f, first ? "interface" : "bss", e, c, first);
+        vap_phy_bss(f, first ? "interface" : "bss", e, c, first, 0, NULL);
         first = 0;
     }
     fclose(f);

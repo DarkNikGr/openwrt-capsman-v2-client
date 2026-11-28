@@ -991,6 +991,13 @@ static void own_try_start(const struct cfg *c, struct own_entry *e)
     /* One hostapd per phy: this row is a bss= section of it, so the start
      * rebuilds the phy config with every journaled VAP. */
     pid = vap_phy_apply(e->port >> 8, c);
+    /* Per-VAP mode starts one daemon per BSS and returns the leader's pid;
+     * never journal the leader as this row's pid.  The exact per-ifname pid
+     * is available from the pid file /proc scan after apply. */
+    {
+        pid_t rp = vap_phy_pid_for_ifname(e->ifname);
+        if (rp > 0) pid = (int)rp;
+    }
     e->starting = 0;
     if (pid > 0) {
         e->pid = pid;
