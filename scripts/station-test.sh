@@ -96,6 +96,9 @@ say "$PHY moved into $NETNS as $IFNAME"
 $SUDO ip netns exec "$NETNS" ip link set lo up
 $SUDO ip netns exec "$NETNS" ip link set "$IFNAME" up
 
+# OWE has no passphrase; writing psk= makes wpa_supplicant reject the block.
+PSK_LINE="psk=\"$PSK\""
+[ "$KEY_MGMT" = OWE ] && PSK_LINE=""
 cat > "$CONF" <<EOF
 ctrl_interface=/tmp/$NETNS-ctrl
 country=GR
@@ -120,7 +123,7 @@ network={
 	ssid="$SSID"
 	${BSSID:+bssid=$BSSID}
 	${HIDDEN:+scan_ssid=1}
-	psk="$PSK"
+	${PSK_LINE}
 	key_mgmt=$KEY_MGMT
 	${SCAN_FREQ:+scan_freq=$SCAN_FREQ}
 	${MDID:+mobility_domain=$MDID}
